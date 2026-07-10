@@ -69,6 +69,33 @@ shopt -u nullglob dotglob
 rc=0; [ "${#leftovers[@]}" -eq 0 ] || rc=1
 assert "$rc" "keine .tmp-Waise"
 
+# ---------------------------------------------------------------------------
+echo "== shell_quote_for_cron (#4) =="
+# ---------------------------------------------------------------------------
+eval "$(extract_func shell_quote_for_cron "$INSTALL")"
+
+# Einfacher Pfad: direkt via /bin/sh nutzbar.
+simple="$WORK/plain"; mkdir -p "$simple"
+qs="$(shell_quote_for_cron "$simple")"
+got="$(sh -c "cd $qs && pwd")"
+rc=0; [ "$got" = "$simple" ] || rc=1
+assert "$rc" "einfacher Pfad: cd erreicht das Verzeichnis"
+
+# Boesartiger Pfad: Leerzeichen, Single-Quote UND Prozentzeichen.
+tricky="$WORK/My Pro'ject 50%"; mkdir -p "$tricky"
+qt="$(shell_quote_for_cron "$tricky")"
+
+# % muss als \% escaped sein (sonst macht cron daraus einen Zeilenumbruch).
+rc=0; case "$qt" in *'\%'*) : ;; *) rc=1 ;; esac
+assert "$rc" "% wird als \\% escaped"
+
+# cron-Verarbeitung nachbilden: \% -> % (ein unescaptes % waere ein Newline,
+# was unser Quoting gerade verhindert), dann das Kommandofeld an /bin/sh geben.
+cron_seen="${qt//\\%/%}"
+got="$(sh -c "cd $cron_seen && pwd")"
+rc=0; [ "$got" = "$tricky" ] || rc=1
+assert "$rc" "Space/Quote/%-Pfad: cron-Kommandofeld erreicht das Verzeichnis"
+
 echo ""
 echo "RESULT(test_install.sh): $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

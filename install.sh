@@ -128,6 +128,25 @@ except BaseException:
 PYEOF
 }
 
+# Quotet einen Pfad fuer die sichere Verwendung im Kommando-Feld eines
+# crontab-Eintrags. cron fuehrt das Kommando ueber /bin/sh aus und wandelt ein
+# UNescaptes '%' in einen Zeilenumbruch/stdin-Trenner um (man 5 crontab). Daher:
+# (1) den Pfad in Single-Quotes einschliessen und enthaltene ' als '\'' escapen,
+# (2) danach jedes '%' als '\%' escapen. Ein Pfad mit echtem Zeilenumbruch ist
+# in einer crontab-Zeile nicht darstellbar und wird abgelehnt.
+shell_quote_for_cron() {
+    local s="$1"
+    # error() bricht das Skript ab (exit) - ein Pfad mit Zeilenumbruch kommt
+    # hier also nicht weiter.
+    case "$s" in
+        *$'\n'*) error "Installationspfad enthaelt einen Zeilenumbruch - fuer einen Cron-Eintrag ungeeignet." ;;
+    esac
+    local q="'\\''"
+    s=${s//\'/$q}          # jedes ' -> '\''
+    s="'$s'"               # Ergebnis in Single-Quotes einschliessen
+    printf '%s' "${s//%/\\%}"   # unescaptes % wuerde cron zu Newline machen
+}
+
 # =============================================================================
 # 2. Grundwerkzeuge: python3, git/curl, unzip
 # =============================================================================
@@ -424,9 +443,12 @@ deactivate 2>/dev/null || true
 # 14. Cron-Job-Vorschlag (idempotent - keine Duplikate bei erneutem Lauf)
 # =============================================================================
 CRON_MARKER="# midea-ieco-managed"
-CRON_LINE_IECO="*/20 * * * * cd $INSTALL_DIR && venv/bin/python3 midea_ieco_ensure.py all --only-if-on >> $INSTALL_DIR/ieco.log 2>&1 $CRON_MARKER"
-CRON_LINE_REFRESH="0 3 * * 0 cd $INSTALL_DIR && venv/bin/python3 midea_refresh_tokens.py --all >> $INSTALL_DIR/refresh.log 2>&1 $CRON_MARKER"
-CRON_LINE_LOGROTATE="0 0 1 * * truncate -s 0 $INSTALL_DIR/ieco.log $CRON_MARKER"
+# Pfad cron-sicher quoten (Leerzeichen/Sonderzeichen/%); dieselbe gequotete
+# Form speist sowohl die Anzeige als auch den crontab-Eintrag.
+IDQ="$(shell_quote_for_cron "$INSTALL_DIR")"
+CRON_LINE_IECO="*/20 * * * * cd $IDQ && venv/bin/python3 midea_ieco_ensure.py all --only-if-on >> $IDQ/ieco.log 2>&1 $CRON_MARKER"
+CRON_LINE_REFRESH="0 3 * * 0 cd $IDQ && venv/bin/python3 midea_refresh_tokens.py --all >> $IDQ/refresh.log 2>&1 $CRON_MARKER"
+CRON_LINE_LOGROTATE="0 0 1 * * truncate -s 0 $IDQ/ieco.log $CRON_MARKER"
 
 echo ""
 echo -e "${YELLOW}--- Optionaler Cron-Job ---${NC}"
