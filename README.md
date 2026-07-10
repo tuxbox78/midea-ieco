@@ -1,58 +1,138 @@
 # midea-ieco
 
-> 🇩🇪 **Deutsch:** For the complete German documentation, see [README_german.md](README_german.md).
+> 🇩🇪 **Deutsch:** Die vollständige deutsche Anleitung findest du hier: [README_german.md](README_german.md)
 
-Small, reliable command-line tools for locally controlling the **iECO mode** and power/status of Midea air conditioners. This includes the Midea PortaSplit and potentially compatible models from Comfee, Toshiba, Carrier, Klimaire, and other Midea-based brands.
+Small, reliable command-line tools for local control of the **iECO mode** (and general power/status) of Midea air conditioners, including the Midea PortaSplit and compatible models from Comfee, Toshiba, Carrier, Klimaire, and others. They avoid relying on an unstable cloud connection during normal operation.
 
-The normal control path is local LAN communication; a Midea Cloud login is required only to obtain or refresh the device token/key credentials. No Home Assistant is required.
+`msmart-ng` can control iECO directly over the local network. Midea Cloud credentials are only required once to obtain valid device credentials, and again to refresh them when necessary.
 
-## Quick start
+## Why this project exists
 
-Your air conditioner must already be set up in the **MSmartHome / Smarthome app** and connected to Wi-Fi. Have the **email address (or user name) and password of that Midea app account** ready. They are needed by `midea_refresh_tokens.py` to obtain local device credentials; they are **not** your Wi-Fi credentials.
+### ECO vs. iECO — two different, easily confused modes
 
-> **Security first:** Your Midea account password, device token, and device key are secrets. Do not commit them to GitHub and do not publish them in issues, log files, screenshots, or forum posts.
+Midea air conditioners like the PortaSplit have **two separate energy-saving modes** that are frequently mixed up, including in some earlier drafts of this document. It is important to distinguish them correctly:
 
-### 1. Download the project
+| | **ECO** (button/remote) | **iECO** (app/cloud only) |
+|---|---|---|
+| Activation | Physical button on the unit or remote control | Only through the MSmartHome / 美的美居 app |
+| Target temperature | **Fixed automatically at 24 °C**, fan set to Auto | **Whatever target temperature the user has set** (e.g. 21 °C, 25 °C, etc.) — not fixed |
+| Mechanism | Simple fixed setpoint | Cloud-connected, adaptive algorithm that fine-tunes compressor output around the user's chosen setpoint |
+| Auto-shutoff | Can auto power off after a period of inactivity at setpoint | Automatically exits after eight hours and reverts to regular Auto mode |
+| Availability | Available offline, works with the IR remote | Requires the unit to stay connected to Wi-Fi/cloud while active |
 
-**With Git (recommended):**
+In short: **iECO does not force 24 °C.** It works at any temperature you have configured on the unit; it simply makes the compressor regulate more gently and efficiently around that setpoint instead of running at full unrestricted power. This project is specifically about **iECO**, not the simpler button-activated ECO mode.
+
+### What iECO does
+
+Midea advertises iECO as saving up to 60% compared with standard operation, with up to eight hours of operation using only 1.2 kWh at typical settings ([Midea Corporate](https://www.midea.com/th-en/news/energy-saving-air-conditioner)). A German ten-hour practical test using the PortaSplit measured about 100 W lower consumption in iECO than in Auto mode while maintaining a comfortable room temperature of 24.5–25.7 °C ([4-Happy-Home on YouTube](https://www.youtube.com/watch?v=ia4gUxGh5ms)). Community reports confirm that iECO can be run successfully at other target temperatures as well, such as 21 °C, with correspondingly adjusted (not fixed) energy use.
+
+Measurements made for this project found approximately 4 kWh **per day** of additional consumption during continuous operation at a given setpoint when iECO was not active, with no apparent comfort or cooling advantage from running without it.
+
+### The problem: iECO disappears after manual use
+
+iECO automatically exits after eight hours and returns to regular Auto mode. More importantly, iECO can currently be enabled **only through the MSmartHome / 美的美居 app**; there is no physical iECO button on the remote control (that button only controls the simpler, fixed-24°C ECO mode described above).
+
+If the air conditioner is subsequently switched off and on manually—at the unit or with the remote—iECO remains off. This is easy to miss because the unit otherwise appears to work normally, still respecting whatever target temperature was last set. Instead of remembering to open the app and re-enable iECO after every manual power cycle, this project automates that task reliably in the background.
+
+### Why not just use the Midea app?
+
+The app does not provide conditional logic such as "enable iECO only if the unit is already on," nor does it offer a public, documented API for third-party automation such as cron jobs or Siri. The libraries used here (`msmart-ng` and `midea-local`) communicate with the device on the local network, giving you control over when iECO is set without a cloud dependency during routine use.
+
+## Included files
+
+| File | Purpose |
+|---|---|
+| `install.sh` | One-shot installer: sets up venv, dependencies, devices.json, tokens, and cron job |
+| `midea_ieco_ensure.py` | Checks and sets power status and iECO for one or all configured devices |
+| `midea_refresh_tokens.py` | Retrieves fresh token/key pairs from Midea Cloud and updates `devices.json` |
+| `devices.json` | Central configuration: name, IP address, port, device ID, token, and key per device |
+
+## Requirements
+
+- Python 3.10 or later
+- A Midea Cloud account (**MSmartHome** or **美的美居**) in which the devices are already registered and working
+- The controlling computer must be on the same local network as the air conditioners (port 6444/TCP reachable — no client isolation or VLAN separation)
+
+## Quick install (one-liner)
+
+The fastest way to get started is the automated installer. It works on Debian/Ubuntu/Raspberry Pi OS, Fedora/RHEL, Arch Linux, Alpine, openSUSE, and macOS (with Homebrew):
 
 ```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/tuxbox78/midea-ieco/main/install.sh)"
+```
+
+By default, the installer places all program files in `/opt/local/midea-ieco` and a small wrapper command called `midea-ieco` in `/opt/local/bin`. Both locations are configurable — either by editing the `DEFAULT_INSTALL_DIR` / `DEFAULT_BIN_DIR` variables at the top of `install.sh` (useful if you downloaded the script manually), or via environment variables without editing anything:
+
+```bash
+MIDEA_IECO_DIR=/your/custom/path MIDEA_IECO_BIN_DIR=/your/custom/bin \
+  bash -c "$(curl -fsSL https://raw.githubusercontent.com/tuxbox78/midea-ieco/main/install.sh)"
+```
+
+If `/opt/local` isn't writable by your user, the installer will use `sudo` once to create it and hand ownership back to you, so no further `sudo` calls are needed afterwards.
+
+> **Before you begin:** Have your **MSmartHome (or 美的美居) username and password** ready — the same credentials used in the official Midea app. They are requested once during installation to fetch device tokens.
+
+> **Recommended but not required:** Assign fixed IP addresses (DHCP reservation by MAC address) to your air conditioners in your router before running the installer. This prevents the IP from changing after a device or router restart. If you skip this step, or the IP changes later, you can always edit it afterwards directly in `devices.json` — no reinstall needed.
+
+The installer will:
+
+1. Detect your OS and package manager, and install missing prerequisites (`python3`, `python3-venv`, `git`/`curl`)
+2. Create a Python virtual environment and install `msmart-ng` and `midea-local`
+3. Ask for your Midea Cloud credentials and run device discovery
+4. Let you enter device names, IPs, and IDs interactively to build `devices.json`
+5. Retrieve token/key pairs and store them securely (`chmod 600`)
+6. Create a `midea-ieco` wrapper command and offer an optional test run and cron job setup
+
+### Manual installation (alternative)
+
+If you prefer to install everything yourself instead of using `install.sh`:
+
+```bash
+# 1. Clone or download the repository
 git clone https://github.com/tuxbox78/midea-ieco.git
 cd midea-ieco
-```
 
-**Without Git:** On the GitHub project page, choose **Code → Download ZIP**, extract the archive, then open a terminal in the extracted `midea-ieco` directory. A GitHub Release is not required for this: GitHub automatically provides a ZIP of the current source tree.
-
-### 2. Create the Python environment
-
-On Debian/Ubuntu, install virtual-environment support once:
-
-```bash
-sudo apt update
-sudo apt install -y python3-venv
-```
-
-Then, from the project directory:
-
-```bash
+# 2. Create a Python virtual environment and install dependencies
+# (required on Debian/Ubuntu/Raspberry Pi OS – do NOT use pip directly as root)
+sudo apt-get install -y python3-venv   # only needed once if python3-venv is missing
 python3 -m venv venv
-venv/bin/python3 -m pip install --upgrade pip
-venv/bin/python3 -m pip install msmart-ng midea-local
+source venv/bin/activate
+pip install msmart-ng midea-local
+
+# 3. Discover your devices and note their IDs and IP addresses
+python3 -m midealocal.cli discover --username "YOUR_SMARTHOME_EMAIL" --password "YOUR_SMARTHOME_PASSWORD"
+
+# 4. Assign fixed IP addresses to your air conditioners in your router
+#    (DHCP reservation by MAC address) so that the configuration stays stable.
+#    Not required — you can edit the IP later directly in devices.json.
+
+# 5. Create devices.json from the template (see "One-time setup" below)
+
+# 6. Store your credentials in midea_refresh_tokens.py, then restrict access:
+#    Edit DEFAULT_USERNAME and DEFAULT_PASSWORD at the top of the file.
+chmod 600 midea_refresh_tokens.py
+
+# 7. Retrieve token/key pairs for all devices
+python3 midea_refresh_tokens.py --all
+
+# 8. Test: enable iECO on one device (the unit must be reachable on the network)
+python3 midea_ieco_ensure.py LivingRoom
+
+# Make the Bash wrapper executable (used by cron and Shortcuts):
+chmod +x midea_ieco_ensure.sh
 ```
 
-> Do **not** use `sudo pip install` or `--break-system-packages`. A virtual environment keeps this project separate from the Python packages managed by Debian.
+## One-time setup (manual path details)
 
-### 3. Configure your device list
+### 1. Find device IDs and IP addresses
 
-Open `devices.json`. For a new installation, it may simply contain an empty list:
-
-```json
-{
-  "devices": []
-}
+```bash
+python3 -m midealocal.cli discover --username "YOUR_ACCOUNT" --password "YOUR_PASSWORD"
 ```
 
-Alternatively, create an entry yourself; only the name and current LAN IP address are needed initially:
+Record the device ID (`id`) and IP address for every device.
+
+### 2. Create `devices.json`
 
 ```json
 {
@@ -61,7 +141,15 @@ Alternatively, create an entry yourself; only the name and current LAN IP addres
       "name": "LivingRoom",
       "ip": "192.168.0.186",
       "port": 6444,
-      "id": "",
+      "id": 153931629346858,
+      "token": "",
+      "key": ""
+    },
+    {
+      "name": "Bedroom",
+      "ip": "192.168.0.185",
+      "port": 6444,
+      "id": 152832117825892,
       "token": "",
       "key": ""
     }
@@ -69,173 +157,163 @@ Alternatively, create an entry yourself; only the name and current LAN IP addres
 }
 ```
 
-Create a DHCP reservation in your router for every air conditioner so its IP address remains stable.
+The token and key may initially be empty; `midea_refresh_tokens.py` retrieves them in the next step.
 
-### 4. Add your Midea app credentials
+### 3. Store credentials in `midea_refresh_tokens.py`
 
-Open `midea_refresh_tokens.py` and replace these placeholders near the top of the file:
+At the top of the file, set:
 
 ```python
-DEFAULT_USERNAME = "USERNAME_EMAIL_SMARTHOMEAPP"
-DEFAULT_PASSWORD = "PASSWORD_SMARTHOMEAPP"
+DEFAULT_USERNAME = "your@account.example"
+DEFAULT_PASSWORD = "yourPassword"
 ```
 
-with the credentials of the account used in the MSmartHome / Midea Smarthome app. Then restrict access to the two files:
+Restrict access afterwards because this file contains your cloud password in plain text:
 
 ```bash
-chmod 600 devices.json midea_refresh_tokens.py
+chmod 600 midea_refresh_tokens.py
 ```
 
-The script also accepts `--username` and `--password` command-line options. Storing the password in the protected local file is generally preferable, because a password passed on a command line can be visible temporarily to other local processes/users.
-
-### 5. Obtain local device credentials
-
-**To add the first device** (the script adds the entry and obtains its ID, token, and key):
+### 4. Retrieve token/key pairs
 
 ```bash
-venv/bin/python3 midea_refresh_tokens.py \
-  --name LivingRoom \
-  --host 192.168.0.186
+python3 midea_refresh_tokens.py --all
 ```
 
-**To refresh every device already listed in `devices.json`:**
+The script runs `python3 -m midealocal.cli discover --debug`, extracts the token and key from its output using a regular expression, and writes them back to `devices.json`. It also applies `chmod 600` to the configuration file automatically.
+
+> **Why `midea-local` rather than `msmart-ng discover`?** `midea-local` authenticates with your own Midea account and therefore obtains device credentials associated with that account. `msmart-ng discover --auto` can use an internal helper account and may return credentials that change on every call or expire quickly, making them unsuitable for unattended use.
+
+You can also add a new device directly by name and IP address:
 
 ```bash
-venv/bin/python3 midea_refresh_tokens.py --all
+python3 midea_refresh_tokens.py --name Kitchen --host 192.168.0.190
 ```
-
-The script calls `midealocal.cli discover --debug`, extracts the local token/key pair, and writes the result to `devices.json`.
-
-### 6. Test local control
-
-```bash
-venv/bin/python3 midea_ieco_ensure.py LivingRoom
-```
-
-For every configured device:
-
-```bash
-venv/bin/python3 midea_ieco_ensure.py all
-```
-
-If the command reports a timeout or token/key error, refresh the credentials first and repeat the test. Do not share the resulting `devices.json` file.
-
-## Why this project exists
-
-### What iECO does
-
-Midea advertises iECO as saving up to 60% compared with standard operation and as providing up to eight hours of operation using 1.2 kWh ([Midea Corporate](https://www.midea.com/th-en/news/energy-saving-air-conditioner)). A German ten-hour practical test of the PortaSplit measured approximately 100 W less power consumption in iECO than in Auto mode while maintaining a comfortable 24.5–25.7 °C room temperature ([4-Happy-Home on YouTube](https://www.youtube.com/watch?v=ia4gUxGh5ms)).
-
-In normal use, iECO fixes the target temperature at 24 °C and fan speed to automatic; the unit then regulates compressor output more gently than in unrestricted Auto/Cool operation. Measurements made for this project found roughly 4 kWh **per day** additional consumption during continuous operation when iECO was inactive, without an apparent comfort or cooling advantage.
-
-### The problem: iECO can be lost
-
-iECO exits automatically after eight hours and returns to regular Auto mode. On the PortaSplit, iECO is activated in the MSmartHome / 美的美居 app rather than with a dedicated physical remote-control button. When the unit is later switched off and on manually, iECO may no longer be active. This project is designed to check and restore it instead of requiring a manual app visit after each power cycle.
-
-### Why not use the app alone?
-
-The app does not offer conditional automation such as “enable iECO only when the unit is already on,” nor a public documented API intended for cron jobs or Siri. This project uses `msmart-ng` and `midea-local` to communicate with the device locally and control when iECO is set.
-
-## Included files
-
-| File | Purpose |
-|---|---|
-| `midea_ieco_ensure.py` | Checks/sets power state and iECO for one or all configured devices |
-| `midea_refresh_tokens.py` | Obtains fresh cloud-derived token/key pairs and updates `devices.json` |
-| `devices.json` | Local configuration: name, IP, port, device ID, token, and key |
 
 ## Daily use
 
-### Ensure iECO (power on if required)
+### Ensure iECO is enabled (powers on if necessary)
 
 ```bash
-venv/bin/python3 midea_ieco_ensure.py LivingRoom
-venv/bin/python3 midea_ieco_ensure.py all
+python3 midea_ieco_ensure.py LivingRoom
+python3 midea_ieco_ensure.py all
 ```
 
-### Only restore iECO on running units
+This does **not** change your target temperature. It only ensures iECO is active at whatever temperature the unit is already set to.
 
-For unattended automation, use `--only-if-on`:
+### Only re-enable iECO when the unit is already on
+
+This is recommended for cron:
 
 ```bash
-venv/bin/python3 midea_ieco_ensure.py all --only-if-on
+python3 midea_ieco_ensure.py all --only-if-on
 ```
 
-This mode does not turn on an intentionally powered-off air conditioner. It skips it; for a running unit, it restores iECO if necessary.
+With `--only-if-on`, the script never turns on a unit. A unit that is off is left untouched; iECO is enabled when a unit is on and needs it. This makes frequent cron runs safe without starting an air conditioner that was intentionally switched off.
 
-### Refresh credentials
+### Refresh token/key values
+
+If a device reports `Connection reset`, a timeout, or a credential problem:
 
 ```bash
-venv/bin/python3 midea_refresh_tokens.py --name LivingRoom
-venv/bin/python3 midea_refresh_tokens.py --all
+python3 midea_refresh_tokens.py --name LivingRoom
+python3 midea_refresh_tokens.py --all
 ```
 
-Refresh when the script reports an authentication/credential problem, after a significant Midea app/account change, or after reconnecting a device.
-
-> **Why use `midea_refresh_tokens.py` rather than `msmart-ng discover --auto`?** Auto-discovery can use temporary credentials that change between runs. The refresh script uses your own Midea account through `midea-local` and saves the resulting device credentials in your protected local configuration.
+In practice, credentials often remain valid for a long time. Refresh them when an app session changes fundamentally (e.g. after changing your Midea account password) or when a device is reconnected to the network.
 
 ## Cron automation
 
-Edit your crontab with `crontab -e`:
+If you didn't use `install.sh`'s automatic cron setup, edit your crontab with `crontab -e`:
 
 ```cron
-# Every 20 minutes: restore iECO without powering on units
-*/20 * * * * cd /home/USER/midea-ieco && venv/bin/python3 midea_ieco_ensure.py all --only-if-on >> ieco.log 2>&1
+# Every 20 minutes: re-enable iECO without turning units on
+*/20 * * * * cd /opt/local/midea-ieco && venv/bin/python3 midea_ieco_ensure.py all --only-if-on >> ieco.log 2>&1
 
 # Every Sunday at 03:00: refresh credentials as a precaution
-0 3 * * 0 cd /home/USER/midea-ieco && venv/bin/python3 midea_refresh_tokens.py --all >> refresh.log 2>&1
+0 3 * * 0 cd /opt/local/midea-ieco && venv/bin/python3 midea_refresh_tokens.py --all >> refresh.log 2>&1
 ```
 
-Rotate or truncate logs, for example:
+Remember log rotation, for example with `logrotate` or simply:
 
 ```cron
-0 0 1 * * truncate -s 0 /home/USER/midea-ieco/ieco.log
+0 0 1 * * truncate -s 0 /opt/local/midea-ieco/ieco.log
 ```
 
 ## Siri and iOS Shortcuts
 
-The simplest solution without an additional web service is Shortcuts’ **Run Script over SSH** action.
+The simplest solution without additional server software is the native iOS Shortcuts action **Run Script over SSH**.
 
-1. Ensure the Linux host runs OpenSSH and is reachable on the LAN or through a VPN.
-2. Prefer a dedicated SSH key for the iPhone over password authentication.
-3. Create a Shortcut, add **Run Script over SSH**, then configure host, user, and key.
-4. Use, for example:
+### Linux host requirements
+
+- An OpenSSH server running and reachable on the local network or through a VPN
+- A dedicated SSH key for the iPhone (recommended instead of password authentication)
+
+### Setup
+
+1. In Shortcuts on the iPhone, create a new shortcut and add **Run Script over SSH**.
+2. Enter the host, username, and authentication method (SSH key recommended).
+3. Use a command such as:
 
    ```bash
-   cd /home/USER/midea-ieco && venv/bin/python3 midea_ieco_ensure.py LivingRoom
+   /opt/local/bin/midea-ieco LivingRoom
    ```
 
-5. Give the shortcut a clear name, such as **Living room iECO**, and invoke it through Siri.
+   or, without the wrapper:
 
-Using `venv/bin/python3` directly is more robust than relying on `source venv/bin/activate` in non-interactive SSH sessions. Use `all` instead of a device name for all units; append `--only-if-on` if Siri must never power on an off unit.
+   ```bash
+   cd /opt/local/midea-ieco && venv/bin/python3 midea_ieco_ensure.py LivingRoom
+   ```
 
-### HomeKit alternative
+4. Name the shortcut, for example **Living room iECO**.
+5. Call it with Siri, for example: *"Hey Siri, enable eco mode in the living room."*
 
-For native Apple Home switches, status display, scenes, and automations, Homebridge with `homebridge-cmd4` can map shell commands to accessories. It is more involved than SSH Shortcuts but provides full HomeKit integration.
+> **Tip for non-interactive SSH sessions:** Use `venv/bin/python3` directly rather than `source venv/bin/activate && python3`. It is more robust because non-interactive shells can handle `source` differently.
 
-## Troubleshooting notes
+For all devices, use `all` in place of the device name. Add `--only-if-on` if Siri must not turn on an intentionally powered-off unit.
 
-These are observations from developing this setup with `msmart-ng` in 2026, not a guarantee for future library versions.
+### Alternative: Homebridge and HomeKit
 
-| Symptom | Likely cause | Action |
+If you prefer regular switches, status display, scenes, and automations in Apple Home, use Homebridge with `homebridge-cmd4`. It can map arbitrary shell commands to on/off/status operations, such as `midea_ieco_ensure.py LivingRoom` for "on." This is more work than the SSH Shortcuts option but provides full HomeKit integration.
+
+## Network troubleshooting
+
+If you see `No response from host` for every request, the most likely causes are:
+
+- **Client isolation / AP isolation** active in your router for the WLAN the air conditioner is connected to — disable this for the relevant network segment
+- **VLAN separation** between IoT devices and computers — ensure your server and both air conditioners are on the same VLAN, or create a firewall rule permitting TCP port 6444
+- **IP address changed** — always assign fixed IP addresses (DHCP reservation by MAC address) in your router, or update `devices.json` manually if it changed
+- **Device is in WLAN power-saving mode / sleep** — verify the device is reachable with `ping 192.168.x.x` and `nc -zv 192.168.x.x 6444`
+- **Firewall on the server** blocking outgoing connections to port 6444 — check with `iptables -L` or `ufw status`
+
+## Development lessons learned
+
+This table documents specific observations made while developing this setup with `msmart-ng` in 2026. It is a reference rather than universal troubleshooting guidance: internal APIs can change between versions. When in doubt, inspect the version actually installed:
+
+```bash
+python3 -c "import inspect; from msmart.device.AC.device import AirConditioner as AC; print(inspect.signature(AC.__init__))"
+```
+
+| Symptom | Cause observed during development | Solution |
 |---|---|---|
-| `TypeError: device_selector() got an unexpected keyword argument` | `midea-local` API changed | Inspect the installed API: `python3 -c "import inspect; from midealocal.devices import device_selector; print(inspect.signature(device_selector))"` |
-| `Device is not capable of property IECO` | Capabilities were not loaded correctly | Use a fresh `AC` object and query capabilities before setting iECO |
-| `Failed to query capabilities` / timeout | Some devices do not answer the capability request while powered off | Follow the control script’s power-on/retry logic; check that device IP and credentials are current |
-| `[Errno 104] Connection reset by peer` after retries | A prior failure left a bad socket state | Retry with a new `AC` object; refresh credentials if the problem persists |
-| Token/key stops working | Credential invalidation or a preceding connection failure | Run `midea_refresh_tokens.py --name <device>` |
+| `TypeError: device_selector() got an unexpected keyword argument` | The `midea-local` API changed | Inspect the installed signature with `python3 -c "import inspect; from midealocal.devices import device_selector; print(inspect.signature(device_selector))"` |
+| `Device is not capable of property IECO` | Capabilities were not queried, or were queried with a damaged object | Query `get_capabilities()` before `refresh()`/`apply()` on a fresh `AC` object |
+| Capability query times out / `Failed to query capabilities` although credentials are correct | The device only answers `get_capabilities()` while powered on | Turn it on first (`power_state = True` plus `apply()`), then query capabilities; `midea_ieco_ensure.py` follows this order |
+| `[Errno 104] Connection reset by peer` after several attempts | A failed connection attempt left the `AC` object with a broken socket state | Create a **new** `AC` object for every retry |
+| Token/key suddenly stop working | Usually the preceding socket issue, less often real credential invalidation | Run `midea_refresh_tokens.py --name <device>` |
+| `msmart-ng discover` returns credentials that stop working shortly afterwards | `--auto` uses an internal helper account and its keys are temporary | Use `midea_refresh_tokens.py` via `midea-local` to obtain persistent credentials |
+| Confusion between "ECO" and "iECO" in logs/UI | Midea's own documentation and app use similar naming for two different mechanisms | Remember: normal ECO = fixed 24 °C via button/remote; iECO = user's own setpoint via app/cloud algorithm |
 
-## Security
+## Security notes
 
-- `devices.json` contains device tokens/keys; keep it private and run `chmod 600 devices.json`.
-- `midea_refresh_tokens.py` contains the Midea account password if you use `DEFAULT_PASSWORD`; run `chmod 600 midea_refresh_tokens.py`.
-- Use SSH keys for Shortcuts and never expose SSH directly to the Internet via port forwarding. Use a VPN for remote use.
-- Before contributing, remove real credentials from all files, diffs, logs, screenshots, and terminal history.
+- `devices.json` contains sensitive token/key values: run `chmod 600 devices.json`.
+- `midea_refresh_tokens.py` contains your cloud password in plain text: run `chmod 600 midea_refresh_tokens.py`.
+- For Siri over SSH, use SSH-key authentication and do **not** expose SSH to the Internet using port forwarding. Use a VPN (e.g. Tailscale) for remote access instead.
 
 ## License and sharing
 
-You may share and adapt these scripts. They depend on the open-source libraries `msmart-ng` and `midea-local` and do not replace official Midea support.
+You may freely share and adapt these scripts. They use the open libraries `msmart-ng` and `midea-local` and do not replace official Midea support.
 
 ---
 
-> 🇩🇪 **Deutsche Dokumentation:** [README_german.md](README_german.md)
+> 🇩🇪 **Deutsche Anleitung:** [README_german.md](README_german.md)
