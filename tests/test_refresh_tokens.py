@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+"""Unit-Tests fuer midea_refresh_tokens.py (stdlib unittest, keine Hardware).
+
+Ausfuehren: python3 -m unittest tests.test_refresh_tokens  (aus dem Repo-Root)
+oder direkt: python3 tests/test_refresh_tokens.py
+"""
+import io
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from contextlib import redirect_stderr
+from pathlib import Path
+
+REPO_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_DIR))
+
+import midea_refresh_tokens as mrt  # noqa: E402
+
+
+class _ConfigPathMixin(unittest.TestCase):
+    """Legt ein temporaeres Verzeichnis an und pinnt mrt.CONFIG_PATH darauf."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "devices.json"
+        orig = mrt.CONFIG_PATH
+        mrt.CONFIG_PATH = self.path
+        self.addCleanup(lambda: setattr(mrt, "CONFIG_PATH", orig))
+
+
+class LoadConfigTests(_ConfigPathMixin):
+    def test_missing_returns_empty(self):
+        self.assertEqual(mrt.load_config(), {"devices": []})
+
+    def test_valid_config(self):
+        self.path.write_text('{"devices": [{"name": "X"}]}', encoding="utf-8")
+        self.assertEqual(mrt.load_config()["devices"][0]["name"], "X")
+
+    def test_malformed_json_exits_1(self):
+        self.path.write_text("{ not valid json", encoding="utf-8")
+        with self.assertRaises(SystemExit) as cm, redirect_stderr(io.StringIO()):
+            mrt.load_config()
+        self.assertEqual(cm.exception.code, 1)
+
+    def test_toplevel_list_exits_1(self):
+        self.path.write_text("[]", encoding="utf-8")
+        with self.assertRaises(SystemExit) as cm, redirect_stderr(io.StringIO()):
+            mrt.load_config()
+        self.assertEqual(cm.exception.code, 1)
+
+    def test_devices_not_a_list_exits_1(self):
+        self.path.write_text('{"devices": {}}', encoding="utf-8")
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            mrt.load_config()
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
+                     "root umgeht Dateirechte")
+    def test_unreadable_exits_1(self):
+        self.path.write_text('{"devices": []}', encoding="utf-8")
+        self.path.chmod(0)
+        self.addCleanup(lambda: self.path.chmod(0o600))
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            mrt.load_config()
+
+
+class MsmartMissingProbeTests(unittest.TestCase):
+    """#12: fehlt msmart, bricht main() klar ab BEVOR ein Cloud-Kontakt passiert."""
+
+    def test_probe_exits_before_cloud_contact(self):
+        probe = subprocess.run([sys.executable, "-c", "import msmart"],
+                               capture_output=True)
+        if probe.returncode == 0:
+            self.skipTest("msmart ist installiert - Negativpfad nicht pruefbar")
+        work = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(work, ignore_errors=True))
+        result = subprocess.run(
+            [sys.executable, str(REPO_DIR / "midea_refresh_tokens.py"),
+             "--all", "--username", "x@example.com", "--password", "secret"],
+            capture_output=True, text=True, cwd=work)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("msmart-ng", result.stderr)
+        self.assertNotIn("Hole Token", result.stdout + result.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()

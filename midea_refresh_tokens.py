@@ -56,10 +56,26 @@ APPLIANCE_ID_RE = re.compile(r"applianceCodes['\"]?\s*[:=]\s*['\"]?(\d+)")
 
 
 def load_config() -> dict:
-    if CONFIG_PATH.exists():
-        with open(CONFIG_PATH) as f:
-            return json.load(f)
-    return {"devices": []}
+    """Liest devices.json. Fehlt die Datei, wird eine leere Geraeteliste
+    zurueckgegeben (normaler Erstlauf). Ist die Datei hingegen unlesbar, kein
+    gueltiges JSON oder hat sie nicht die erwartete Form ({"devices": [...]}),
+    wird mit klarer Meldung auf stderr abgebrochen - ein verstaendlicher
+    Hinweis ist im woechentlichen Cron-Lauf deutlich nuetzlicher als ein roher
+    Traceback."""
+    if not CONFIG_PATH.exists():
+        return {"devices": []}
+    try:
+        with open(CONFIG_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"FEHLER: {CONFIG_PATH} konnte nicht gelesen werden "
+              f"({type(exc).__name__}: {exc}).", file=sys.stderr)
+        sys.exit(1)
+    if not isinstance(data, dict) or not isinstance(data.get("devices"), list):
+        print(f"FEHLER: {CONFIG_PATH} hat nicht die erwartete Form "
+              '{"devices": [...]}.', file=sys.stderr)
+        sys.exit(1)
+    return data
 
 
 def save_config(config: dict) -> None:
@@ -253,6 +269,19 @@ def main() -> None:
     args = parser.parse_args()
 
     username, password = resolve_credentials(args.username, args.password)
+
+    # Fruehzeitige, klare Meldung statt eines rohen Tracebacks mitten im Lauf,
+    # falls msmart-ng im aktiven Interpreter fehlt (verify_credentials importiert
+    # es erst spaet per Lazy-Import). Bewusst ERST nach parse_args und
+    # resolve_credentials, damit --help und Zugangsdaten-Fehler weiterhin ohne
+    # installiertes msmart funktionieren; und VOR jedem Cloud-Kontakt.
+    try:
+        import msmart  # noqa: F401  (reine Verfuegbarkeitspruefung)
+    except ImportError:
+        print("FEHLER: msmart-ng ist im aktiven Python-Interpreter nicht "
+              "installiert. Ist die venv aktiv? Installation z.B. mit: "
+              "venv/bin/pip install msmart-ng", file=sys.stderr)
+        sys.exit(1)
 
     config = load_config()
     devices = config.setdefault("devices", [])

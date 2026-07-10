@@ -34,11 +34,25 @@ RETRY_DELAY = 3.0
 
 
 def load_config() -> dict:
+    """Liest devices.json. Fehlt die Datei, ist sie unlesbar, kein gueltiges
+    JSON oder hat sie nicht die erwartete Form ({"devices": [...]}), wird mit
+    klarer Meldung abgebrochen statt mit einem rohen Traceback - relevant fuer
+    den 20-Minuten-Cron-Lauf."""
     if not CONFIG_PATH.exists():
         print(f"Konfigurationsdatei nicht gefunden: {CONFIG_PATH}")
         sys.exit(1)
-    with open(CONFIG_PATH) as f:
-        return json.load(f)
+    try:
+        with open(CONFIG_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"FEHLER: {CONFIG_PATH} konnte nicht gelesen werden "
+              f"({type(exc).__name__}: {exc}).")
+        sys.exit(1)
+    if not isinstance(data, dict) or not isinstance(data.get("devices"), list):
+        print(f"FEHLER: {CONFIG_PATH} hat nicht die erwartete Form "
+              '{"devices": [...]}.')
+        sys.exit(1)
+    return data
 
 
 async def close_device(device: AC) -> None:
