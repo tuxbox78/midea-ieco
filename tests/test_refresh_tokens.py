@@ -177,30 +177,28 @@ class TokenExtractionTests(unittest.TestCase):
 
 
 class FetchDiscoverTests(unittest.TestCase):
-    """#5a: Passwort ueber temporaere 0600-midea-local.json statt argv; Fallback."""
+    """#5a / C4: Passwort ueber 0600-midea-local.json in einem PRO AUFRUF
+    isolierten Temp-Verzeichnis statt argv; Fallback; Verzeichnis-Isolierung."""
 
     TL = '{"tokenlist": [{"key": "aa", "token": "bb"}]}'
-
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        orig = mrt.MIDEALOCAL_CONFIG_PATH
-        mrt.MIDEALOCAL_CONFIG_PATH = Path(self.tmp.name) / "midea-local.json"
-        self.addCleanup(lambda: setattr(mrt, "MIDEALOCAL_CONFIG_PATH", orig))
-        self.cfg = mrt.MIDEALOCAL_CONFIG_PATH
 
     @staticmethod
     def _ns(rc=0, out="", err=""):
         return SimpleNamespace(returncode=rc, stdout=out, stderr=err)
 
     def test_config_route_keeps_password_out_of_argv(self):
-        calls = []
+        seen = {}
 
         def fake_run(cmd, **kw):
-            # Waehrend des Aufrufs muss die 0600-Config existieren.
-            self.assertTrue(self.cfg.exists())
-            self.assertEqual(self.cfg.stat().st_mode & 0o777, 0o600)
-            calls.append((cmd, kw))
+            # Waehrend des Aufrufs liegt eine 0600-midea-local.json mit den
+            # Zugangsdaten im (temporaeren) CWD - NICHT auf der Kommandozeile.
+            cwd = kw["cwd"]
+            cfg = Path(cwd) / "midea-local.json"
+            self.assertTrue(cfg.exists())
+            self.assertEqual(cfg.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(json.loads(cfg.read_text(encoding="utf-8")),
+                             {"username": "u@e", "password": "secret"})
+            seen["cmd"], seen["cwd"] = cmd, cwd
             return self._ns(out=self.TL)
 
         with mock.patch("midea_refresh_tokens.subprocess.run", side_effect=fake_run), \
@@ -208,19 +206,37 @@ class FetchDiscoverTests(unittest.TestCase):
             matches, _ = mrt.fetch_candidate_credentials("u@e", "secret", "192.168.0.5")
 
         self.assertEqual(matches, [("aa", "bb")])
-        self.assertEqual(len(calls), 1)
-        cmd, kw = calls[0]
-        self.assertNotIn("--password", cmd)
-        self.assertNotIn("secret", cmd)
-        self.assertEqual(kw.get("cwd"), str(self.cfg.parent))
-        self.assertFalse(self.cfg.exists())  # danach wieder entfernt
+        self.assertNotIn("--password", seen["cmd"])
+        self.assertNotIn("secret", seen["cmd"])
+        self.assertFalse(Path(seen["cwd"]).exists())  # Temp-Verzeichnis danach weg
+
+    def test_two_calls_use_distinct_isolated_dirs(self):
+        # Isolationsbeleg gegen ein Wettrennen zweier gleichzeitiger Laeufe:
+        # jeder Aufruf bekommt ein EIGENES Verzeichnis, beide werden entfernt.
+        cwds = []
+
+        def fake_run(cmd, **kw):
+            cwds.append(kw["cwd"])
+            return self._ns(out=self.TL)
+
+        with mock.patch("midea_refresh_tokens.subprocess.run", side_effect=fake_run), \
+                redirect_stderr(io.StringIO()):
+            mrt.fetch_candidate_credentials("u@e", "secret", "192.168.0.5")
+            mrt.fetch_candidate_credentials("u@e", "secret", "192.168.0.6")
+
+        self.assertEqual(len(cwds), 2)
+        self.assertNotEqual(cwds[0], cwds[1])
+        for cwd in cwds:
+            self.assertFalse(Path(cwd).exists())
 
     def test_fallback_to_argv_when_config_route_empty(self):
         outputs = [self._ns(rc=0, out="no tokens here"), self._ns(rc=0, out=self.TL)]
         cmds = []
+        cwds = []
 
         def fake_run(cmd, **kw):
             cmds.append(cmd)
+            cwds.append(kw.get("cwd"))
             return outputs[len(cmds) - 1]
 
         with mock.patch("midea_refresh_tokens.subprocess.run", side_effect=fake_run), \
@@ -232,7 +248,11 @@ class FetchDiscoverTests(unittest.TestCase):
         self.assertNotIn("--password", cmds[0])       # Primaerweg ohne Passwort
         self.assertIn("--password", cmds[1])          # Fallback mit Passwort
         self.assertIn("secret", cmds[1])
-        self.assertFalse(self.cfg.exists())
+        # Primaerweg lief in einem eigenen Temp-CWD (danach entfernt); der
+        # argv-Fallback laeuft ohne gesetztes cwd.
+        self.assertIsNotNone(cwds[0])
+        self.assertIsNone(cwds[1])
+        self.assertFalse(Path(cwds[0]).exists())
 
     def test_exec_error_does_not_fall_back(self):
         calls = []

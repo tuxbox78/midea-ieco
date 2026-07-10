@@ -16,8 +16,9 @@ lassen sie sich per --username/--password uebergeben oder - bei
 interaktivem Aufruf ohne hinterlegte Datei - direkt eingeben.
 
 Sicherheitshinweis: Standardmaessig werden die Zugangsdaten dem midealocal-
-Unterprozess ueber eine temporaere, nur fuer den aktuellen Nutzer lesbare
-midea-local.json (0600) uebergeben - NICHT auf der Kommandozeile. Nur falls
+Unterprozess ueber eine nur fuer den aktuellen Nutzer lesbare midea-local.json
+(0600) in einem privaten, pro Aufruf frisch angelegten Temp-Verzeichnis
+uebergeben - NICHT auf der Kommandozeile. Nur falls
 dieser Weg kein Ergebnis liefert, wird einmalig auf die Kommandozeilen-
 Uebergabe zurueckgefallen; dann ist das Passwort waehrend der Laufzeit des
 Unterprozesses kurzzeitig ueber `ps aux` bzw. /proc/<pid>/cmdline sichtbar.
@@ -36,6 +37,7 @@ import getpass
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -43,11 +45,6 @@ from pathlib import Path
 
 CONFIG_PATH = Path(__file__).parent / "devices.json"
 CREDENTIALS_PATH = Path(__file__).parent / "credentials.json"
-# Temporaere Config-Datei fuer den midealocal-Unterprozess: darueber liest die
-# CLI Benutzername/Passwort aus dem CWD, statt sie auf der Kommandozeile zu
-# erwarten - so taucht das Passwort nicht in der Prozess-argv auf. Wird pro
-# Aufruf frisch geschrieben (0600) und danach entfernt; ist git-ignoriert.
-MIDEALOCAL_CONFIG_PATH = Path(__file__).parent / "midea-local.json"
 
 # Platzhalterwerte aus credentials.example.json: werden wie "nicht gesetzt"
 # behandelt, damit ein versehentlich unbearbeitetes Beispiel klar abgewiesen
@@ -232,37 +229,43 @@ def _run_discover(host: str, *, use_config: bool,
                   username: str, password: str) -> subprocess.CompletedProcess:
     """Fuehrt `midealocal.cli discover --host <host> --debug` aus.
 
-    use_config=True: schreibt die Zugangsdaten in eine temporaere
-    midea-local.json (0600) im Skriptverzeichnis und laesst --username/--password
-    WEG - die CLI liest die Datei aus dem CWD. So erscheint das Passwort nicht in
-    der Prozess-argv. Die Datei wird danach in jedem Fall wieder entfernt.
+    use_config=True: schreibt die Zugangsdaten in eine midea-local.json (0600)
+    in einem PRO AUFRUF frisch angelegten, privaten Temp-Verzeichnis und macht
+    dieses zum CWD des Unterprozesses; --username/--password bleiben WEG. Die
+    midealocal-CLI bevorzugt eine midea-local.json im aktuellen Verzeichnis
+    (get_config_file_path()) und fuellt daraus nur fehlende Argumente - so
+    erscheint das Passwort nicht in der Prozess-argv (verifiziert gegen
+    midea-local 6.10.0). Ein eigenes Temp-Verzeichnis je Aufruf isoliert
+    gleichzeitige Laeufe (z.B. Wochen-Cron trifft manuellen Aufruf) gegen ein
+    Wettrennen um eine gemeinsame Datei und haelt das Projektverzeichnis frei
+    von Zugangsdaten-Resten. Es wird in jedem Fall wieder entfernt.
     use_config=False: uebergibt die Zugangsdaten auf der Kommandozeile
     (Fallback; Passwort dabei kurzzeitig via ps sichtbar).
 
     Wirft RuntimeError bei einem klaren Ausfuehrungsfehler (Timeout, midealocal
     nicht installiert)."""
-    script_dir = MIDEALOCAL_CONFIG_PATH.parent
     cmd = [sys.executable, "-m", "midealocal.cli", "discover", "--host", host, "--debug"]
     run_kwargs = {"capture_output": True, "text": True, "timeout": SUBPROCESS_TIMEOUT}
-    if use_config:
-        _atomic_write_json(MIDEALOCAL_CONFIG_PATH, {"username": username, "password": password})
-        run_kwargs["cwd"] = str(script_dir)
-    else:
-        cmd[4:4] = ["--username", username, "--password", password]
+    tmpdir = None
     try:
-        return subprocess.run(cmd, **run_kwargs)
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"discover-Befehl hat nach {SUBPROCESS_TIMEOUT}s nicht reagiert "
-                            f"(Geraet unter {host} erreichbar?)") from exc
-    except FileNotFoundError as exc:
-        raise RuntimeError("midealocal ist im aktuellen Python-Interpreter nicht installiert "
-                            "(falsches venv aktiv?)") from exc
-    finally:
         if use_config:
-            try:
-                MIDEALOCAL_CONFIG_PATH.unlink()
-            except FileNotFoundError:
-                pass
+            tmpdir = tempfile.mkdtemp(prefix="midea-local-discover-")
+            _atomic_write_json(Path(tmpdir) / "midea-local.json",
+                               {"username": username, "password": password})
+            run_kwargs["cwd"] = tmpdir
+        else:
+            cmd[4:4] = ["--username", username, "--password", password]
+        try:
+            return subprocess.run(cmd, **run_kwargs)
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"discover-Befehl hat nach {SUBPROCESS_TIMEOUT}s nicht reagiert "
+                                f"(Geraet unter {host} erreichbar?)") from exc
+        except FileNotFoundError as exc:
+            raise RuntimeError("midealocal ist im aktuellen Python-Interpreter nicht installiert "
+                                "(falsches venv aktiv?)") from exc
+    finally:
+        if tmpdir is not None:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def _parse_discover_output(result: subprocess.CompletedProcess) -> tuple[list[tuple[str, str]], str | None]:
