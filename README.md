@@ -35,7 +35,7 @@ The app does not provide conditional logic such as “enable iECO only if the un
 ## Requirements
 
 - Python 3.10 or later
-- A Midea Cloud account (MSmartHome or 美的美居) in which the devices are already configured
+- A Midea Cloud account (MSmartHome or Smarthome App from Midea) in which the devices are already configured
 - Network access from the controlling computer to the air conditioners on the local network (port 6444/TCP)
 
 ### Python packages
