@@ -28,5 +28,20 @@ First public release.
   3.10–3.13.
 - English and German documentation.
 
+### Security
+- `midea_refresh_tokens.py` runs each cloud discovery in a private, per-call
+  temporary directory, so two concurrent runs can no longer race over a shared
+  `midea-local.json` and fall back to passing the password on the command line
+  (where it is briefly visible in `ps`).
+- `install.sh` registers the short-lived `midea-local.json` for cleanup on any
+  exit, so interrupting device discovery (Ctrl+C) never leaves the 0600
+  credential file behind.
+
+### Fixed
+- `midea_ieco_ensure.py all` now exits non-zero with a clear message when no
+  devices are configured, instead of silently reporting success (`all([])`).
+- The manual cron log-rotation example truncates `refresh.log` as well as
+  `ieco.log`, matching the installer-generated job.
+
 [Unreleased]: https://github.com/tuxbox78/midea-ieco/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/tuxbox78/midea-ieco/releases/tag/v0.1.0
