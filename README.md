@@ -225,7 +225,7 @@ If you didn't use `install.sh`'s automatic cron setup, edit your crontab with `c
 Remember log rotation, for example with `logrotate` or simply:
 
 ```cron
-0 0 1 * * truncate -s 0 /opt/local/midea-ieco/ieco.log
+0 0 1 * * truncate -s 0 /opt/local/midea-ieco/ieco.log /opt/local/midea-ieco/refresh.log
 ```
 
 ## Siri and iOS Shortcuts
