@@ -294,8 +294,13 @@ pip install --quiet --upgrade pip
 pip install --quiet msmart-ng midea-local
 ok "Abhaengigkeiten installiert (msmart-ng, midea-local)."
 
-MSMART_VER=$(pip show msmart-ng 2>/dev/null | grep '^Version' | awk '{print $2}')
-MIDEALOCAL_VER=$(pip show midea-local 2>/dev/null | grep '^Version' | awk '{print $2}')
+# Ein einzelnes awk statt 'grep | awk': grep beendet sich mit Exit 1, wenn
+# kein 'Version'-Feld gefunden wird - unter 'set -o pipefail' würde das die
+# gesamte Pipeline scheitern lassen und den unten stehenden ${VAR:-unbekannt}-
+# Fallback nie erreichen. awk ohne Treffer liefert dagegen leere Ausgabe bei
+# Exit 0, der Fallback greift also tatsächlich.
+MSMART_VER=$(pip show msmart-ng 2>/dev/null | awk '/^Version:/{print $2; exit}')
+MIDEALOCAL_VER=$(pip show midea-local 2>/dev/null | awk '/^Version:/{print $2; exit}')
 info "  msmart-ng    : ${MSMART_VER:-unbekannt}"
 info "  midea-local  : ${MIDEALOCAL_VER:-unbekannt}"
 
@@ -469,10 +474,19 @@ WRAPPER_PATH="$BIN_DIR/midea-ieco"
 # per sudo ablegen, ohne die Besitzverhaeltnisse des Verzeichnisses zu aendern.
 WRAPPER_TMP="$(mktemp)"
 CLEANUP_PATHS+=("$WRAPPER_TMP")
+# $INSTALL_DIR shell-sicher vorquoten (printf %q), statt es hier nur manuell in
+# "..." einzuschliessen: ein Pfad mit " oder $(...) wuerde sonst die Quotierung
+# der ERZEUGTEN Wrapper-Datei aufbrechen bzw. beim spaeteren Ausfuehren des
+# Wrappers erneut als Shell-Syntax interpretiert. %q liefert bereits eine
+# selbst-quotende Form - direkt an die Pfadsuffixe angehaengt ergibt das
+# weiterhin EIN zusammenhaengendes Wort (keine zusaetzlichen "..." noetig;
+# die wuerden bei einer Single-Quote-Ausgabeform von %q sogar Literal-
+# Apostrophe in den Pfad einbauen).
+INSTALL_DIR_Q="$(printf '%q' "$INSTALL_DIR")"
 cat > "$WRAPPER_TMP" <<EOF
 #!/usr/bin/env bash
 # Automatisch von install.sh erzeugter Wrapper.
-exec "$INSTALL_DIR/venv/bin/python3" "$INSTALL_DIR/midea_ieco_ensure.py" "\$@"
+exec ${INSTALL_DIR_Q}/venv/bin/python3 ${INSTALL_DIR_Q}/midea_ieco_ensure.py "\$@"
 EOF
 
 if [[ -w "$BIN_DIR" ]]; then
@@ -516,7 +530,9 @@ CRON_MARKER="# midea-ieco-managed"
 IDQ="$(shell_quote_for_cron "$INSTALL_DIR")"
 CRON_LINE_IECO="*/20 * * * * cd $IDQ && venv/bin/python3 midea_ieco_ensure.py all --only-if-on >> $IDQ/ieco.log 2>&1 $CRON_MARKER"
 CRON_LINE_REFRESH="0 3 * * 0 cd $IDQ && venv/bin/python3 midea_refresh_tokens.py --all >> $IDQ/refresh.log 2>&1 $CRON_MARKER"
-CRON_LINE_LOGROTATE="0 0 1 * * truncate -s 0 $IDQ/ieco.log $CRON_MARKER"
+# truncate akzeptiert mehrere Dateioperanden (GNU wie BSD/macOS) - ein Lauf
+# leert beide Logs, statt refresh.log unbegrenzt wachsen zu lassen.
+CRON_LINE_LOGROTATE="0 0 1 * * truncate -s 0 $IDQ/ieco.log $IDQ/refresh.log $CRON_MARKER"
 
 echo ""
 echo -e "${YELLOW}--- Optionaler Cron-Job ---${NC}"

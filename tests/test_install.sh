@@ -189,6 +189,112 @@ chmod 755 "$d3"
 rc2=0; { [ "$rc" -ne 0 ] && ! grep -q chown "$SUDO_LOG"; } || rc2=1
 assert "$rc2" "S3 vorhandenes nicht-beschreibbares Verz.: Abbruch ohne chown"
 
+# ---------------------------------------------------------------------------
+echo "== MSMART_VER/MIDEALOCAL_VER pipefail-sichere Extraktion (#17) =="
+# ---------------------------------------------------------------------------
+extract_between() {  # $1=start-regex $2=end-regex(inclusive) $3=file
+    awk -v s="$1" -v e="$2" '$0 ~ s{f=1} f{print} f && $0 ~ e{exit}' "$3"
+}
+VERSRC="$(extract_between '^MSMART_VER=' '^MIDEALOCAL_VER=' "$INSTALL")"
+
+PIPBIN="$WORK/pipbin"; mkdir -p "$PIPBIN"
+
+# Kontrolle: das ALTE Muster (grep|awk) bricht unter pipefail ab, wenn kein
+# 'Version:'-Feld vorhanden ist - reproduziert das urspruengliche Problem.
+cat > "$PIPBIN/pip" <<'EOF'
+#!/usr/bin/env bash
+echo "Name: msmart-ng"
+echo "Summary: x"
+EOF
+chmod +x "$PIPBIN/pip"
+# PATH wird absichtlich nur INNERHALB dieser Subshells erweitert (Stub-'pip'
+# soll nicht in spaetere Testabschnitte durchsickern).
+# shellcheck disable=SC2030,SC2031
+old_rc=0
+# shellcheck disable=SC2030,SC2031
+( PATH="$PIPBIN:$PATH"; set -o pipefail
+  pip show msmart-ng 2>/dev/null | grep '^Version' | awk '{print $2}' ) || old_rc=$?
+rc=0; [ "$old_rc" -ne 0 ] || rc=1
+assert "$rc" "Kontrolle: altes grep|awk-Muster bricht bei fehlendem Version-Feld ab (Exit $old_rc)"
+
+# Fix: das tatsaechlich in install.sh stehende Snippet bricht NICHT ab, und
+# der ${VAR:-unbekannt}-Fallback ist erreichbar (Wert bleibt leer).
+# shellcheck disable=SC2030,SC2031
+out=$( ( PATH="$PIPBIN:$PATH"; set -o pipefail; eval "$VERSRC"; echo "RC=$?"; echo "V=${MSMART_VER:-LEER}" ) )
+rc=0; echo "$out" | grep -q '^RC=0$' || rc=1
+assert "$rc" "Fix: kein Abbruch, wenn 'Version:' fehlt"
+rc=0; echo "$out" | grep -q '^V=LEER$' || rc=1
+assert "$rc" "Fix: Fallback-Anzeige ('unbekannt') tatsaechlich erreichbar (Wert leer)"
+
+# Positivfall: bei vorhandenem Feld wird die Version weiterhin korrekt extrahiert.
+cat > "$PIPBIN/pip" <<'EOF'
+#!/usr/bin/env bash
+echo "Name: msmart-ng"
+echo "Version: 2.1.3"
+echo "Summary: x"
+EOF
+chmod +x "$PIPBIN/pip"
+# shellcheck disable=SC2030,SC2031
+out=$( ( PATH="$PIPBIN:$PATH"; set -o pipefail; eval "$VERSRC"; echo "V=${MSMART_VER:-LEER}" ) )
+rc=0; echo "$out" | grep -q '^V=2\.1\.3$' || rc=1
+assert "$rc" "Positivfall: Version wird weiterhin korrekt extrahiert"
+
+# ---------------------------------------------------------------------------
+echo "== Cron-Logrotate erfasst beide Logs (#16) =="
+# ---------------------------------------------------------------------------
+LOGROTATE_LINE="$(grep '^CRON_LINE_LOGROTATE=' "$INSTALL")"
+rc=0; case "$LOGROTATE_LINE" in *'ieco.log'*'refresh.log'*) : ;; *) rc=1 ;; esac
+assert "$rc" "Logrotate-Zeile enthaelt sowohl ieco.log als auch refresh.log"
+
+# Funktional: truncate mit zwei Operanden leert tatsaechlich beide Dateien
+# (belegt die Cross-Plattform-Annahme GNU/BSD truncate fuer diesen Batch-Lauf).
+printf 'AAAA' > "$WORK/ieco.log"; printf 'BBBB' > "$WORK/refresh.log"
+truncate -s 0 "$WORK/ieco.log" "$WORK/refresh.log"
+rc=0; { [ ! -s "$WORK/ieco.log" ] && [ ! -s "$WORK/refresh.log" ]; } || rc=1
+assert "$rc" "truncate -s 0 mit zwei Operanden leert beide Dateien"
+
+# ---------------------------------------------------------------------------
+echo "== Wrapper-Heredoc shell-sicher gequotet (#15) =="
+# ---------------------------------------------------------------------------
+# Scharfer Testpfad: Anfuehrungszeichen, \$(...)-Command-Substitution-Syntax,
+# Leerzeichen - genau die Zeichenklassen, die die alte manuelle "..."-
+# Umschliessung gebrochen bzw. bei Ausfuehrung des generierten Wrappers erneut
+# als Shell-Syntax interpretiert haette.
+MARKER="$WORK/pwned_marker"
+TRICKY_DIR="$WORK/harn\"ess\$(touch $MARKER)dir"
+mkdir -p "$TRICKY_DIR"
+mkdir -p "$TRICKY_DIR/venv/bin"
+cat > "$TRICKY_DIR/venv/bin/python3" <<'STUB'
+#!/usr/bin/env bash
+echo "ARGV0=$0"
+STUB
+chmod +x "$TRICKY_DIR/venv/bin/python3"
+: > "$TRICKY_DIR/midea_ieco_ensure.py"
+
+WRAPPER_OUT="$WORK/generated_wrapper"
+( INSTALL_DIR="$TRICKY_DIR"
+  INSTALL_DIR_Q="$(printf '%q' "$INSTALL_DIR")"
+  cat > "$WRAPPER_OUT" <<EOF
+#!/usr/bin/env bash
+# Automatisch von install.sh erzeugter Wrapper.
+exec ${INSTALL_DIR_Q}/venv/bin/python3 ${INSTALL_DIR_Q}/midea_ieco_ensure.py "\$@"
+EOF
+)
+chmod +x "$WRAPPER_OUT"
+
+rc=0; bash -n "$WRAPPER_OUT" 2>/dev/null || rc=1
+assert "$rc" "generierter Wrapper ist syntaktisch valide (bash -n)"
+
+rc=0; [ -e "$MARKER" ] && rc=1
+assert "$rc" "kein Command-Substitution-Ausbruch beim Generieren (kein Marker-File)"
+
+got_argv0="$("$WRAPPER_OUT" 2>/dev/null | sed -n 's/^ARGV0=//p')"
+rc=0; [ "$got_argv0" = "$TRICKY_DIR/venv/bin/python3" ] || rc=1
+assert "$rc" "Wrapper ruft bei Ausfuehrung exakt den urspruenglichen Pfad auf"
+
+rc=0; [ -e "$MARKER" ] && rc=1
+assert "$rc" "kein Command-Substitution-Ausbruch beim Ausfuehren (kein Marker-File)"
+
 echo ""
 echo "RESULT(test_install.sh): $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
