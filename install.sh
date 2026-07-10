@@ -318,7 +318,15 @@ fi
 # shellcheck disable=SC1091
 source venv/bin/activate
 pip install --quiet --upgrade pip
-pip install --quiet msmart-ng midea-local
+# Bevorzugt die gepinnten Versionen aus requirements.txt (reproduzierbar und
+# gegen Breaking Changes in msmart-ng/midea-local abgesichert). Fehlt die Datei
+# - etwa bei einem unvollstaendigen Download -, wird ungepinnt nachinstalliert.
+if [[ -f requirements.txt ]]; then
+    pip install --quiet -r requirements.txt
+else
+    warn "requirements.txt nicht gefunden - installiere msmart-ng/midea-local ungepinnt."
+    pip install --quiet msmart-ng midea-local
+fi
 ok "Abhaengigkeiten installiert (msmart-ng, midea-local)."
 
 # Ein einzelnes awk statt 'grep | awk': grep beendet sich mit Exit 1, wenn

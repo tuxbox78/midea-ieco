@@ -1,0 +1,11 @@
+# Pinned dependency versions for midea-ieco.
+#
+# msmart-ng and midea-local track Midea's cloud and device firmware and have
+# shipped breaking API changes between releases (see "Development lessons
+# learned" in the README). They are therefore pinned to the exact versions
+# validated for this release rather than floated on every install.
+#
+# To move up: bump the versions here, run `bash tests/run_all.sh`, verify
+# against a real device, then commit.
+msmart-ng==2026.7.0
+midea-local==6.10.0

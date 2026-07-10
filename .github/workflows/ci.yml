@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # The suite is stdlib-only and stubs out msmart, so no project
+      # dependencies are installed here. It only needs shellcheck, which is
+      # preinstalled on GitHub's Ubuntu images (guarded install as a fallback).
+      - name: Ensure shellcheck is available
+        run: shellcheck --version || { sudo apt-get update && sudo apt-get install -y shellcheck; }
+
+      - name: Run the full test suite
+        run: bash tests/run_all.sh
