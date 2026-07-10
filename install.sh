@@ -384,7 +384,11 @@ info "Suche Midea-Geraete im lokalen Netzwerk (kann etwas dauern)..."
 echo ""
 # Passwort NICHT per argv an discover uebergeben: kurz eine midea-local.json
 # (0600) schreiben, die die CLI aus dem aktuellen Verzeichnis liest, danach
-# sofort wieder entfernen.
+# sofort wieder entfernen. Zusaetzlich fuer den EXIT-Trap vormerken (absoluter
+# Pfad, da cwd hier bereits $INSTALL_DIR ist): so raeumt auch ein Abbruch per
+# Strg+C zwischen Schreiben und 'rm' die 0600-Datei zuverlaessig weg, statt
+# Zugangsdaten im Installationsverzeichnis liegen zu lassen.
+CLEANUP_PATHS+=("$INSTALL_DIR/midea-local.json")
 write_credentials_file midea-local.json || error "midea-local.json konnte nicht geschrieben werden."
 DISCOVER_OUTPUT=$(python3 -m midealocal.cli discover 2>&1) || true
 rm -f midea-local.json
