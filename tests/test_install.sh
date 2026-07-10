@@ -20,9 +20,15 @@ assert() {
     fi
 }
 
-# Portable Helfer (macOS BSD stat vs. GNU stat).
-mode_of() { stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"; }
-inode_of() { stat -f '%i' "$1" 2>/dev/null || stat -c '%i' "$1"; }
+# Portable Helfer (GNU/Linux vs. macOS BSD stat): GNU '-c' ZUERST versuchen.
+# Reihenfolge ist entscheidend: GNU scheitert bei 'stat -f' NICHT sauber, sondern
+# deutet '-f' als --file-system, gibt fuer den gueltigen Pfad einen Dateisystem-
+# Block nach stdout aus UND liefert Exit != 0 - dann liefe der '||'-Zweig
+# zusaetzlich und die Ausgabe waere verunreinigt (genau dieser Fall liess die
+# 0600-Checks nur auf dem Linux-CI-Runner scheitern). BSD lehnt das unbekannte
+# '-c' dagegen sauber mit leerer Ausgabe ab, sodass der Fallback auf '-f' greift.
+mode_of() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"; }
+inode_of() { stat -c '%i' "$1" 2>/dev/null || stat -f '%i' "$1"; }
 
 # Extrahiert eine Shell-Funktion NAME (bis zur schliessenden Klammer in Spalte 0).
 extract_func() {  # $1=name $2=file
