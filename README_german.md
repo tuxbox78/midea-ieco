@@ -323,7 +323,7 @@ python3 -c "import inspect; from msmart.device.AC.device import AirConditioner a
 
 ## Sicherheitshinweise
 
-- `devices.json` und `credentials.json` enthalten sensible Werte (Geräte-Token/-Key bzw. dein Cloud-Passwort): dauerhaft bei `chmod 600` belassen. Beide sind **git-ignoriert** und werden nie committet — nur die `*.example.json`-Vorlagen sind versioniert.
+- `devices.json` und `credentials.json` enthalten sensible Werte (Geräte-Token/-Key bzw. dein Cloud-Passwort): dauerhaft bei `chmod 600` belassen. Beide sind **git-ignoriert**, deine echten Werte werden also nie versioniert — nur die `*.example.json`-Vorlagen. (Ein früher Commit enthielt zwar eine `devices.json`, jedoch ausschließlich funktionslose Dummy-Platzhalter; echte Zugangsdaten liegen an keiner Stelle der Git-History.)
 - Dein Midea-Cloud-Passwort liegt in `credentials.json` (Klartext) und wird von `midea_refresh_tokens.py` gelesen. Es wird in keine versionierte Quelldatei geschrieben.
 - Für Siri über SSH SSH-Schlüssel-Authentifizierung verwenden und SSH **nicht** per Port-Weiterleitung ins Internet freigeben. Für Remote-Zugriff stattdessen ein VPN (z. B. Tailscale) nutzen.
 
