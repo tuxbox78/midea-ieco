@@ -380,6 +380,38 @@ err_msg="$(resolve_extracted_root_dir "$r4" 2>&1 >/dev/null || true)"
 rc=0; { case "$err_msg" in *first*second*|*second*first*) : ;; *) rc=1 ;; esac; }
 assert "$rc" "Fehlermeldung bei mehreren Treffern nennt beide Verzeichnisnamen"
 
+# ---------------------------------------------------------------------------
+echo "== typing_extensions-Dependency + check_core_imports =="
+# ---------------------------------------------------------------------------
+# midea-local 6.10.0 importiert typing_extensions, deklariert es aber NICHT als
+# Dependency - ohne expliziten Eintrag crasht 'python -m midealocal.cli' mit
+# ModuleNotFoundError (real auf dem Zielsystem beobachtet).
+
+# (a) Statisch: requirements.txt pinnt typing_extensions.
+rc=0; grep -qE '^typing_extensions==' "$REPO/requirements.txt" || rc=1
+assert "$rc" "requirements.txt pinnt typing_extensions"
+
+# (b) Statisch: der ungepinnte install.sh-Fallback zieht typing_extensions mit.
+FALLBACK_LINE="$(grep -E 'pip install --quiet msmart-ng midea-local' "$INSTALL")"
+rc=0; case "$FALLBACK_LINE" in *typing_extensions*) : ;; *) rc=1 ;; esac
+assert "$rc" "install.sh-Fallback (ohne requirements.txt) installiert typing_extensions"
+
+# (c) Funktional: check_core_imports spiegelt den Exit-Code des python-Imports.
+eval "$(extract_func check_core_imports "$INSTALL")"
+PYOK="$WORK/pyok"; mkdir -p "$PYOK"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$PYOK/python3"; chmod +x "$PYOK/python3"
+rc=0
+# shellcheck disable=SC2030,SC2031
+( PATH="$PYOK:$PATH"; check_core_imports ) || rc=1
+assert "$rc" "check_core_imports: ok (0), wenn die Importe gelingen"
+
+PYBAD="$WORK/pybad"; mkdir -p "$PYBAD"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$PYBAD/python3"; chmod +x "$PYBAD/python3"
+rc=0
+# shellcheck disable=SC2030,SC2031
+( PATH="$PYBAD:$PATH"; check_core_imports ) && rc=1
+assert "$rc" "check_core_imports: schlaegt fehl (!=0), wenn ein Import fehlt"
+
 echo ""
 echo "RESULT(test_install.sh): $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

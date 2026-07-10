@@ -38,6 +38,13 @@ First public release.
   credential file behind.
 
 ### Fixed
+- Pin `typing_extensions` in `requirements.txt`. `midea-local` 6.10.0 imports it
+  (`from typing_extensions import deprecated`) but does not declare it as a
+  dependency, so `python -m midealocal.cli` crashed with `ModuleNotFoundError`
+  on current Python (observed on 3.13). The installer now also verifies the core
+  imports (`midealocal`, `msmart`) right after installing dependencies and stops
+  with a clear, actionable message instead of surfacing a raw traceback in the
+  middle of device discovery.
 - `install.sh` no longer aborts silently right after installing dependencies.
   The informational version lookup (`pip show … | awk '…exit'`) could end the
   piped `pip` process with SIGPIPE; under `set -e -o pipefail` that non-zero

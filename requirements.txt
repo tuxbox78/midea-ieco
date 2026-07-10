@@ -9,3 +9,10 @@
 # against a real device, then commit.
 msmart-ng==2026.7.0
 midea-local==6.10.0
+
+# midea-local 6.10.0 imports typing_extensions ("from typing_extensions import
+# deprecated" in midealocal/device.py) but does NOT declare it as a dependency,
+# so pip never pulls it in and `python -m midealocal.cli` crashes with
+# ModuleNotFoundError on current Python (observed on 3.13/3.14). Pin it here
+# explicitly as a workaround until midea-local declares it upstream.
+typing_extensions==4.16.0

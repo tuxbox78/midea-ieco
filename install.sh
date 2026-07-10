@@ -96,6 +96,15 @@ install_pkg() {
     esac
 }
 
+# Prueft, ob die Kern-Abhaengigkeiten wirklich importierbar sind. Nutzt den nach
+# 'source venv/bin/activate' aktiven venv-python (daher erst nach der venv-
+# Einrichtung aufrufen). Rueckgabe 0 = beide Module importierbar. Faengt
+# insbesondere den Fall ab, dass midea-local 6.10.0 'typing_extensions'
+# importiert, es aber nicht als Dependency deklariert.
+check_core_imports() {
+    python3 -c "import midealocal.cli, msmart.device.AC.device" 2>/dev/null
+}
+
 # Schreibt {"username":..,"password":..} atomar und mit Rechten 0600 in die
 # Datei $1. Die Zugangsdaten werden ueber Umgebungsvariablen an python3
 # uebergeben, NICHT ueber argv - /proc/<pid>/environ ist (anders als
@@ -325,9 +334,24 @@ if [[ -f requirements.txt ]]; then
     pip install --quiet -r requirements.txt
 else
     warn "requirements.txt nicht gefunden - installiere msmart-ng/midea-local ungepinnt."
-    pip install --quiet msmart-ng midea-local
+    # typing_extensions explizit mitnehmen: midea-local 6.10.0 importiert es,
+    # deklariert es aber NICHT als Dependency (s. requirements.txt-Kommentar).
+    pip install --quiet msmart-ng midea-local typing_extensions
 fi
 ok "Abhaengigkeiten installiert (msmart-ng, midea-local)."
+
+# Sofortige Funktionspruefung der Kern-Abhaengigkeiten, BEVOR nach Zugangsdaten
+# gefragt wird. midea-local 6.10.0 importiert 'typing_extensions', deklariert es
+# aber nicht - fehlt es (oder eine andere Kern-Abhaengigkeit), taucht der Fehler
+# sonst erst spaeter als roher Traceback mitten in der Geraetesuche auf, nachdem
+# der Nutzer schon sein Passwort eingegeben hat. Hier frueh und klar abbrechen.
+if ! check_core_imports; then
+    error "Kern-Abhaengigkeiten sind nicht importierbar (haeufig: fehlendes typing_extensions).
+  Bitte in der venv nachinstallieren und den Installer erneut starten:
+    \"$INSTALL_DIR/venv/bin/pip\" install -r \"$INSTALL_DIR/requirements.txt\"
+  (oder gezielt: \"$INSTALL_DIR/venv/bin/pip\" install typing_extensions)"
+fi
+ok "Kern-Abhaengigkeiten importierbar (midealocal, msmart)."
 
 # Version rein informativ anzeigen - diese Zeilen duerfen den Installer unter
 # KEINEN Umstaenden abbrechen. Zwei Fallstricke unter 'set -e -o pipefail':
