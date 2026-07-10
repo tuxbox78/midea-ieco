@@ -33,3 +33,36 @@ jobs:
 
       - name: Run the full test suite
         run: bash tests/run_all.sh
+
+  install-smoke:
+    name: Real dependency install (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # Unlike the `test` job (stdlib-only, msmart stubbed), this installs the
+      # pinned dependencies for real and verifies the runtime imports resolve.
+      # It exists to catch undeclared or version-conditional transitive deps —
+      # e.g. midea-local 6.10.0 imports typing_extensions without declaring it,
+      # which broke real installs on Python 3.13 yet is invisible to the stubbed
+      # suite. This is the guard that would have caught that before release.
+      - name: Install pinned dependencies for real
+        run: |
+          python -m venv venv
+          venv/bin/pip install --upgrade pip
+          venv/bin/pip install -r requirements.txt
+
+      - name: Verify core imports resolve
+        run: venv/bin/python -c "import midealocal.cli, msmart.device.AC.device; print('core imports OK')"
+
+      - name: Verify midealocal discover import path
+        run: venv/bin/python -m midealocal.cli discover --help

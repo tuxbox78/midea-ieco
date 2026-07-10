@@ -285,14 +285,25 @@ resolve_extracted_root_dir() {
     esac
 }
 
-if [[ ! -f "$INSTALL_DIR/midea_ieco_ensure.py" ]]; then
+if command -v git &>/dev/null && [[ -d "$INSTALL_DIR/.git" ]]; then
+    # Bestehender Git-Clone: auf den neuesten Stand bringen, damit Updates (z.B.
+    # an requirements.txt) auch bei einer RE-Installation ankommen - ohne das
+    # behielte eine vorhandene Installation dauerhaft ihre alten Dateien (genau
+    # das liess z.B. einen fehlenden typing_extensions-Pin nie ankommen). Nur
+    # Fast-Forward; die Zugangs-/Geraetedateien sind git-ignoriert und bleiben
+    # unangetastet. Schlaegt der Pull fehl (lokale Aenderungen, kein Netz), wird
+    # mit den vorhandenen Dateien weitergemacht statt abzubrechen - die
+    # Import-Pruefung weiter unten faengt echte Abhaengigkeitsluecken ohnehin ab.
+    info "Aktualisiere vorhandene Installation (git pull)..."
+    if git -C "$INSTALL_DIR" pull --ff-only --quiet; then
+        ok "Projekt-Dateien aktualisiert."
+    else
+        warn "git pull nicht moeglich (lokale Aenderungen o. Netzproblem) - nutze vorhandene Dateien weiter."
+    fi
+elif [[ ! -f "$INSTALL_DIR/midea_ieco_ensure.py" ]]; then
     info "Lade Projekt-Dateien nach $INSTALL_DIR ..."
     if command -v git &>/dev/null; then
-        if [[ -d "$INSTALL_DIR/.git" ]]; then
-            git -C "$INSTALL_DIR" pull --quiet
-        else
-            git clone --quiet "$REPO_URL" "$INSTALL_DIR"
-        fi
+        git clone --quiet "$REPO_URL" "$INSTALL_DIR"
     elif command -v curl &>/dev/null; then
         command -v unzip &>/dev/null || install_pkg unzip \
             || error "unzip wird fuer den ZIP-Download benoetigt, konnte aber nicht installiert werden (Paketmanager: $PKG_MGR). Bitte git oder unzip manuell installieren."
@@ -342,16 +353,23 @@ ok "Abhaengigkeiten installiert (msmart-ng, midea-local)."
 
 # Sofortige Funktionspruefung der Kern-Abhaengigkeiten, BEVOR nach Zugangsdaten
 # gefragt wird. midea-local 6.10.0 importiert 'typing_extensions', deklariert es
-# aber nicht - fehlt es (oder eine andere Kern-Abhaengigkeit), taucht der Fehler
-# sonst erst spaeter als roher Traceback mitten in der Geraetesuche auf, nachdem
-# der Nutzer schon sein Passwort eingegeben hat. Hier frueh und klar abbrechen.
+# aber nicht - fehlt es, taucht der Fehler sonst erst spaeter als roher Traceback
+# mitten in der Geraetesuche auf, nachdem der Nutzer schon sein Passwort
+# eingegeben hat. Schlaegt die Pruefung fehl, wird die bekannte Luecke
+# AUTOMATISCH geschlossen (typing_extensions nachinstallieren) und erneut
+# geprueft - der Installer heilt sich also selbst, statt den Nutzer abzuweisen.
 if ! check_core_imports; then
-    error "Kern-Abhaengigkeiten sind nicht importierbar (haeufig: fehlendes typing_extensions).
-  Bitte in der venv nachinstallieren und den Installer erneut starten:
-    \"$INSTALL_DIR/venv/bin/pip\" install -r \"$INSTALL_DIR/requirements.txt\"
-  (oder gezielt: \"$INSTALL_DIR/venv/bin/pip\" install typing_extensions)"
+    warn "Kern-Abhaengigkeiten nicht importierbar - installiere fehlende Pakete nach..."
+    pip install --quiet typing_extensions || true
+    if ! check_core_imports; then
+        error "Kern-Abhaengigkeiten weiterhin nicht importierbar - automatische Reparatur fehlgeschlagen.
+  Bitte manuell pruefen (Netzwerk?) und erneut starten:
+    \"$INSTALL_DIR/venv/bin/pip\" install -r \"$INSTALL_DIR/requirements.txt\""
+    fi
+    ok "Fehlende Kern-Abhaengigkeit(en) automatisch nachinstalliert."
+else
+    ok "Kern-Abhaengigkeiten importierbar (midealocal, msmart)."
 fi
-ok "Kern-Abhaengigkeiten importierbar (midealocal, msmart)."
 
 # Version rein informativ anzeigen - diese Zeilen duerfen den Installer unter
 # KEINEN Umstaenden abbrechen. Zwei Fallstricke unter 'set -e -o pipefail':

@@ -25,7 +25,8 @@ First public release.
   the venv Python.
 - Pinned dependencies via `requirements.txt` (`msmart-ng`, `midea-local`).
 - Stdlib-only test suite (`tests/`) and GitHub Actions CI across Python
-  3.10–3.13.
+  3.10–3.13, plus a real-dependency install-smoke CI job that installs the
+  pinned requirements and verifies the runtime imports resolve.
 - English and German documentation.
 
 ### Security
@@ -41,10 +42,13 @@ First public release.
 - Pin `typing_extensions` in `requirements.txt`. `midea-local` 6.10.0 imports it
   (`from typing_extensions import deprecated`) but does not declare it as a
   dependency, so `python -m midealocal.cli` crashed with `ModuleNotFoundError`
-  on current Python (observed on 3.13). The installer now also verifies the core
-  imports (`midealocal`, `msmart`) right after installing dependencies and stops
-  with a clear, actionable message instead of surfacing a raw traceback in the
-  middle of device discovery.
+  on current Python (observed on 3.13). After installing dependencies the
+  installer now verifies the core imports (`midealocal`, `msmart`) and, if they
+  fail, installs the missing package and re-checks — self-healing instead of
+  aborting — rather than surfacing a raw traceback mid-discovery.
+- `install.sh` now `git pull`s an existing clone before installing, so re-running
+  it brings an installation set up before a fix (e.g. the `typing_extensions`
+  pin) up to date instead of keeping its stale files forever.
 - `install.sh` no longer aborts silently right after installing dependencies.
   The informational version lookup (`pip show … | awk '…exit'`) could end the
   piped `pip` process with SIGPIPE; under `set -e -o pipefail` that non-zero
