@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2026 Frank Seidel <frank@f-seidel.de>
+# SPDX-License-Identifier: MIT
 # =============================================================================
 # midea_ieco_ensure.sh - Wrapper fuer midea_ieco_ensure.py
 #
