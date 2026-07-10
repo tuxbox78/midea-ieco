@@ -14,7 +14,7 @@ Midea air conditioners like the PortaSplit have **two separate energy-saving mod
 
 | | **ECO** (button/remote) | **iECO** (app/cloud only) |
 |---|---|---|
-| Activation | Physical button on the unit or remote control | Only through the MSmartHome / 美的美居 app |
+| Activation | Physical button on the unit or remote control | Only through the MSmartHome / Midea Smarthome app |
 | Target temperature | **Fixed automatically at 24 °C**, fan set to Auto | **Whatever target temperature the user has set** (e.g. 21 °C, 25 °C, etc.) — not fixed |
 | Mechanism | Simple fixed setpoint | Cloud-connected, adaptive algorithm that fine-tunes compressor output around the user's chosen setpoint |
 | Auto-shutoff | Can auto power off after a period of inactivity at setpoint | Automatically exits after eight hours and reverts to regular Auto mode |
@@ -30,7 +30,7 @@ Measurements made for this project found approximately 4 kWh **per day** of addi
 
 ### The problem: iECO disappears after manual use
 
-iECO automatically exits after eight hours and returns to regular Auto mode. More importantly, iECO can currently be enabled **only through the MSmartHome / 美的美居 app**; there is no physical iECO button on the remote control (that button only controls the simpler, fixed-24°C ECO mode described above).
+iECO automatically exits after eight hours and returns to regular Auto mode. More importantly, iECO can currently be enabled **only through the MSmartHome / Midea Smarthome app**; there is no physical iECO button on the remote control (that button only controls the simpler, fixed-24°C ECO mode described above).
 
 If the air conditioner is subsequently switched off and on manually—at the unit or with the remote—iECO remains off. This is easy to miss because the unit otherwise appears to work normally, still respecting whatever target temperature was last set. Instead of remembering to open the app and re-enable iECO after every manual power cycle, this project automates that task reliably in the background.
 
@@ -50,7 +50,7 @@ The app does not provide conditional logic such as "enable iECO only if the unit
 ## Requirements
 
 - Python 3.10 or later
-- A Midea Cloud account (**MSmartHome** or **美的美居**) in which the devices are already registered and working
+- A Midea Cloud account (**MSmartHome** or **Midea Smarthome**) in which the devices are already registered and working
 - The controlling computer must be on the same local network as the air conditioners (port 6444/TCP reachable — no client isolation or VLAN separation)
 
 ## Quick install (one-liner)
@@ -70,7 +70,7 @@ MIDEA_IECO_DIR=/your/custom/path MIDEA_IECO_BIN_DIR=/your/custom/bin \
 
 If `/opt/local` isn't writable by your user, the installer will use `sudo` once to create it and hand ownership back to you, so no further `sudo` calls are needed afterwards.
 
-> **Before you begin:** Have your **MSmartHome (or 美的美居) username and password** ready — the same credentials used in the official Midea app. They are requested once during installation to fetch device tokens.
+> **Before you begin:** Have your **MSmartHome username and password** ready — the same credentials used in the official Midea app. They are requested once during installation to fetch device tokens.
 
 > **Recommended but not required:** Assign fixed IP addresses (DHCP reservation by MAC address) to your air conditioners in your router before running the installer. This prevents the IP from changing after a device or router restart. If you skip this step, or the IP changes later, you can always edit it afterwards directly in `devices.json` — no reinstall needed.
 
