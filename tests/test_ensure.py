@@ -146,5 +146,45 @@ class RetryHardeningTests(unittest.TestCase):
         self.assertEqual((d.caps_calls, d.apply_calls), (0, 0))
 
 
+class EmptyAllTests(unittest.TestCase):
+    """C3: 'all' auf leerer devices.json meldet klar Exit 1 statt still 'OK'."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "devices.json"
+        orig = mie.CONFIG_PATH
+        mie.CONFIG_PATH = self.path
+        self.addCleanup(lambda: setattr(mie, "CONFIG_PATH", orig))
+
+    def test_all_on_empty_devices_exits_1(self):
+        # all([]) waere True -> ohne Guard faelschlich Exit 0. Guard: Exit 1.
+        self.path.write_text('{"devices": []}', encoding="utf-8")
+        with mock.patch.object(mie.sys, "argv", ["midea_ieco_ensure.py", "all"]), \
+                redirect_stdout(io.StringIO()) as out:
+            with self.assertRaises(SystemExit) as cm:
+                asyncio.run(mie.main())
+        self.assertEqual(cm.exception.code, 1)
+        self.assertIn("Keine Geraete", out.getvalue())
+
+    def test_all_on_nonempty_devices_does_not_trip_guard(self):
+        # Positivfall: bei >=1 Geraet greift der Guard NICHT; main() laeuft
+        # durch (ensure_ieco gestubbt) und endet mit Exit 0.
+        self.path.write_text('{"devices": [{"name": "X", "ip": "1", "id": "1"}]}',
+                             encoding="utf-8")
+
+        async def _ok(dev_conf, only_if_on):
+            return True
+
+        with mock.patch.object(mie.sys, "argv", ["midea_ieco_ensure.py", "all"]), \
+                mock.patch.object(mie, "ensure_ieco", _ok), \
+                mock.patch.object(mie.asyncio, "sleep", _anoop), \
+                redirect_stdout(io.StringIO()) as out:
+            with self.assertRaises(SystemExit) as cm:
+                asyncio.run(mie.main())
+        self.assertEqual(cm.exception.code, 0)
+        self.assertNotIn("Keine Geraete", out.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -233,6 +233,15 @@ async def main() -> None:
         if not devices:
             print(f"Geraet '{args.target}' nicht in devices.json gefunden.")
             sys.exit(1)
+    elif not devices:
+        # 'all' auf leerer Geraeteliste: all([]) waere True und wuerde
+        # faelschlich "Gesamtergebnis: OK." (Exit 0) melden und damit eine
+        # leere/kaputte devices.json maskieren. Bewusst klar abbrechen -
+        # konsistent zum Schwestermodul midea_refresh_tokens.py, das bei leerem
+        # --all ebenfalls mit Exit 1 endet -, damit eine Fehlkonfiguration auch
+        # im stillen Cron-Lauf sichtbar wird.
+        print("Keine Geraete in devices.json konfiguriert. Nichts zu tun.")
+        sys.exit(1)
 
     results = []
     for d in devices:
