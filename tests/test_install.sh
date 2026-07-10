@@ -383,7 +383,7 @@ assert "$rc" "Fehlermeldung bei mehreren Treffern nennt beide Verzeichnisnamen"
 # ---------------------------------------------------------------------------
 echo "== typing_extensions-Dependency + check_core_imports =="
 # ---------------------------------------------------------------------------
-# midea-local 6.10.0 importiert typing_extensions, deklariert es aber NICHT als
+# midea-local importiert typing_extensions, deklariert es aber NICHT als
 # Dependency - ohne expliziten Eintrag crasht 'python -m midealocal.cli' mit
 # ModuleNotFoundError (real auf dem Zielsystem beobachtet).
 

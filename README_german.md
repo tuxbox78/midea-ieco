@@ -2,7 +2,7 @@
 
 > 🇬🇧 **English:** The full English documentation is here: [README.md](README.md)
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) ![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg) ![Platforms](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-informational.svg)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) ![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg) ![Platforms](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-informational.svg)
 
 **Hält iECO auf deiner Midea PortaSplit zuverlässig an — automatisch, lokal, ohne App.**
 
@@ -21,7 +21,7 @@ Kleine, zuverlässige Kommandozeilen-Werkzeuge zur lokalen Steuerung des **iECO-
 ## Kompatibilität & Voraussetzungen
 
 - **Klimageräte:** Midea PortaSplit und iECO-fähige Midea-Rebrands (Comfee, Toshiba, Carrier, Klimaire, …), bereits in der **MSmartHome- / Midea-Smarthome-App** eingebunden und per WLAN verbunden.
-- **Ausführender Rechner:** ein kleiner, **dauerhaft laufender** Computer im selben LAN wie die Anlage — Raspberry Pi, Heimserver, NAS oder Mac. **Python 3.10+**. (Nicht das iPhone selbst.)
+- **Ausführender Rechner:** ein kleiner, **dauerhaft laufender** Computer im selben LAN wie die Anlage — Raspberry Pi, Heimserver, NAS oder Mac. **Python 3.11+** (aktuelles Raspberry Pi OS liefert es). (Nicht das iPhone selbst.)
 - **Netzwerk:** Der Host muss jede Anlage auf **TCP-Port 6444** erreichen, ohne Client-/AP-Isolation in diesem Segment. Eine **feste IP** (DHCP-Reservierung) wird empfohlen, ist aber nicht zwingend — du kannst sie jederzeit später in `devices.json` ändern. Eine VLAN-Trennung zwischen IoT-Geräten und Computern ist unproblematisch, solange Routing- und Firewall-Regeln diesen Port zulassen; siehe [Netzwerk-Fehlerbehebung](#netzwerk-fehlerbehebung).
 - **Midea-Cloud-Konto:** ein **MSmartHome- / Midea-Smarthome**-Konto, in dem die Geräte bereits eingerichtet und funktionsfähig sind, einmalig zum Abholen der lokalen Geräte-Tokens (und erneut nur, falls diese später aufgefrischt werden müssen).
 

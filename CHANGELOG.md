@@ -24,8 +24,9 @@ First public release.
 - `midea_ieco_ensure.sh` — SSH/Shortcuts wrapper that forwards all arguments to
   the venv Python.
 - Pinned dependencies via `requirements.txt` (`msmart-ng`, `midea-local`).
+  Requires **Python 3.11+** (see Fixed).
 - Stdlib-only test suite (`tests/`) and GitHub Actions CI across Python
-  3.10–3.13, plus a real-dependency install-smoke CI job that installs the
+  3.11–3.13, plus a real-dependency install-smoke CI job that installs the
   pinned requirements and verifies the runtime imports resolve.
 - English and German documentation.
 
@@ -39,7 +40,14 @@ First public release.
   credential file behind.
 
 ### Fixed
-- Pin `typing_extensions` in `requirements.txt`. `midea-local` 6.10.0 imports it
+- Corrected the supported Python floor to **3.11** (previously documented as
+  3.10, which never actually worked). `midea-local` is now pinned to **6.6.1** —
+  the newest release still supporting Python 3.11 (6.7.0+ require 3.12; no
+  release supports 3.10) — keeping current Raspberry Pi OS (Bookworm, Python
+  3.11) in scope. `install.sh`'s version check and the CI matrix now start at
+  3.11. Caught by the new install-smoke CI job, which failed the real install of
+  the previously-pinned `midea-local` 6.10.0 on Python 3.10/3.11.
+- Pin `typing_extensions` in `requirements.txt`. `midea-local` imports it
   (`from typing_extensions import deprecated`) but does not declare it as a
   dependency, so `python -m midealocal.cli` crashed with `ModuleNotFoundError`
   on current Python (observed on 3.13). After installing dependencies the

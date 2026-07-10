@@ -5,14 +5,19 @@
 # learned" in the README). They are therefore pinned to the exact versions
 # validated for this release rather than floated on every install.
 #
+# midea-local is held at 6.6.1 deliberately: it is the newest release that still
+# supports Python 3.11 (6.7.0+ require Python 3.12), which keeps current
+# Raspberry Pi OS (Bookworm ships Python 3.11) in scope. 6.6.1 exposes the exact
+# same `midealocal.cli discover` interface and local-config-file mechanism this
+# project relies on as the later 6.x releases.
+#
 # To move up: bump the versions here, run `bash tests/run_all.sh`, verify
 # against a real device, then commit.
 msmart-ng==2026.7.0
-midea-local==6.10.0
+midea-local==6.6.1
 
-# midea-local 6.10.0 imports typing_extensions ("from typing_extensions import
+# midea-local imports typing_extensions ("from typing_extensions import
 # deprecated" in midealocal/device.py) but does NOT declare it as a dependency,
 # so pip never pulls it in and `python -m midealocal.cli` crashes with
-# ModuleNotFoundError on current Python (observed on 3.13/3.14). Pin it here
-# explicitly as a workaround until midea-local declares it upstream.
+# ModuleNotFoundError. Pin it here explicitly until midea-local declares it.
 typing_extensions==4.16.0

@@ -2,7 +2,7 @@
 
 > 🇩🇪 **Deutsch:** Die vollständige deutsche Anleitung findest du hier: [README_german.md](README_german.md)
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) ![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg) ![Platforms](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-informational.svg)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) ![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg) ![Platforms](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-informational.svg)
 
 **Keep iECO reliably enabled on your Midea PortaSplit — automatically, locally, without the app.**
 
@@ -21,7 +21,7 @@ Small, reliable command-line tools for local control of the **iECO mode** (and g
 ## Compatibility & requirements
 
 - **Air conditioners:** Midea PortaSplit and iECO-capable Midea rebrands (Comfee, Toshiba, Carrier, Klimaire, …), already added to the **MSmartHome / Midea Smarthome** app and connected to Wi-Fi.
-- **Where it runs:** a small, **always-on** computer on the same LAN as the unit — Raspberry Pi, home server, NAS, or Mac. **Python 3.10+**. (Not the iPhone itself.)
+- **Where it runs:** a small, **always-on** computer on the same LAN as the unit — Raspberry Pi, home server, NAS, or Mac. **Python 3.11+** (current Raspberry Pi OS ships it). (Not the iPhone itself.)
 - **Network:** the host must reach each unit on **TCP port 6444**, with no client/AP isolation on that segment. A **fixed IP** (DHCP reservation) is recommended but not required — you can always edit it later in `devices.json`. VLAN separation between IoT devices and computers is fine as long as routing and firewall rules permit that port; see [Network troubleshooting](#network-troubleshooting).
 - **Midea Cloud account:** an **MSmartHome / Midea Smarthome** account in which the devices are already registered and working, used once to fetch local device tokens (and again only if they later need refreshing).
 

@@ -99,7 +99,7 @@ install_pkg() {
 # Prueft, ob die Kern-Abhaengigkeiten wirklich importierbar sind. Nutzt den nach
 # 'source venv/bin/activate' aktiven venv-python (daher erst nach der venv-
 # Einrichtung aufrufen). Rueckgabe 0 = beide Module importierbar. Faengt
-# insbesondere den Fall ab, dass midea-local 6.10.0 'typing_extensions'
+# insbesondere den Fall ab, dass midea-local 6.6.1 'typing_extensions'
 # importiert, es aber nicht als Dependency deklariert.
 check_core_imports() {
     python3 -c "import midealocal.cli, msmart.device.AC.device" 2>/dev/null
@@ -188,8 +188,10 @@ fi
 
 PY_MAJOR=$(python3 -c "import sys; print(sys.version_info.major)")
 PY_MINOR=$(python3 -c "import sys; print(sys.version_info.minor)")
-if [[ "$PY_MAJOR" -lt 3 ]] || { [[ "$PY_MAJOR" -eq 3 ]] && [[ "$PY_MINOR" -lt 10 ]]; }; then
-    error "Python 3.10+ erforderlich (gefunden: $PY_MAJOR.$PY_MINOR)."
+if [[ "$PY_MAJOR" -lt 3 ]] || { [[ "$PY_MAJOR" -eq 3 ]] && [[ "$PY_MINOR" -lt 11 ]]; }; then
+    error "Python 3.11+ erforderlich (gefunden: $PY_MAJOR.$PY_MINOR).
+  Grund: die gepinnte midea-local 6.6.1 setzt Python 3.11 voraus (aktuelle
+  Raspberry Pi OS 'Bookworm' liefert 3.11)."
 fi
 ok "Python $PY_MAJOR.$PY_MINOR gefunden."
 
@@ -345,14 +347,14 @@ if [[ -f requirements.txt ]]; then
     pip install --quiet -r requirements.txt
 else
     warn "requirements.txt nicht gefunden - installiere msmart-ng/midea-local ungepinnt."
-    # typing_extensions explizit mitnehmen: midea-local 6.10.0 importiert es,
+    # typing_extensions explizit mitnehmen: midea-local 6.6.1 importiert es,
     # deklariert es aber NICHT als Dependency (s. requirements.txt-Kommentar).
     pip install --quiet msmart-ng midea-local typing_extensions
 fi
 ok "Abhaengigkeiten installiert (msmart-ng, midea-local)."
 
 # Sofortige Funktionspruefung der Kern-Abhaengigkeiten, BEVOR nach Zugangsdaten
-# gefragt wird. midea-local 6.10.0 importiert 'typing_extensions', deklariert es
+# gefragt wird. midea-local 6.6.1 importiert 'typing_extensions', deklariert es
 # aber nicht - fehlt es, taucht der Fehler sonst erst spaeter als roher Traceback
 # mitten in der Geraetesuche auf, nachdem der Nutzer schon sein Passwort
 # eingegeben hat. Schlaegt die Pruefung fehl, wird die bekannte Luecke

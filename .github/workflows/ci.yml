@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
 
@@ -40,7 +40,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
 
@@ -51,10 +51,11 @@ jobs:
 
       # Unlike the `test` job (stdlib-only, msmart stubbed), this installs the
       # pinned dependencies for real and verifies the runtime imports resolve.
-      # It exists to catch undeclared or version-conditional transitive deps —
-      # e.g. midea-local 6.10.0 imports typing_extensions without declaring it,
-      # which broke real installs on Python 3.13 yet is invisible to the stubbed
-      # suite. This is the guard that would have caught that before release.
+      # It exists to catch undeclared or version-conditional transitive deps and
+      # Requires-Python mismatches — e.g. midea-local imports typing_extensions
+      # without declaring it, and 6.7.0+ require Python 3.12 (which is why the
+      # pin stays at 6.6.1 and the matrix starts at 3.11). Both are invisible to
+      # the stubbed unit suite; this job is what catches them before release.
       - name: Install pinned dependencies for real
         run: |
           python -m venv venv
