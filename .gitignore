@@ -1,0 +1,12 @@
+# Secrets & per-user runtime config — NEVER commit these.
+# (Exact filenames, so the tracked *.example.json templates are NOT ignored.)
+credentials.json
+devices.json
+
+# Python virtual environment & bytecode caches
+venv/
+__pycache__/
+*.pyc
+
+# Runtime logs
+*.log

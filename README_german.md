@@ -42,10 +42,13 @@ Die App bietet keine bedingte Logik wie „iECO nur aktivieren, wenn die Anlage 
 
 | Datei | Zweck |
 |---|---|
-| `install.sh` | Einmal-Installer: richtet venv, Abhängigkeiten, devices.json, Tokens und Cron-Job ein |
+| `install.sh` | Einmal-Installer: richtet venv, Abhängigkeiten, `devices.json`, `credentials.json`, Tokens und Cron-Job ein |
 | `midea_ieco_ensure.py` | Prüft und setzt den Einschaltzustand und iECO für ein oder alle konfigurierten Geräte |
 | `midea_refresh_tokens.py` | Holt frische Token-/Key-Paare von der Midea Cloud und aktualisiert `devices.json` |
-| `devices.json` | Zentrale Konfiguration: Name, IP-Adresse, Port, Geräte-ID, Token und Key je Gerät |
+| `devices.example.json` | Vorlage für `devices.json` — kopieren, dann eigene Geräte eintragen |
+| `credentials.example.json` | Vorlage für `credentials.json` — Midea-Cloud-E-Mail und Passwort |
+| `devices.json` | Lokale Gerätekonfiguration (Name, IP, Port, ID, Token, Key). Lokal erzeugt, **git-ignoriert** |
+| `credentials.json` | Midea-Cloud-Zugangsdaten, gelesen von `midea_refresh_tokens.py`. Lokal mit `chmod 600` erzeugt, **git-ignoriert** |
 
 ## Voraussetzungen
 
@@ -106,11 +109,13 @@ python3 -m midealocal.cli discover --username "DEINE_SMARTHOME_EMAIL" --password
 #    (DHCP-Reservierung nach MAC-Adresse), damit die Konfiguration dauerhaft stabil bleibt.
 #    Nicht zwingend — die IP kann später auch direkt in devices.json geändert werden.
 
-# 5. devices.json anhand der Vorlage erstellen (siehe „Einmalige Einrichtung" unten)
+# 5. devices.json aus der Vorlage erstellen, dann bearbeiten (siehe „Einmalige Einrichtung" unten)
+cp devices.example.json devices.json
 
-# 6. Zugangsdaten in midea_refresh_tokens.py hinterlegen, dann Zugriff einschränken:
-#    DEFAULT_USERNAME und DEFAULT_PASSWORD am Anfang der Datei anpassen.
-chmod 600 midea_refresh_tokens.py
+# 6. credentials.json aus der Vorlage mit den Midea-Cloud-Zugangsdaten erstellen,
+#    dann Zugriff einschränken (enthält das Cloud-Passwort im Klartext):
+cp credentials.example.json credentials.json   # dann username/password eintragen
+chmod 600 credentials.json
 
 # 7. Token-/Key-Paare für alle Geräte abrufen
 python3 midea_refresh_tokens.py --all
@@ -159,20 +164,28 @@ Notiere Geräte-ID (`id`) und IP-Adresse für jedes Gerät.
 
 Token und Key können anfangs leer bleiben; `midea_refresh_tokens.py` holt sie im nächsten Schritt.
 
-### 3. Zugangsdaten in `midea_refresh_tokens.py` hinterlegen
+### 3. Zugangsdaten in `credentials.json` hinterlegen
 
-Am Anfang der Datei eintragen:
-
-```python
-DEFAULT_USERNAME = "dein@konto.beispiel"
-DEFAULT_PASSWORD = "deinPasswort"
-```
-
-Da diese Datei dein Cloud-Passwort im Klartext enthält, anschließend den Zugriff einschränken:
+Vorlage kopieren und die Midea-Cloud-Zugangsdaten eintragen:
 
 ```bash
-chmod 600 midea_refresh_tokens.py
+cp credentials.example.json credentials.json
 ```
+
+```json
+{
+  "username": "dein@konto.beispiel",
+  "password": "deinPasswort"
+}
+```
+
+Da diese Datei dein Cloud-Passwort im Klartext enthält, anschließend den Zugriff einschränken (der Installer erledigt das automatisch):
+
+```bash
+chmod 600 credentials.json
+```
+
+Alternativ lassen sich die Werte per `--username`/`--password` bei jedem Aufruf übergeben, oder das Skript fragt interaktiv nach, wenn keine Datei vorhanden ist.
 
 ### 4. Token-/Key-Paare abrufen
 
@@ -306,8 +319,8 @@ python3 -c "import inspect; from msmart.device.AC.device import AirConditioner a
 
 ## Sicherheitshinweise
 
-- `devices.json` enthält sensible Token-/Key-Werte: `chmod 600 devices.json` ausführen.
-- `midea_refresh_tokens.py` enthält dein Cloud-Passwort im Klartext: `chmod 600 midea_refresh_tokens.py` ausführen.
+- `devices.json` und `credentials.json` enthalten sensible Werte (Geräte-Token/-Key bzw. dein Cloud-Passwort): dauerhaft bei `chmod 600` belassen. Beide sind **git-ignoriert** und werden nie committet — nur die `*.example.json`-Vorlagen sind versioniert.
+- Dein Midea-Cloud-Passwort liegt in `credentials.json` (Klartext) und wird von `midea_refresh_tokens.py` gelesen. Es wird in keine versionierte Quelldatei geschrieben.
 - Für Siri über SSH SSH-Schlüssel-Authentifizierung verwenden und SSH **nicht** per Port-Weiterleitung ins Internet freigeben. Für Remote-Zugriff stattdessen ein VPN (z. B. Tailscale) nutzen.
 
 ## Lizenz und Weitergabe

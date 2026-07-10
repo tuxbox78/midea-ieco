@@ -42,10 +42,13 @@ The app does not provide conditional logic such as "enable iECO only if the unit
 
 | File | Purpose |
 |---|---|
-| `install.sh` | One-shot installer: sets up venv, dependencies, devices.json, tokens, and cron job |
+| `install.sh` | One-shot installer: sets up venv, dependencies, `devices.json`, `credentials.json`, tokens, and cron job |
 | `midea_ieco_ensure.py` | Checks and sets power status and iECO for one or all configured devices |
 | `midea_refresh_tokens.py` | Retrieves fresh token/key pairs from Midea Cloud and updates `devices.json` |
-| `devices.json` | Central configuration: name, IP address, port, device ID, token, and key per device |
+| `devices.example.json` | Template for `devices.json` — copy it, then fill in your devices |
+| `credentials.example.json` | Template for `credentials.json` — your Midea Cloud e-mail and password |
+| `devices.json` | Your local device config (name, IP, port, ID, token, key). Generated locally, **git-ignored** |
+| `credentials.json` | Your Midea Cloud login, read by `midea_refresh_tokens.py`. Created locally at `chmod 600`, **git-ignored** |
 
 ## Requirements
 
@@ -106,11 +109,13 @@ python3 -m midealocal.cli discover --username "YOUR_SMARTHOME_EMAIL" --password 
 #    (DHCP reservation by MAC address) so that the configuration stays stable.
 #    Not required — you can edit the IP later directly in devices.json.
 
-# 5. Create devices.json from the template (see "One-time setup" below)
+# 5. Create devices.json from the template, then edit it (see "One-time setup" below)
+cp devices.example.json devices.json
 
-# 6. Store your credentials in midea_refresh_tokens.py, then restrict access:
-#    Edit DEFAULT_USERNAME and DEFAULT_PASSWORD at the top of the file.
-chmod 600 midea_refresh_tokens.py
+# 6. Create credentials.json from the template with your Midea Cloud login,
+#    then restrict access (it holds your cloud password in plain text):
+cp credentials.example.json credentials.json   # then edit username/password
+chmod 600 credentials.json
 
 # 7. Retrieve token/key pairs for all devices
 python3 midea_refresh_tokens.py --all
@@ -159,20 +164,28 @@ Record the device ID (`id`) and IP address for every device.
 
 The token and key may initially be empty; `midea_refresh_tokens.py` retrieves them in the next step.
 
-### 3. Store credentials in `midea_refresh_tokens.py`
+### 3. Store credentials in `credentials.json`
 
-At the top of the file, set:
-
-```python
-DEFAULT_USERNAME = "your@account.example"
-DEFAULT_PASSWORD = "yourPassword"
-```
-
-Restrict access afterwards because this file contains your cloud password in plain text:
+Copy the template and enter your Midea Cloud login:
 
 ```bash
-chmod 600 midea_refresh_tokens.py
+cp credentials.example.json credentials.json
 ```
+
+```json
+{
+  "username": "your@account.example",
+  "password": "yourPassword"
+}
+```
+
+Restrict access afterwards because this file contains your cloud password in plain text (the installer does this automatically):
+
+```bash
+chmod 600 credentials.json
+```
+
+Alternatively, pass `--username`/`--password` on each call, or let the script prompt you interactively when no file is present.
 
 ### 4. Retrieve token/key pairs
 
@@ -306,8 +319,8 @@ python3 -c "import inspect; from msmart.device.AC.device import AirConditioner a
 
 ## Security notes
 
-- `devices.json` contains sensitive token/key values: run `chmod 600 devices.json`.
-- `midea_refresh_tokens.py` contains your cloud password in plain text: run `chmod 600 midea_refresh_tokens.py`.
+- `devices.json` and `credentials.json` hold sensitive values (device token/key and your cloud password): keep both at `chmod 600`. Both are **git-ignored** and never committed — only the `*.example.json` templates are tracked.
+- Your Midea Cloud password lives in `credentials.json` (plain text), read by `midea_refresh_tokens.py`. It is never written into any tracked source file.
 - For Siri over SSH, use SSH-key authentication and do **not** expose SSH to the Internet using port forwarding. Use a VPN (e.g. Tailscale) for remote access instead.
 
 ## License and sharing

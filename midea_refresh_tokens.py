@@ -7,6 +7,12 @@ Befehl `python3 -m midealocal.cli discover --debug`) und aktualisiert
 devices.json. Verifiziert JEDES gefundene Token/Key-Paar mit einer
 echten lokalen Verbindung, bevor es gespeichert wird.
 
+Zugangsdaten (Benutzername/Passwort) werden standardmaessig aus
+credentials.json im Skriptverzeichnis gelesen (Vorlage:
+credentials.example.json; danach `chmod 600 credentials.json`). Alternativ
+lassen sie sich per --username/--password uebergeben oder - bei
+interaktivem Aufruf ohne hinterlegte Datei - direkt eingeben.
+
 Sicherheitshinweis: Das Passwort wird als Kommandozeilenargument an den
 midealocal-Unterprozess uebergeben. Auf einem Mehrbenutzer-System kann
 das Passwort dadurch waehrend der Laufzeit des Unterprozesses ueber
@@ -21,24 +27,20 @@ Nutzung:
 
 import argparse
 import asyncio
+import getpass
 import json
 import re
 import subprocess
 import sys
 from pathlib import Path
 
-from msmart.device.AC.device import AirConditioner as AC
-
-# ---------------------------------------------------------------------------
-# CONFIG: Zugangsdaten hier hinterlegen, damit sie nicht bei jedem Aufruf
-# erneut angegeben werden muessen. Datei danach unbedingt absichern:
-#   chmod 600 midea_refresh_tokens.py
-# ---------------------------------------------------------------------------
-DEFAULT_USERNAME = "dein@account.example"
-DEFAULT_PASSWORD = "HIER_PASSWORT_EINTRAGEN"
-# ---------------------------------------------------------------------------
-
 CONFIG_PATH = Path(__file__).parent / "devices.json"
+CREDENTIALS_PATH = Path(__file__).parent / "credentials.json"
+
+# Platzhalterwerte aus credentials.example.json: werden wie "nicht gesetzt"
+# behandelt, damit ein versehentlich unbearbeitetes Beispiel klar abgewiesen
+# wird, statt in einem verwirrenden Cloud-Authentifizierungsfehler zu enden.
+PLACEHOLDER_VALUES = frozenset({"", "dein@account.example", "DEIN_PASSWORT", "HIER_PASSWORT_EINTRAGEN"})
 SUBPROCESS_TIMEOUT = 60
 VERIFY_TIMEOUT = 10
 
@@ -62,6 +64,65 @@ def save_config(config: dict) -> None:
     with open(CONFIG_PATH, "w") as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
     CONFIG_PATH.chmod(0o600)
+
+
+def load_credentials() -> tuple[str | None, str | None]:
+    """Liest Benutzername/Passwort aus credentials.json, sofern vorhanden.
+
+    Rueckgabe: (username, password). Fehlt die Datei, ist sie unlesbar oder
+    kein gueltiges JSON-Objekt, oder enthaelt sie nur Platzhalter/leere Werte,
+    wird fuer das jeweilige Feld None zurueckgegeben - der Aufrufer entscheidet
+    dann ueber CLI-Argumente oder interaktiven Prompt. Ein Syntaxfehler in der
+    Datei wird als Warnung gemeldet, damit eine kaputte Datei nicht
+    stillschweigend uebergangen wird."""
+    if not CREDENTIALS_PATH.exists():
+        return None, None
+    try:
+        with open(CREDENTIALS_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"WARNUNG: {CREDENTIALS_PATH} konnte nicht gelesen werden "
+              f"({type(exc).__name__}: {exc}). Nutze Argumente/Prompt.")
+        return None, None
+    if not isinstance(data, dict):
+        print(f"WARNUNG: {CREDENTIALS_PATH} enthaelt kein JSON-Objekt. "
+              f"Nutze Argumente/Prompt.")
+        return None, None
+
+    def clean(value: object) -> str | None:
+        return value if isinstance(value, str) and value not in PLACEHOLDER_VALUES else None
+
+    return clean(data.get("username")), clean(data.get("password"))
+
+
+def resolve_credentials(arg_username: str | None, arg_password: str | None) -> tuple[str, str]:
+    """Ermittelt die endgueltigen Zugangsdaten nach fester Praezedenz:
+    1. explizite CLI-Argumente, 2. credentials.json, 3. interaktiver
+    getpass-Prompt - Letzterer NUR wenn ein TTY vorhanden ist. In einem
+    nicht-interaktiven Lauf (z.B. Cron) ohne verfuegbare Zugangsdaten wird mit
+    klarer Meldung abgebrochen; es wird bewusst nie ohne TTY geprompted, um
+    Haenger/EOF-Fehler zu vermeiden."""
+    file_username, file_password = load_credentials()
+    username = arg_username or file_username
+    password = arg_password or file_password
+
+    if (not username or not password) and sys.stdin.isatty():
+        print("Zugangsdaten unvollstaendig - bitte interaktiv eingeben:")
+        if not username:
+            username = input("  Midea-E-Mail: ").strip()
+        if not password:
+            password = getpass.getpass("  Midea-Passwort: ")
+
+    if not username or not password:
+        print(
+            "FEHLER: Keine gueltigen Zugangsdaten verfuegbar. Hinterlege sie in "
+            f"{CREDENTIALS_PATH} (Vorlage credentials.example.json kopieren, "
+            "ausfuellen, dann 'chmod 600 credentials.json') oder uebergib "
+            "--username/--password.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return username, password
 
 
 def fetch_candidate_credentials(username: str, password: str, host: str) -> tuple[list[tuple[str, str]], str | None]:
@@ -105,6 +166,10 @@ async def verify_credentials(ip: str, port: int, device_id: int, key: str, token
     BEVOR es in devices.json gespeichert wird. Verhindert, dass ein
     falscher Kandidat (z.B. 'method 2' statt 'method 1') unbemerkt
     gespeichert wird."""
+    # Lazy-Import: haelt das Modul auch ohne installiertes msmart importierbar
+    # (z.B. fuer isolierte Unit-Tests der Zugangsdaten-Logik).
+    from msmart.device.AC.device import AirConditioner as AC
+
     device = AC(ip=ip, port=port, device_id=device_id)
     try:
         await asyncio.wait_for(device.authenticate(token, key), timeout=VERIFY_TIMEOUT)
@@ -177,18 +242,15 @@ def main() -> None:
         description="Holt frische Midea Token/Key-Paare per discover --debug, "
                     "verifiziert sie, und aktualisiert devices.json."
     )
-    parser.add_argument("--username", default=DEFAULT_USERNAME, help="Midea-Account (Default aus CONFIG)")
-    parser.add_argument("--password", default=DEFAULT_PASSWORD, help="Midea-Passwort (Default aus CONFIG)")
+    parser.add_argument("--username", help="Midea-Account (Standard: aus credentials.json)")
+    parser.add_argument("--password", help="Midea-Passwort (Standard: aus credentials.json)")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--all", action="store_true", help="Alle Geraete aus devices.json aktualisieren")
     group.add_argument("--name", help="Name des Geraets (neu oder bestehend)")
     parser.add_argument("--host", help="IP-Adresse (nur zusammen mit --name fuer NEUE Geraete)")
     args = parser.parse_args()
 
-    if not args.username or not args.password or args.password == "HIER_PASSWORT_EINTRAGEN":
-        print("FEHLER: Bitte DEFAULT_USERNAME/DEFAULT_PASSWORD im Skript-Kopf setzen, "
-              "oder --username/--password beim Aufruf angeben.")
-        sys.exit(1)
+    username, password = resolve_credentials(args.username, args.password)
 
     config = load_config()
     devices = config.setdefault("devices", [])
@@ -212,7 +274,7 @@ def main() -> None:
     ok = True
     successful_new_entry = False
     for dev in targets:
-        success = update_device(dev, args.username, args.password)
+        success = update_device(dev, username, password)
         ok = ok and success
         if dev is new_entry and success:
             successful_new_entry = True

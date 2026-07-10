@@ -294,15 +294,17 @@ for (( i=1; i<=DEVICE_COUNT; i++ )); do
     DEVICE_NAMES+=("$DEV_NAME"); DEVICE_IPS+=("$DEV_IP"); DEVICE_IDS+=("$DEV_ID")
 done
 
-# JSON wird ueber python3/json.dumps erzeugt statt per String-Konkatenation -
-# das macht Sonderzeichen in Geraetenamen (Anfuehrungszeichen, Backslashes)
-# automatisch sicher, ohne eigene Escape-Logik pflegen zu muessen.
+# JSON wird ueber python3/json erzeugt statt per String-Konkatenation - das
+# macht Sonderzeichen in Geraetenamen (Anfuehrungszeichen, Backslashes)
+# automatisch sicher. Die Datei wird direkt mit Rechten 0600 angelegt
+# (os.open), es entsteht also kein kurzes Zeitfenster, in dem sie
+# world-readable waere.
 NAMES_JOINED=$(printf '%s\x1e' "${DEVICE_NAMES[@]}")
 IPS_JOINED=$(printf '%s\x1e' "${DEVICE_IPS[@]}")
 IDS_JOINED=$(printf '%s\x1e' "${DEVICE_IDS[@]}")
 
-python3 - "$NAMES_JOINED" "$IPS_JOINED" "$IDS_JOINED" <<'PYEOF' > devices.json
-import json, sys
+python3 - "$NAMES_JOINED" "$IPS_JOINED" "$IDS_JOINED" <<'PYEOF'
+import json, os, sys
 names = sys.argv[1].split('\x1e')[:-1]
 ips = sys.argv[2].split('\x1e')[:-1]
 ids = sys.argv[3].split('\x1e')[:-1]
@@ -310,33 +312,31 @@ devices = [
     {"name": n, "ip": ip, "port": 6444, "id": int(i), "token": "", "key": ""}
     for n, ip, i in zip(names, ips, ids)
 ]
-print(json.dumps({"devices": devices}, indent=2, ensure_ascii=False))
+fd = os.open("devices.json", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w", encoding="utf-8") as f:
+    json.dump({"devices": devices}, f, indent=2, ensure_ascii=False)
+    f.write("\n")
+os.chmod("devices.json", 0o600)  # falls die Datei bereits existierte
 PYEOF
 
-chmod 600 devices.json
 ok "devices.json geschrieben (chmod 600)."
 
 # =============================================================================
-# 10. Zugangsdaten in midea_refresh_tokens.py hinterlegen (ueber python3,
-#     um Escaping-Fehler bei Sonderzeichen im Passwort zu vermeiden -
-#     sed mit festem Trennzeichen ist dafuer nicht robust genug)
+# 10. Zugangsdaten in credentials.json ablegen (ueber python3/json, damit
+#     Sonderzeichen im Passwort sicher escaped werden). Die Datei wird direkt
+#     mit Rechten 0600 angelegt (os.open) - kein world-readable-Zeitfenster.
+#     credentials.json ist git-ignoriert und wird nie versioniert.
 # =============================================================================
-[[ -f "midea_refresh_tokens.py" ]] || error "midea_refresh_tokens.py nicht gefunden."
-
 python3 - "$MIDEA_USER" "$MIDEA_PASS" <<'PYEOF'
-import re, sys
-username, password = sys.argv[1], sys.argv[2]
-path = "midea_refresh_tokens.py"
-with open(path, encoding="utf-8") as f:
-    content = f.read()
-content = re.sub(r'DEFAULT_USERNAME = ".*"', f'DEFAULT_USERNAME = "{username}"', content)
-content = re.sub(r'DEFAULT_PASSWORD = ".*"', f'DEFAULT_PASSWORD = "{password}"', content)
-with open(path, "w", encoding="utf-8") as f:
-    f.write(content)
+import json, os, sys
+data = {"username": sys.argv[1], "password": sys.argv[2]}
+fd = os.open("credentials.json", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2, ensure_ascii=False)
+    f.write("\n")
+os.chmod("credentials.json", 0o600)  # falls die Datei bereits existierte
 PYEOF
-
-chmod 600 midea_refresh_tokens.py
-ok "Zugangsdaten eingetragen und Datei gesichert (chmod 600)."
+ok "Zugangsdaten in credentials.json gespeichert (chmod 600)."
 
 # =============================================================================
 # 11. Token/Key-Paare abrufen
