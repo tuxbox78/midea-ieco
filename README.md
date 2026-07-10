@@ -149,7 +149,7 @@ Record the device ID (`id`) and IP address for every device.
       "name": "LivingRoom",
       "ip": "192.168.0.186",
       "port": 6444,
-      "id": 153931629346858,
+      "id": 888888888888881,
       "token": "",
       "key": ""
     },
@@ -157,7 +157,7 @@ Record the device ID (`id`) and IP address for every device.
       "name": "Bedroom",
       "ip": "192.168.0.185",
       "port": 6444,
-      "id": 152832117825892,
+      "id": 888888888888882,
       "token": "",
       "key": ""
     }

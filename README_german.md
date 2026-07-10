@@ -18,7 +18,7 @@ Midea-Klimaanlagen wie die PortaSplit besitzen **zwei getrennte Energiesparmodi*
 | Zieltemperatur | **Wird automatisch fix auf 24 °C** gesetzt, Lüfter auf Auto | **Bleibt bei der vom Nutzer eingestellten Zieltemperatur** (z. B. 21 °C, 25 °C usw.) — nicht fix |
 | Mechanismus | Einfacher fester Sollwert | Cloud-verbundener, adaptiver Algorithmus, der die Verdichterleistung feinfühlig um den vom Nutzer gewählten Sollwert herum regelt |
 | Automatische Abschaltung | Kann nach Inaktivitätsphase am Sollwert automatisch abschalten | Verlässt den Modus automatisch nach acht Stunden und kehrt zum normalen Auto-Modus zurück |
-| Verfügbarkeit | Auch offline verfügbar, funktioniert mit der IR-Fernbedienung | Erfordert eine bestehende WLAN-/Cloud-Verbindung während der Aktivierung |
+| Verfügbarkeit | Auch offline verfügbar, funktioniert mit der IR-Fernbedienung | Erfordert eine durchgehende WLAN-/Cloud-Verbindung, solange iECO aktiv ist |
 
 Kurz gesagt: **iECO erzwingt keine 24 °C.** Es arbeitet bei jeder beliebigen, am Gerät eingestellten Temperatur — es lässt den Verdichter lediglich sanfter und effizienter um diesen Sollwert herum regeln, statt mit voller, uneingeschränkter Leistung zu laufen. Dieses Projekt behandelt gezielt **iECO**, nicht den einfacheren, tastenaktivierten ECO-Modus.
 
@@ -150,7 +150,7 @@ Notiere Geräte-ID (`id`) und IP-Adresse für jedes Gerät.
       "name": "Wohnzimmer",
       "ip": "192.168.0.186",
       "port": 6444,
-      "id": 153931629346858,
+      "id": 888888888888881,
       "token": "",
       "key": ""
     },
@@ -158,7 +158,7 @@ Notiere Geräte-ID (`id`) und IP-Adresse für jedes Gerät.
       "name": "Schlafzimmer",
       "ip": "192.168.0.185",
       "port": 6444,
-      "id": 152832117825892,
+      "id": 888888888888882,
       "token": "",
       "key": ""
     }
