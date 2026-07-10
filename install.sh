@@ -329,13 +329,20 @@ else
 fi
 ok "Abhaengigkeiten installiert (msmart-ng, midea-local)."
 
-# Ein einzelnes awk statt 'grep | awk': grep beendet sich mit Exit 1, wenn
-# kein 'Version'-Feld gefunden wird - unter 'set -o pipefail' würde das die
-# gesamte Pipeline scheitern lassen und den unten stehenden ${VAR:-unbekannt}-
-# Fallback nie erreichen. awk ohne Treffer liefert dagegen leere Ausgabe bei
-# Exit 0, der Fallback greift also tatsächlich.
-MSMART_VER=$(pip show msmart-ng 2>/dev/null | awk '/^Version:/{print $2; exit}')
-MIDEALOCAL_VER=$(pip show midea-local 2>/dev/null | awk '/^Version:/{print $2; exit}')
+# Version rein informativ anzeigen - diese Zeilen duerfen den Installer unter
+# KEINEN Umstaenden abbrechen. Zwei Fallstricke unter 'set -e -o pipefail':
+#  1) KEIN 'exit' im awk. Ein frueher Pipe-Schluss (awk beendet sich nach dem
+#     ersten Treffer) toetet den noch schreibenden 'pip show'-Prozess per
+#     SIGPIPE; die Pipeline endet dann != 0 (real beobachtet: pip 120/141) und
+#     'set -e' bricht die GESAMTE Installation lautlos ab - genau nach dem
+#     Abhaengigkeiten-OK, noch vor der ersten Rueckfrage. Ohne 'exit' liest awk
+#     die Ausgabe vollstaendig, der Producer laeuft sauber zu Ende. Es gibt je
+#     Paket genau eine 'Version:'-Zeile, das Ergebnis bleibt also eindeutig.
+#  2) '|| true' als Guard. Liefert 'pip show' selbst einen Fehler (z.B. Paket
+#     nicht gefunden), soll die Zuweisung NICHT unter 'set -e' abbrechen -
+#     stattdessen greift der ${VAR:-unbekannt}-Fallback unten.
+MSMART_VER=$(pip show msmart-ng 2>/dev/null | awk '/^Version:/{print $2}') || true
+MIDEALOCAL_VER=$(pip show midea-local 2>/dev/null | awk '/^Version:/{print $2}') || true
 info "  msmart-ng    : ${MSMART_VER:-unbekannt}"
 info "  midea-local  : ${MIDEALOCAL_VER:-unbekannt}"
 

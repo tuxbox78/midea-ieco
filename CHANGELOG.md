@@ -38,6 +38,12 @@ First public release.
   credential file behind.
 
 ### Fixed
+- `install.sh` no longer aborts silently right after installing dependencies.
+  The informational version lookup (`pip show … | awk '…exit'`) could end the
+  piped `pip` process with SIGPIPE; under `set -e -o pipefail` that non-zero
+  status killed the whole installer before it reached the interactive setup and
+  the `midea-ieco` wrapper install. The lookup now reads pip's output fully and
+  is guarded with `|| true` so it can never abort the run.
 - `midea_ieco_ensure.py all` now exits non-zero with a clear message when no
   devices are configured, instead of silently reporting success (`all([])`).
 - The manual cron log-rotation example truncates `refresh.log` as well as

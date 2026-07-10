@@ -198,7 +198,7 @@ rc2=0; { [ "$rc" -ne 0 ] && ! grep -q chown "$SUDO_LOG"; } || rc2=1
 assert "$rc2" "S3 vorhandenes nicht-beschreibbares Verz.: Abbruch ohne chown"
 
 # ---------------------------------------------------------------------------
-echo "== MSMART_VER/MIDEALOCAL_VER pipefail-sichere Extraktion (#17) =="
+echo "== MSMART_VER/MIDEALOCAL_VER: pipefail- UND SIGPIPE-sicher (#17 + Regression) =="
 # ---------------------------------------------------------------------------
 extract_between() {  # $1=start-regex $2=end-regex(inclusive) $3=file
     awk -v s="$1" -v e="$2" '$0 ~ s{f=1} f{print} f && $0 ~ e{exit}' "$3"
@@ -246,6 +246,44 @@ chmod +x "$PIPBIN/pip"
 out=$( ( PATH="$PIPBIN:$PATH"; set -o pipefail; eval "$VERSRC"; echo "V=${MSMART_VER:-LEER}" ) )
 rc=0; echo "$out" | grep -q '^V=2\.1\.3$' || rc=1
 assert "$rc" "Positivfall: Version wird weiterhin korrekt extrahiert"
+
+# --- Der eigentliche Installer-Bug (real auf dem Zielsystem beobachtet) -------
+# Symptom: der Installer starb lautlos direkt nach dem Abhaengigkeiten-OK, noch
+# vor der ersten Rueckfrage. Ursache: 'pip show ... | awk "/Version/{...; exit}"'
+# schliesst die Pipe nach dem ersten Treffer frueh; der noch schreibende
+# pip/python-Prozess bekommt SIGPIPE und endet != 0 (real: 120/141). Unter
+# 'set -e -o pipefail' bricht das die GESAMTE Installation ab. Der alte #17-Stub
+# (drei schnelle echo) konnte das nicht ausloesen, weshalb der Bug durchrutschte.
+#
+# Die SIGPIPE-Ausloesung selbst ist puffer-/timing- und bash-versionsabhaengig
+# (bash 3.2 macOS vs. 5.x Linux/CI) und damit als Assertion nicht portabel-
+# deterministisch. Stattdessen wird der Fix zweigleisig geprueft: (a) statisch,
+# dass die schuetzende Struktur vorhanden ist, und (b) funktional gegen die
+# deterministische Kernwirkung (Producer endet != 0 -> Zeile darf NICHT abbrechen).
+
+# (a) Statisch (plattformunabhaengig): Guard '|| true' vorhanden UND kein 'exit'
+# im awk (das 'exit' war die eigentliche SIGPIPE-Ursache).
+rc=0; printf '%s\n' "$VERSRC" | grep -q '|| true' || rc=1
+assert "$rc" "install.sh: Versions-Zeilen durch '|| true' gegen Abbruch abgesichert"
+rc=0; printf '%s\n' "$VERSRC" | grep -q "awk[^|]*exit" && rc=1
+assert "$rc" "install.sh: awk OHNE 'exit' (kein frueher Pipe-Schluss -> kein SIGPIPE)"
+
+# (b) Funktional: Producer gibt die Version aus und endet dann mit != 0 (wie ein
+# per SIGPIPE getoeteter pip). Das ECHTE install.sh-Snippet muss sauber
+# durchlaufen (Exit 0) und die bereits ausgegebene Version behalten.
+cat > "$PIPBIN/pip" <<'EOF'
+#!/usr/bin/env bash
+echo "Name: msmart-ng"
+echo "Version: 2.1.3"
+exit 1
+EOF
+chmod +x "$PIPBIN/pip"
+fix_rc=0
+# shellcheck disable=SC2030,SC2031
+out=$( ( PATH="$PIPBIN:$PATH"; set -e -o pipefail; eval "$VERSRC"; echo "V=${MSMART_VER:-LEER}" ) ) \
+    || fix_rc=$?
+rc=0; { [ "$fix_rc" -eq 0 ] && printf '%s\n' "$out" | grep -q '^V=2\.1\.3$'; } || rc=1
+assert "$rc" "Fix: Snippet ueberlebt Nicht-Null-pip und behaelt die Version (Exit $fix_rc)"
 
 # ---------------------------------------------------------------------------
 echo "== Cron-Logrotate erfasst beide Logs (#16) =="
