@@ -2,60 +2,34 @@
 
 > 🇩🇪 **Deutsch:** Die vollständige deutsche Anleitung findest du hier: [README_german.md](README_german.md)
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) ![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg) ![Platforms](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-informational.svg)
+
+**Keep iECO reliably enabled on your Midea PortaSplit — automatically, locally, without the app.**
+
 Small, reliable command-line tools for local control of the **iECO mode** (and general power/status) of Midea air conditioners, including the Midea PortaSplit and compatible models from Comfee, Toshiba, Carrier, Klimaire, and others. They avoid relying on an unstable cloud connection during normal operation.
 
 `msmart-ng` can control iECO directly over the local network. Midea Cloud credentials are only required once to obtain valid device credentials, and again to refresh them when necessary.
 
-## Why this project exists
+**What it does**
 
-### ECO vs. iECO — two different, easily confused modes
+- Re-enables **iECO** automatically after every manual power cycle and after its eight-hour timeout
+- Runs entirely on your **local network** (no cloud dependency in normal operation), triggered by cron, Siri Shortcuts, or Homebridge
+- **Never changes your target temperature** — it only ensures iECO is active at the setpoint you already chose
 
-Midea air conditioners like the PortaSplit have **two separate energy-saving modes** that are frequently mixed up, including in some earlier drafts of this document. It is important to distinguish them correctly:
+> ℹ️ **ECO ≠ iECO.** The remote's ECO button (fixed 24 °C) and app-only iECO (your own setpoint, adaptive) are *different* modes. This project is about **iECO** — see [Background: ECO vs. iECO](#background-eco-vs-ieco) for the full distinction.
 
-| | **ECO** (button/remote) | **iECO** (app/cloud only) |
-|---|---|---|
-| Activation | Physical button on the unit or remote control | Only through the MSmartHome / Midea Smarthome app |
-| Target temperature | **Fixed automatically at 24 °C**, fan set to Auto | **Whatever target temperature the user has set** (e.g. 21 °C, 25 °C, etc.) — not fixed |
-| Mechanism | Simple fixed setpoint | Cloud-connected, adaptive algorithm that fine-tunes compressor output around the user's chosen setpoint |
-| Auto-shutoff | Can auto power off after a period of inactivity at setpoint | Automatically exits after eight hours and reverts to regular Auto mode |
-| Availability | Available offline, works with the IR remote | Requires the unit to stay connected to Wi-Fi/cloud while active |
+## Compatibility & requirements
 
-In short: **iECO does not force 24 °C.** It works at any temperature you have configured on the unit; it simply makes the compressor regulate more gently and efficiently around that setpoint instead of running at full unrestricted power. This project is specifically about **iECO**, not the simpler button-activated ECO mode.
+- **Air conditioners:** Midea PortaSplit and iECO-capable Midea rebrands (Comfee, Toshiba, Carrier, Klimaire, …), already added to the **MSmartHome / Midea Smarthome** app and connected to Wi-Fi.
+- **Where it runs:** a small, **always-on** computer on the same LAN as the unit — Raspberry Pi, home server, NAS, or Mac. **Python 3.10+**. (Not the iPhone itself.)
+- **Network:** the host must reach each unit on **TCP port 6444**, with no client/AP isolation on that segment. A **fixed IP** (DHCP reservation) is recommended but not required — you can always edit it later in `devices.json`. VLAN separation between IoT devices and computers is fine as long as routing and firewall rules permit that port; see [Network troubleshooting](#network-troubleshooting).
+- **Midea Cloud account:** an **MSmartHome / Midea Smarthome** account in which the devices are already registered and working, used once to fetch local device tokens (and again only if they later need refreshing).
 
-### What iECO does
+## Scope & alternatives
 
-Midea advertises iECO as saving up to 60% compared with standard operation, with up to eight hours of operation using only 1.2 kWh at typical settings ([Midea Corporate](https://www.midea.com/th-en/news/energy-saving-air-conditioner)). A German ten-hour practical test using the PortaSplit measured about 100 W lower consumption in iECO than in Auto mode while maintaining a comfortable room temperature of 24.5–25.7 °C ([4-Happy-Home on YouTube](https://www.youtube.com/watch?v=ia4gUxGh5ms)). Community reports confirm that iECO can be run successfully at other target temperatures as well, such as 21 °C, with correspondingly adjusted (not fixed) energy use.
+This tool does **one thing well**: keep iECO (and basic power/status) set on your units, from cron or a shortcut, **without Home Assistant or any always-running smart-home server software**. That is its entire purpose.
 
-Measurements made for this project found approximately 4 kWh **per day** of additional consumption during continuous operation at a given setpoint when iECO was not active, with no apparent comfort or cooling advantage from running without it.
-
-### The problem: iECO disappears after manual use
-
-iECO automatically exits after eight hours and returns to regular Auto mode. More importantly, iECO can currently be enabled **only through the MSmartHome / Midea Smarthome app**; there is no physical iECO button on the remote control (that button only controls the simpler, fixed-24°C ECO mode described above).
-
-If the air conditioner is subsequently switched off and on manually—at the unit or with the remote—iECO remains off. This is easy to miss because the unit otherwise appears to work normally, still respecting whatever target temperature was last set. Instead of remembering to open the app and re-enable iECO after every manual power cycle, this project automates that task reliably in the background.
-
-### Why not just use the Midea app?
-
-The app does not provide conditional logic such as "enable iECO only if the unit is already on," nor does it offer a public, documented API for third-party automation such as cron jobs or Siri. The libraries used here (`msmart-ng` and `midea-local`) communicate with the device on the local network, giving you control over when iECO is set without a cloud dependency during routine use.
-
-## Included files
-
-| File | Purpose |
-|---|---|
-| `install.sh` | One-shot installer: sets up venv, dependencies, `devices.json`, `credentials.json`, tokens, and cron job |
-| `midea_ieco_ensure.py` | Checks and sets power status and iECO for one or all configured devices |
-| `midea_refresh_tokens.py` | Retrieves fresh token/key pairs from Midea Cloud and updates `devices.json` |
-| `midea_ieco_ensure.sh` | Wrapper for SSH/Shortcuts: runs `midea_ieco_ensure.py` with the venv Python and forwards all arguments |
-| `devices.example.json` | Template for `devices.json` — copy it, then fill in your devices |
-| `credentials.example.json` | Template for `credentials.json` — your Midea Cloud e-mail and password |
-| `devices.json` | Your local device config (name, IP, port, ID, token, key). Generated locally, **git-ignored** |
-| `credentials.json` | Your Midea Cloud login, read by `midea_refresh_tokens.py`. Created locally at `chmod 600`, **git-ignored** |
-
-## Requirements
-
-- Python 3.10 or later
-- A Midea Cloud account (**MSmartHome** or **Midea Smarthome**) in which the devices are already registered and working
-- The controlling computer must be able to reach the air conditioners on port 6444/TCP — client/AP isolation must be disabled for the relevant network segment. VLAN separation between IoT devices and computers is fine as long as routing and firewall rules permit that port; see [Network troubleshooting](#network-troubleshooting) for details.
+If you want full climate control (temperature, mode, fan, dashboards, rich automations), or you **already run Home Assistant**, use the actively maintained [`midea_ac_lan`](https://github.com/wuwentao/midea_ac_lan) integration instead — it exposes iECO as one preset among many other controls. This project is for the narrower case: "I have a Raspberry Pi / Mac / small server and just want iECO to stay on."
 
 ## Quick install (one-liner)
 
@@ -75,8 +49,6 @@ MIDEA_IECO_DIR=/your/custom/path MIDEA_IECO_BIN_DIR=/your/custom/bin \
 If the install directory doesn't exist yet, the installer creates it and hands ownership to you (using `sudo` only if its parent isn't writable). It never takes over a directory that already exists: if the install directory is present but not writable, it stops and shows your options (choose another path via `MIDEA_IECO_DIR`, fix the permissions yourself, or remove it). The small `midea-ieco` wrapper is placed into the bin directory with a single `sudo install` step when that directory is root-owned (e.g. MacPorts' `/opt/local/bin`), without changing the directory's ownership.
 
 > **Before you begin:** Have your **MSmartHome username and password** ready — the same credentials used in the official Midea app. They are requested once during installation to fetch device tokens.
-
-> **Recommended but not required:** Assign fixed IP addresses (DHCP reservation by MAC address) to your air conditioners in your router before running the installer. This prevents the IP from changing after a device or router restart. If you skip this step, or the IP changes later, you can always edit it afterwards directly in `devices.json` — no reinstall needed.
 
 The installer will:
 
@@ -101,7 +73,7 @@ cd midea-ieco
 sudo apt-get install -y python3-venv   # only needed once if python3-venv is missing
 python3 -m venv venv
 source venv/bin/activate
-pip install msmart-ng midea-local
+pip install -r requirements.txt
 
 # 3. Discover your devices and note their IDs and IP addresses
 python3 -m midealocal.cli discover --username "YOUR_SMARTHOME_EMAIL" --password "YOUR_SMARTHOME_PASSWORD"
@@ -301,6 +273,84 @@ If you see `No response from host` for every request, the most likely causes are
 - **IP address changed** — always assign fixed IP addresses (DHCP reservation by MAC address) in your router, or update `devices.json` manually if it changed
 - **Device is in WLAN power-saving mode / sleep** — verify the device is reachable with `ping 192.168.x.x` and `nc -zv 192.168.x.x 6444`
 - **Firewall on the server** blocking outgoing connections to port 6444 — check with `iptables -L` or `ufw status`
+
+## Known Midea app/firmware quirks
+
+Some early PortaSplit units have been reported to **switch themselves on/off or change modes on their own**, traced to a Midea app/cloud bug rather than the hardware ([connect.de, in German](https://www.connect.de/news/midea-portasplit-probleme-stoerung-schaltet-sich-automatisch-ein-und-aus-app-fehler-loesung-3209868.html)). Midea's own suggested workaround is to **block the unit's Internet access at the router** — which is exactly the setup this project is built for: with the cloud cut off, local LAN control keeps working normally.
+
+If you see unexpected on/off or mode changes, that is most likely this device-side issue, not `midea_ieco_ensure.py`: the script only ever toggles iECO (and, without `--only-if-on`, power), and it logs every action to `ieco.log` so you can confirm exactly what it did and did not do.
+
+## FAQ
+
+**Does this change my target temperature?**
+
+No. It only ensures iECO is active at whatever setpoint the unit already has. It never writes a temperature.
+
+**iECO switched off again after a few hours — did something break?**
+
+No. iECO exits on its own after about eight hours (and after any manual power cycle) — that is Midea's behavior, not a fault. The recommended cron job (`--only-if-on`, every 20 minutes) simply turns it back on the next time it runs.
+
+**Do I need a Raspberry Pi or a server?**
+
+You need some computer that is on when you want the automation to run — a Raspberry Pi, NAS, home server, or an always-on Mac — on the same LAN as the AC. An iPhone alone cannot run cron; for Siri you run the script over SSH on such a host (see [Siri and iOS Shortcuts](#siri-and-ios-shortcuts)).
+
+**Does it work when the Midea cloud is down?**
+
+Yes. Normal operation is entirely local over your LAN. The cloud is only contacted to fetch or refresh device tokens (`midea_refresh_tokens.py`), never for day-to-day iECO control.
+
+**Do I need Home Assistant?**
+
+No — running without it is the point (see **Scope & alternatives** above). If you already use Home Assistant, the `midea_ac_lan` integration is the better fit.
+
+## Background: ECO vs. iECO
+
+<details>
+<summary><b>Why this project exists — the ECO/iECO distinction, energy savings, and why the app isn't enough</b></summary>
+
+### ECO vs. iECO — two different, easily confused modes
+
+Midea air conditioners like the PortaSplit have **two separate energy-saving modes** that are frequently mixed up, including in some earlier drafts of this document. It is important to distinguish them correctly:
+
+| | **ECO** (button/remote) | **iECO** (app/cloud only) |
+|---|---|---|
+| Activation | Physical button on the unit or remote control | Only through the MSmartHome / Midea Smarthome app |
+| Target temperature | **Fixed automatically at 24 °C**, fan set to Auto | **Whatever target temperature the user has set** (e.g. 21 °C, 25 °C, etc.) — not fixed |
+| Mechanism | Simple fixed setpoint | Cloud-connected, adaptive algorithm that fine-tunes compressor output around the user's chosen setpoint |
+| Auto-shutoff | Can auto power off after a period of inactivity at setpoint | Automatically exits after eight hours and reverts to regular Auto mode |
+| Availability | Available offline, works with the IR remote | Requires the unit to stay connected to Wi-Fi/cloud while active |
+
+In short: **iECO does not force 24 °C.** It works at any temperature you have configured on the unit; it simply makes the compressor regulate more gently and efficiently around that setpoint instead of running at full unrestricted power. This project is specifically about **iECO**, not the simpler button-activated ECO mode.
+
+### What iECO does
+
+Midea advertises iECO as saving up to 60% compared with standard operation, with up to eight hours of operation using only 1.2 kWh at typical settings ([Midea Corporate](https://www.midea.com/th-en/news/energy-saving-air-conditioner)). A German ten-hour practical test using the PortaSplit measured about 100 W lower consumption in iECO than in Auto mode while maintaining a comfortable room temperature of 24.5–25.7 °C ([4-Happy-Home on YouTube](https://www.youtube.com/watch?v=ia4gUxGh5ms)). Community reports confirm that iECO can be run successfully at other target temperatures as well, such as 21 °C, with correspondingly adjusted (not fixed) energy use.
+
+Measurements made for this project found approximately 4 kWh **per day** of additional consumption during continuous operation at a given setpoint when iECO was not active, with no apparent comfort or cooling advantage from running without it.
+
+### The problem: iECO disappears after manual use
+
+iECO automatically exits after eight hours and returns to regular Auto mode. More importantly, iECO can currently be enabled **only through the MSmartHome / Midea Smarthome app**; there is no physical iECO button on the remote control (that button only controls the simpler, fixed-24°C ECO mode described above).
+
+If the air conditioner is subsequently switched off and on manually—at the unit or with the remote—iECO remains off. This is easy to miss because the unit otherwise appears to work normally, still respecting whatever target temperature was last set. Instead of remembering to open the app and re-enable iECO after every manual power cycle, this project automates that task reliably in the background.
+
+### Why not just use the Midea app?
+
+The app does not provide conditional logic such as "enable iECO only if the unit is already on," nor does it offer a public, documented API for third-party automation such as cron jobs or Siri. The libraries used here (`msmart-ng` and `midea-local`) communicate with the device on the local network, giving you control over when iECO is set without a cloud dependency during routine use.
+
+</details>
+
+## Included files
+
+| File | Purpose |
+|---|---|
+| `install.sh` | One-shot installer: sets up venv, dependencies, `devices.json`, `credentials.json`, tokens, and cron job |
+| `midea_ieco_ensure.py` | Checks and sets power status and iECO for one or all configured devices |
+| `midea_refresh_tokens.py` | Retrieves fresh token/key pairs from Midea Cloud and updates `devices.json` |
+| `midea_ieco_ensure.sh` | Wrapper for SSH/Shortcuts: runs `midea_ieco_ensure.py` with the venv Python and forwards all arguments |
+| `devices.example.json` | Template for `devices.json` — copy it, then fill in your devices |
+| `credentials.example.json` | Template for `credentials.json` — your Midea Cloud e-mail and password |
+| `devices.json` | Your local device config (name, IP, port, ID, token, key). Generated locally, **git-ignored** |
+| `credentials.json` | Your Midea Cloud login, read by `midea_refresh_tokens.py`. Created locally at `chmod 600`, **git-ignored** |
 
 ## Development lessons learned
 
