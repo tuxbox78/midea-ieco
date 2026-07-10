@@ -45,6 +45,7 @@ The app does not provide conditional logic such as "enable iECO only if the unit
 | `install.sh` | One-shot installer: sets up venv, dependencies, `devices.json`, `credentials.json`, tokens, and cron job |
 | `midea_ieco_ensure.py` | Checks and sets power status and iECO for one or all configured devices |
 | `midea_refresh_tokens.py` | Retrieves fresh token/key pairs from Midea Cloud and updates `devices.json` |
+| `midea_ieco_ensure.sh` | Wrapper for SSH/Shortcuts: runs `midea_ieco_ensure.py` with the venv Python and forwards all arguments |
 | `devices.example.json` | Template for `devices.json` — copy it, then fill in your devices |
 | `credentials.example.json` | Template for `credentials.json` — your Midea Cloud e-mail and password |
 | `devices.json` | Your local device config (name, IP, port, ID, token, key). Generated locally, **git-ignored** |
@@ -123,7 +124,9 @@ python3 midea_refresh_tokens.py --all
 # 8. Test: enable iECO on one device (the unit must be reachable on the network)
 python3 midea_ieco_ensure.py LivingRoom
 
-# Make the Bash wrapper executable (used by cron and Shortcuts):
+# The SSH/Shortcuts wrapper midea_ieco_ensure.sh ships executable; the cron
+# examples below call the venv Python directly and do not need it. If your
+# download method dropped the executable bit, restore it with:
 chmod +x midea_ieco_ensure.sh
 ```
 
@@ -310,8 +313,8 @@ python3 -c "import inspect; from msmart.device.AC.device import AirConditioner a
 | Symptom | Cause observed during development | Solution |
 |---|---|---|
 | `TypeError: device_selector() got an unexpected keyword argument` | The `midea-local` API changed | Inspect the installed signature with `python3 -c "import inspect; from midealocal.devices import device_selector; print(inspect.signature(device_selector))"` |
-| `Device is not capable of property IECO` | Capabilities were not queried, or were queried with a damaged object | Query `get_capabilities()` before `refresh()`/`apply()` on a fresh `AC` object |
-| Capability query times out / `Failed to query capabilities` although credentials are correct | The device only answers `get_capabilities()` while powered on | Turn it on first (`power_state = True` plus `apply()`), then query capabilities; `midea_ieco_ensure.py` follows this order |
+| `Device is not capable of property IECO` | Capabilities were never queried on the object used for `apply()` — `supports_ieco` is populated only by `get_capabilities()` | Call `get_capabilities()` on the fresh, authenticated `AC` object before setting capability-bound properties and calling `apply()`. The order relative to `refresh()` does not matter — `midea_ieco_ensure.py` deliberately refreshes first (cheap status check) and queries capabilities only once a change is actually pending |
+| Capability query times out / `Failed to query capabilities` although credentials are correct | Initially misread as "the unit answers `get_capabilities()` only while powered on" — neither the `msmart-ng` code nor the final flow supports that; a connection left broken by a previous failed attempt produces the same symptom (see next row) | Retry on a completely fresh connection: `midea_ieco_ensure.py` re-creates the `AC` object and re-queries capabilities on every retry. The shipped flow queries capabilities before powering the unit on |
 | `[Errno 104] Connection reset by peer` after several attempts | A failed connection attempt left the `AC` object with a broken socket state | Create a **new** `AC` object for every retry |
 | Token/key suddenly stop working | Usually the preceding socket issue, less often real credential invalidation | Run `midea_refresh_tokens.py --name <device>` |
 | `msmart-ng discover` returns credentials that stop working shortly afterwards | `--auto` uses an internal helper account and its keys are temporary | Use `midea_refresh_tokens.py` via `midea-local` to obtain persistent credentials |
@@ -325,7 +328,7 @@ python3 -c "import inspect; from msmart.device.AC.device import AirConditioner a
 
 ## License and sharing
 
-You may freely share and adapt these scripts. They use the open libraries `msmart-ng` and `midea-local` and do not replace official Midea support.
+This project is licensed under the [MIT License](LICENSE) — you may use, share, and adapt these scripts freely, provided the copyright notice stays included. The libraries it builds on, [`msmart-ng`](https://github.com/mill1000/midea-msmart) and [`midea-local`](https://github.com/rokam/midea-local), are MIT-licensed as well. This project is not affiliated with Midea and does not replace official Midea support.
 
 ---
 

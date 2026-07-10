@@ -45,6 +45,7 @@ Die App bietet keine bedingte Logik wie „iECO nur aktivieren, wenn die Anlage 
 | `install.sh` | Einmal-Installer: richtet venv, Abhängigkeiten, `devices.json`, `credentials.json`, Tokens und Cron-Job ein |
 | `midea_ieco_ensure.py` | Prüft und setzt den Einschaltzustand und iECO für ein oder alle konfigurierten Geräte |
 | `midea_refresh_tokens.py` | Holt frische Token-/Key-Paare von der Midea Cloud und aktualisiert `devices.json` |
+| `midea_ieco_ensure.sh` | Wrapper für SSH/Kurzbefehle: startet `midea_ieco_ensure.py` mit dem venv-Python und reicht alle Argumente weiter |
 | `devices.example.json` | Vorlage für `devices.json` — kopieren, dann eigene Geräte eintragen |
 | `credentials.example.json` | Vorlage für `credentials.json` — Midea-Cloud-E-Mail und Passwort |
 | `devices.json` | Lokale Gerätekonfiguration (Name, IP, Port, ID, Token, Key). Lokal erzeugt, **git-ignoriert** |
@@ -123,7 +124,10 @@ python3 midea_refresh_tokens.py --all
 # 8. Test: iECO für ein Gerät aktivieren (Gerät muss im Netz erreichbar sein)
 python3 midea_ieco_ensure.py Wohnzimmer
 
-# Bash-Wrapper ausführbar machen (wird von Cron und Shortcuts verwendet):
+# Der SSH-/Kurzbefehle-Wrapper midea_ieco_ensure.sh ist bereits ausführbar;
+# die Cron-Beispiele weiter unten rufen den venv-Python direkt auf und
+# brauchen ihn nicht. Falls die Download-Methode das Ausführbar-Bit
+# verworfen hat, so wiederherstellen:
 chmod +x midea_ieco_ensure.sh
 ```
 
@@ -310,8 +314,8 @@ python3 -c "import inspect; from msmart.device.AC.device import AirConditioner a
 | Symptom | In der Entwicklung beobachtete Ursache | Lösung |
 |---|---|---|
 | `TypeError: device_selector() got an unexpected keyword argument` | Die `midea-local`-API hat sich geändert | Installierte Signatur prüfen: `python3 -c "import inspect; from midealocal.devices import device_selector; print(inspect.signature(device_selector))"` |
-| `Device is not capable of property IECO` | Capabilities wurden nicht abgefragt oder mit einem beschädigten Objekt abgefragt | `get_capabilities()` vor `refresh()`/`apply()` auf einem neuen `AC`-Objekt aufrufen |
-| Capability-Abfrage läuft ab / `Failed to query capabilities` obwohl Zugangsdaten korrekt sind | Das Gerät beantwortet `get_capabilities()` nur im eingeschalteten Zustand | Erst einschalten (`power_state = True` plus `apply()`), dann Capabilities abfragen; `midea_ieco_ensure.py` hält diese Reihenfolge ein |
+| `Device is not capable of property IECO` | Capabilities wurden auf dem für `apply()` genutzten Objekt nie abgefragt — `supports_ieco` wird ausschließlich durch `get_capabilities()` befüllt | `get_capabilities()` auf dem frischen, authentifizierten `AC`-Objekt aufrufen, bevor capability-gebundene Properties gesetzt werden und `apply()` läuft. Die Reihenfolge relativ zu `refresh()` ist egal — `midea_ieco_ensure.py` refresht bewusst zuerst (billiger Status-Check) und fragt Capabilities erst ab, wenn wirklich eine Änderung ansteht |
+| Capability-Abfrage läuft ab / `Failed to query capabilities` obwohl Zugangsdaten korrekt sind | Anfangs fehlgedeutet als „das Gerät beantwortet `get_capabilities()` nur im eingeschalteten Zustand" — weder der `msmart-ng`-Code noch der finale Ablauf stützen das; eine durch einen vorherigen Fehlversuch defekte Verbindung erzeugt dasselbe Symptom (siehe nächste Zeile) | Mit komplett frischer Verbindung erneut versuchen: `midea_ieco_ensure.py` erstellt bei jedem Retry ein neues `AC`-Objekt und fragt die Capabilities erneut ab. Der ausgelieferte Ablauf fragt Capabilities vor dem Einschalten ab |
 | `[Errno 104] Connection reset by peer` nach mehreren Versuchen | Ein fehlgeschlagener Verbindungsversuch hinterließ das `AC`-Objekt mit einem defekten Socket-Zustand | Bei jedem Wiederholungsversuch ein **neues** `AC`-Objekt erstellen |
 | Token/Key funktionieren plötzlich nicht mehr | Meist das vorige Socket-Problem, seltener echte Zugangsdaten-Invalidierung | `midea_refresh_tokens.py --name <Gerät>` ausführen |
 | `msmart-ng discover` liefert Zugangsdaten, die kurz danach nicht mehr funktionieren | `--auto` verwendet ein internes Hilfskonto mit temporären Schlüsseln | `midea_refresh_tokens.py` über `midea-local` verwenden, um dauerhafte Zugangsdaten zu erhalten |
@@ -325,7 +329,7 @@ python3 -c "import inspect; from msmart.device.AC.device import AirConditioner a
 
 ## Lizenz und Weitergabe
 
-Diese Skripte dürfen frei geteilt und angepasst werden. Sie verwenden die Open-Source-Bibliotheken `msmart-ng` und `midea-local` und ersetzen nicht den offiziellen Midea-Support.
+Dieses Projekt steht unter der [MIT-Lizenz](LICENSE) — die Skripte dürfen frei genutzt, geteilt und angepasst werden, solange der Copyright-Hinweis erhalten bleibt. Auch die verwendeten Bibliotheken [`msmart-ng`](https://github.com/mill1000/midea-msmart) und [`midea-local`](https://github.com/rokam/midea-local) stehen unter MIT. Dieses Projekt ist nicht mit Midea verbunden und ersetzt nicht den offiziellen Midea-Support.
 
 ---
 
