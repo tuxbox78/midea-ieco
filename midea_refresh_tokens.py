@@ -15,11 +15,14 @@ credentials.example.json; danach `chmod 600 credentials.json`). Alternativ
 lassen sie sich per --username/--password uebergeben oder - bei
 interaktivem Aufruf ohne hinterlegte Datei - direkt eingeben.
 
-Sicherheitshinweis: Das Passwort wird als Kommandozeilenargument an den
-midealocal-Unterprozess uebergeben. Auf einem Mehrbenutzer-System kann
-das Passwort dadurch waehrend der Laufzeit des Unterprozesses ueber
-`ps aux` oder /proc/<pid>/cmdline sichtbar sein. Nutze dieses Skript
-daher nur auf vertrauenswuerdigen Einzelbenutzer-Servern.
+Sicherheitshinweis: Standardmaessig werden die Zugangsdaten dem midealocal-
+Unterprozess ueber eine temporaere, nur fuer den aktuellen Nutzer lesbare
+midea-local.json (0600) uebergeben - NICHT auf der Kommandozeile. Nur falls
+dieser Weg kein Ergebnis liefert, wird einmalig auf die Kommandozeilen-
+Uebergabe zurueckgefallen; dann ist das Passwort waehrend der Laufzeit des
+Unterprozesses kurzzeitig ueber `ps aux` bzw. /proc/<pid>/cmdline sichtbar.
+Betreibe dieses Skript vorsichtshalber nur auf vertrauenswuerdigen
+Einzelbenutzer-Servern.
 
 Nutzung:
     python3 midea_refresh_tokens.py --name Wohnzimmer
@@ -40,6 +43,11 @@ from pathlib import Path
 
 CONFIG_PATH = Path(__file__).parent / "devices.json"
 CREDENTIALS_PATH = Path(__file__).parent / "credentials.json"
+# Temporaere Config-Datei fuer den midealocal-Unterprozess: darueber liest die
+# CLI Benutzername/Passwort aus dem CWD, statt sie auf der Kommandozeile zu
+# erwarten - so taucht das Passwort nicht in der Prozess-argv auf. Wird pro
+# Aufruf frisch geschrieben (0600) und danach entfernt; ist git-ignoriert.
+MIDEALOCAL_CONFIG_PATH = Path(__file__).parent / "midea-local.json"
 
 # Platzhalterwerte aus credentials.example.json: werden wie "nicht gesetzt"
 # behandelt, damit ein versehentlich unbearbeitetes Beispiel klar abgewiesen
@@ -201,40 +209,80 @@ def resolve_credentials(arg_username: str | None, arg_password: str | None) -> t
     return username, password
 
 
-def fetch_candidate_credentials(username: str, password: str, host: str) -> tuple[list[tuple[str, str]], str | None]:
-    """Ruft discover --debug auf und gibt ALLE gefundenen (key, token)-
-    Kandidaten zurueck, sowie die gemeldete Appliance-ID (falls vorhanden).
-    Wirft RuntimeError bei einem klaren Ausfuehrungsfehler."""
-    cmd = [
-        sys.executable, "-m", "midealocal.cli", "discover",
-        "--username", username, "--password", password,
-        "--host", host, "--debug",
-    ]
+def _run_discover(host: str, *, use_config: bool,
+                  username: str, password: str) -> subprocess.CompletedProcess:
+    """Fuehrt `midealocal.cli discover --host <host> --debug` aus.
+
+    use_config=True: schreibt die Zugangsdaten in eine temporaere
+    midea-local.json (0600) im Skriptverzeichnis und laesst --username/--password
+    WEG - die CLI liest die Datei aus dem CWD. So erscheint das Passwort nicht in
+    der Prozess-argv. Die Datei wird danach in jedem Fall wieder entfernt.
+    use_config=False: uebergibt die Zugangsdaten auf der Kommandozeile
+    (Fallback; Passwort dabei kurzzeitig via ps sichtbar).
+
+    Wirft RuntimeError bei einem klaren Ausfuehrungsfehler (Timeout, midealocal
+    nicht installiert)."""
+    script_dir = MIDEALOCAL_CONFIG_PATH.parent
+    cmd = [sys.executable, "-m", "midealocal.cli", "discover", "--host", host, "--debug"]
+    run_kwargs = {"capture_output": True, "text": True, "timeout": SUBPROCESS_TIMEOUT}
+    if use_config:
+        _atomic_write_json(MIDEALOCAL_CONFIG_PATH, {"username": username, "password": password})
+        run_kwargs["cwd"] = str(script_dir)
+    else:
+        cmd[4:4] = ["--username", username, "--password", password]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT)
+        return subprocess.run(cmd, **run_kwargs)
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"discover-Befehl hat nach {SUBPROCESS_TIMEOUT}s nicht reagiert "
                             f"(Geraet unter {host} erreichbar?)") from exc
     except FileNotFoundError as exc:
         raise RuntimeError("midealocal ist im aktuellen Python-Interpreter nicht installiert "
                             "(falsches venv aktiv?)") from exc
+    finally:
+        if use_config:
+            try:
+                MIDEALOCAL_CONFIG_PATH.unlink()
+            except FileNotFoundError:
+                pass
 
+
+def _parse_discover_output(result: subprocess.CompletedProcess) -> tuple[list[tuple[str, str]], str | None]:
+    """Extrahiert (key, token)-Kandidaten und Appliance-ID aus einem discover-
+    Ergebnis. Wirft RuntimeError bei Nicht-Null-Exit oder fehlender tokenlist."""
     combined_output = result.stdout + result.stderr
-
     if result.returncode != 0:
         tail = combined_output[-800:] if combined_output else "(keine Ausgabe)"
         raise RuntimeError(f"discover-Befehl endete mit Exit-Code {result.returncode}. "
                             f"Letzte Ausgabe: {tail}")
-
     matches = extract_token_key_pairs(combined_output)
     if not matches:
         tail = combined_output[-800:] if combined_output else "(keine Ausgabe)"
         raise RuntimeError(f"Kein tokenlist-Eintrag in der Ausgabe gefunden. Letzte Ausgabe: {tail}")
-
     appliance_ids = APPLIANCE_ID_RE.findall(combined_output)
-    appliance_id = appliance_ids[0] if appliance_ids else None
+    return matches, (appliance_ids[0] if appliance_ids else None)
 
-    return matches, appliance_id
+
+def fetch_candidate_credentials(username: str, password: str, host: str) -> tuple[list[tuple[str, str]], str | None]:
+    """Ruft discover --debug auf und gibt ALLE gefundenen (key, token)-
+    Kandidaten zurueck, sowie die gemeldete Appliance-ID (falls vorhanden).
+    Wirft RuntimeError bei einem klaren Ausfuehrungsfehler.
+
+    Primaerweg: Zugangsdaten via temporaerer midea-local.json (kein Passwort in
+    der Prozess-argv). Liefert dieser Weg kein verwertbares Ergebnis - etwa weil
+    eine aeltere midealocal-Version die Config-Datei nicht auswertet -, wird
+    EINMAL auf die Kommandozeilen-Variante zurueckgefallen (mit deutlicher
+    Warnung, da das Passwort dabei kurzzeitig ueber ps sichtbar ist). Ein echter
+    Ausfuehrungsfehler (Timeout, midealocal fehlt) loest KEINEN Fallback aus -
+    er wuerde ohnehin identisch scheitern."""
+    result = _run_discover(host, use_config=True, username=username, password=password)
+    try:
+        return _parse_discover_output(result)
+    except RuntimeError as exc_cfg:
+        print(f"WARNUNG: discover ueber midea-local.json lieferte kein Ergebnis "
+              f"({exc_cfg}). Falle einmalig auf die Kommandozeilen-Variante "
+              f"zurueck (Passwort dabei kurzzeitig via ps sichtbar).")
+        result = _run_discover(host, use_config=False, username=username, password=password)
+        return _parse_discover_output(result)
 
 
 async def verify_credentials(ip: str, port: int, device_id: int, key: str, token: str) -> bool:

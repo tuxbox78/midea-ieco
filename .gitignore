@@ -2,6 +2,9 @@
 # (Exact filenames, so the tracked *.example.json templates are NOT ignored.)
 credentials.json
 devices.json
+# Short-lived credential file handed to the midealocal CLI; normally removed
+# right after use, ignored so a killed run can never leave it tracked.
+midea-local.json
 
 # Python virtual environment & bytecode caches
 venv/
@@ -10,3 +13,6 @@ __pycache__/
 
 # Runtime logs
 *.log
+
+# Atomic-write temp files (mkstemp orphans, e.g. .devices.json.<rand>.tmp)
+*.tmp

@@ -12,8 +12,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 REPO_DIR = Path(__file__).resolve().parent.parent
@@ -171,6 +172,77 @@ class TokenExtractionTests(unittest.TestCase):
         text = ('response: b\'{"result": {"tokenlist": [{"udpId": "9", '
                 '"key": "deadbeef", "token": "cafe1234"}]}}\'')
         self.assertIn(("deadbeef", "cafe1234"), mrt.extract_token_key_pairs(text))
+
+
+class FetchDiscoverTests(unittest.TestCase):
+    """#5a: Passwort ueber temporaere 0600-midea-local.json statt argv; Fallback."""
+
+    TL = '{"tokenlist": [{"key": "aa", "token": "bb"}]}'
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        orig = mrt.MIDEALOCAL_CONFIG_PATH
+        mrt.MIDEALOCAL_CONFIG_PATH = Path(self.tmp.name) / "midea-local.json"
+        self.addCleanup(lambda: setattr(mrt, "MIDEALOCAL_CONFIG_PATH", orig))
+        self.cfg = mrt.MIDEALOCAL_CONFIG_PATH
+
+    @staticmethod
+    def _ns(rc=0, out="", err=""):
+        return SimpleNamespace(returncode=rc, stdout=out, stderr=err)
+
+    def test_config_route_keeps_password_out_of_argv(self):
+        calls = []
+
+        def fake_run(cmd, **kw):
+            # Waehrend des Aufrufs muss die 0600-Config existieren.
+            self.assertTrue(self.cfg.exists())
+            self.assertEqual(self.cfg.stat().st_mode & 0o777, 0o600)
+            calls.append((cmd, kw))
+            return self._ns(out=self.TL)
+
+        with mock.patch("midea_refresh_tokens.subprocess.run", side_effect=fake_run), \
+                redirect_stderr(io.StringIO()):
+            matches, _ = mrt.fetch_candidate_credentials("u@e", "secret", "192.168.0.5")
+
+        self.assertEqual(matches, [("aa", "bb")])
+        self.assertEqual(len(calls), 1)
+        cmd, kw = calls[0]
+        self.assertNotIn("--password", cmd)
+        self.assertNotIn("secret", cmd)
+        self.assertEqual(kw.get("cwd"), str(self.cfg.parent))
+        self.assertFalse(self.cfg.exists())  # danach wieder entfernt
+
+    def test_fallback_to_argv_when_config_route_empty(self):
+        outputs = [self._ns(rc=0, out="no tokens here"), self._ns(rc=0, out=self.TL)]
+        cmds = []
+
+        def fake_run(cmd, **kw):
+            cmds.append(cmd)
+            return outputs[len(cmds) - 1]
+
+        with mock.patch("midea_refresh_tokens.subprocess.run", side_effect=fake_run), \
+                redirect_stdout(io.StringIO()):
+            matches, _ = mrt.fetch_candidate_credentials("u@e", "secret", "192.168.0.5")
+
+        self.assertEqual(matches, [("aa", "bb")])
+        self.assertEqual(len(cmds), 2)
+        self.assertNotIn("--password", cmds[0])       # Primaerweg ohne Passwort
+        self.assertIn("--password", cmds[1])          # Fallback mit Passwort
+        self.assertIn("secret", cmds[1])
+        self.assertFalse(self.cfg.exists())
+
+    def test_exec_error_does_not_fall_back(self):
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            raise subprocess.TimeoutExpired(cmd, mrt.SUBPROCESS_TIMEOUT)
+
+        with mock.patch("midea_refresh_tokens.subprocess.run", side_effect=fake_run):
+            with self.assertRaises(RuntimeError):
+                mrt.fetch_candidate_credentials("u@e", "secret", "1.2.3.4")
+        self.assertEqual(len(calls), 1)  # Ausfuehrungsfehler -> kein Fallback
 
 
 if __name__ == "__main__":
