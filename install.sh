@@ -10,20 +10,23 @@
 #   B) Lokal nach dem Klonen des Repos:
 #      cd midea-ieco && ./install.sh
 #
-# Installationsort: $HOME/midea-ieco (Standard, per curl-Aufruf), bzw. das
-# aktuelle Verzeichnis, wenn lokal aus einem bereits vorhandenen Repo-Ordner
-# gestartet. Ueberschreibbar per Umgebungsvariable MIDEA_IECO_DIR.
-#
 # Unterstuetzte Plattformen: Debian/Ubuntu/Raspberry Pi OS, Fedora/RHEL,
 # Arch Linux, Alpine, openSUSE, macOS (mit Homebrew).
 # =============================================================================
 
 set -euo pipefail
 
-# --- Repository-Adresse: HIER ggf. anpassen, falls das Repo verschoben wird ---
+# =============================================================================
+# KONFIGURATION – hier anpassen, falls das Skript manuell heruntergeladen
+# und nicht per curl-Einzeiler ausgefuehrt wird, oder falls andere Pfade
+# gewuenscht sind. Ueberschreibbar auch per Umgebungsvariable:
+#   MIDEA_IECO_DIR=/eigener/pfad MIDEA_IECO_BIN_DIR=/eigener/bin ./install.sh
+# =============================================================================
+DEFAULT_INSTALL_DIR="/opt/local/midea-ieco"
+DEFAULT_BIN_DIR="/opt/local/bin"
 REPO_URL="https://github.com/tuxbox78/midea-ieco.git"
 REPO_ZIP_URL="https://github.com/tuxbox78/midea-ieco/archive/refs/heads/main.zip"
-# -------------------------------------------------------------------------
+# =============================================================================
 
 # --- Farben -------------------------------------------------------------
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
@@ -39,22 +42,24 @@ echo -e "${BLUE}=================================================${NC}"
 echo ""
 
 # =============================================================================
-# 0. Installationsverzeichnis bestimmen (funktioniert lokal UND per curl-Pipe)
+# 0. Installationsverzeichnisse bestimmen
 # =============================================================================
 if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
-    # Skript liegt als echte Datei vor (lokal ausgefuehrt)
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 else
-    # Skript wurde per "curl | bash" gestreamt – BASH_SOURCE ist dann leer/ungueltig
     SCRIPT_DIR=""
 fi
 
 if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/midea_ieco_ensure.py" ]]; then
+    # Lokal aus bereits vorhandenem Repo-Ordner gestartet -> dort bleiben
     INSTALL_DIR="$SCRIPT_DIR"
 else
-    INSTALL_DIR="${MIDEA_IECO_DIR:-$HOME/midea-ieco}"
-    info "Installiere nach: $INSTALL_DIR (aendern mit: MIDEA_IECO_DIR=/pfad bash -c \"...\")"
+    INSTALL_DIR="${MIDEA_IECO_DIR:-$DEFAULT_INSTALL_DIR}"
 fi
+BIN_DIR="${MIDEA_IECO_BIN_DIR:-$DEFAULT_BIN_DIR}"
+
+info "Installationsverzeichnis: $INSTALL_DIR"
+info "Wrapper-Skript wird abgelegt in: $BIN_DIR"
 
 # =============================================================================
 # 1. Plattform und Paketmanager erkennen
@@ -121,7 +126,7 @@ if ! python3 -m venv --help &>/dev/null; then
     warn "venv-Modul fehlt. Versuche Installation..."
     case "$PKG_MGR" in
         apt) install_pkg "python3-venv" || install_pkg "python${PY_MAJOR}.${PY_MINOR}-venv" ;;
-        *)   true ;;  # venv ist bei den meisten anderen Distros/macOS bereits Teil von python3
+        *)   true ;;
     esac
 fi
 python3 -m venv --help &>/dev/null || error "venv-Modul fehlt weiterhin. Bitte manuell installieren (z. B. 'sudo apt-get install python3-venv')."
@@ -133,10 +138,33 @@ if ! command -v git &>/dev/null && ! command -v curl &>/dev/null; then
 fi
 
 # =============================================================================
-# 3. Projekt-Dateien besorgen (lokal vorhanden vs. per curl-Pipe gestartet)
+# 3. Zielverzeichnisse anlegen (mit sudo, falls /opt/local nicht beschreibbar)
 # =============================================================================
-mkdir -p "$INSTALL_DIR"
+ensure_writable_dir() {
+    local dir="$1"
+    if [[ -d "$dir" && -w "$dir" ]]; then
+        return 0
+    fi
+    if [[ ! -d "$dir" ]]; then
+        if mkdir -p "$dir" 2>/dev/null; then
+            return 0
+        fi
+        info "Benötige sudo, um $dir anzulegen..."
+        sudo mkdir -p "$dir"
+        sudo chown "$(id -u):$(id -g)" "$dir"
+    elif [[ ! -w "$dir" ]]; then
+        info "Benötige sudo, um Schreibrechte für $dir zu erhalten..."
+        sudo chown "$(id -u):$(id -g)" "$dir"
+    fi
+}
 
+ensure_writable_dir "$(dirname "$INSTALL_DIR")"
+ensure_writable_dir "$INSTALL_DIR"
+ensure_writable_dir "$BIN_DIR"
+
+# =============================================================================
+# 4. Projekt-Dateien besorgen (lokal vorhanden vs. per curl-Pipe gestartet)
+# =============================================================================
 if [[ ! -f "$INSTALL_DIR/midea_ieco_ensure.py" ]]; then
     info "Lade Projekt-Dateien nach $INSTALL_DIR ..."
     if command -v git &>/dev/null; then
@@ -164,7 +192,7 @@ fi
 cd "$INSTALL_DIR"
 
 # =============================================================================
-# 4. Virtuelle Umgebung + Abhaengigkeiten
+# 5. Virtuelle Umgebung + Abhaengigkeiten
 # =============================================================================
 if [[ -d "venv" ]]; then
     info "venv existiert bereits – ueberspringe Erstellung."
@@ -186,7 +214,7 @@ info "  msmart-ng    : ${MSMART_VER:-unbekannt}"
 info "  midea-local  : ${MIDEALOCAL_VER:-unbekannt}"
 
 # =============================================================================
-# 5. WICHTIGER HINWEIS: Feste IP-Adressen im Router
+# 6. WICHTIGER HINWEIS: Feste IP-Adressen im Router
 # =============================================================================
 echo ""
 echo -e "${YELLOW}=================================================${NC}"
@@ -213,7 +241,7 @@ if [[ "$CONTINUE_SETUP" =~ ^[nN]$ ]]; then
 fi
 
 # =============================================================================
-# 6. Midea-Cloud-Zugangsdaten abfragen
+# 7. Midea-Cloud-Zugangsdaten abfragen
 # =============================================================================
 echo ""
 echo -e "${YELLOW}--- Midea-Zugangsdaten ---${NC}"
@@ -227,7 +255,7 @@ echo ""
 [[ -z "$MIDEA_USER" || -z "$MIDEA_PASS" ]] && error "E-Mail und Passwort duerfen nicht leer sein."
 
 # =============================================================================
-# 7. Geraete im Netzwerk suchen
+# 8. Geraete im Netzwerk suchen
 # =============================================================================
 echo ""
 info "Suche Midea-Geraete im lokalen Netzwerk (kann etwas dauern)..."
@@ -244,7 +272,7 @@ if [[ -z "$FOUND_IPS" ]]; then
 fi
 
 # =============================================================================
-# 8. devices.json interaktiv anlegen
+# 9. devices.json interaktiv anlegen
 # =============================================================================
 echo ""
 echo -e "${YELLOW}--- Geraetekonfiguration ---${NC}"
@@ -285,14 +313,13 @@ ok "devices.json geschrieben (chmod 600)."
 info "Hinweis: IP-Adressen koennen jederzeit direkt in devices.json angepasst werden."
 
 # =============================================================================
-# 9. Zugangsdaten in midea_refresh_tokens.py hinterlegen
+# 10. Zugangsdaten in midea_refresh_tokens.py hinterlegen
 # =============================================================================
 [[ -f "midea_refresh_tokens.py" ]] || error "midea_refresh_tokens.py nicht gefunden."
 
 ESCAPED_USER=$(printf '%s' "$MIDEA_USER" | sed 's/[&/\]/\\&/g')
 ESCAPED_PASS=$(printf '%s' "$MIDEA_PASS" | sed 's/[&/\]/\\&/g')
 
-# Kompatibel mit GNU sed (Linux) und BSD sed (macOS)
 if sed --version &>/dev/null; then
     sed -i \
         -e "s|DEFAULT_USERNAME = \".*\"|DEFAULT_USERNAME = \"$ESCAPED_USER\"|" \
@@ -308,7 +335,7 @@ chmod 600 midea_refresh_tokens.py
 ok "Zugangsdaten eingetragen und Datei gesichert (chmod 600)."
 
 # =============================================================================
-# 10. Token/Key-Paare abrufen
+# 11. Token/Key-Paare abrufen
 # =============================================================================
 echo ""
 info "Rufe Token/Key-Paare fuer alle Geraete ab..."
@@ -320,14 +347,27 @@ else
 fi
 
 # =============================================================================
-# 11. Skripte ausfuehrbar machen
+# 12. Skripte ausfuehrbar machen + Wrapper in BIN_DIR anlegen
 # =============================================================================
 chmod +x midea_ieco_ensure.py midea_refresh_tokens.py 2>/dev/null || true
 [[ -f midea_ieco_ensure.sh ]] && chmod +x midea_ieco_ensure.sh
-ok "Skripte ausfuehrbar gemacht."
+
+WRAPPER_PATH="$BIN_DIR/midea-ieco"
+cat > "$WRAPPER_PATH" <<EOF
+#!/usr/bin/env bash
+# Automatisch von install.sh erzeugter Wrapper.
+exec "$INSTALL_DIR/venv/bin/python3" "$INSTALL_DIR/midea_ieco_ensure.py" "\$@"
+EOF
+chmod +x "$WRAPPER_PATH"
+ok "Wrapper-Skript angelegt: $WRAPPER_PATH"
+
+case ":$PATH:" in
+    *":$BIN_DIR:"*) ;;
+    *) warn "$BIN_DIR ist nicht im PATH. Fuege ggf. hinzu mit: export PATH=\"$BIN_DIR:\$PATH\"" ;;
+esac
 
 # =============================================================================
-# 12. Schnelltest
+# 13. Schnelltest
 # =============================================================================
 echo ""
 read -r -p "  Testlauf fuer das erste Geraet durchfuehren? [j/N]: " DO_TEST
@@ -344,7 +384,7 @@ fi
 deactivate 2>/dev/null || true
 
 # =============================================================================
-# 13. Cron-Job-Vorschlag
+# 14. Cron-Job-Vorschlag
 # =============================================================================
 CURRENT_USER="$(whoami)"
 echo ""
@@ -378,7 +418,8 @@ echo -e "${GREEN}   Installation abgeschlossen!                  ${NC}"
 echo -e "${GREEN}=================================================${NC}"
 echo ""
 echo "  Verzeichnis:        $INSTALL_DIR"
-echo "  Manueller Aufruf:   cd $INSTALL_DIR && venv/bin/python3 midea_ieco_ensure.py <Geraetename>"
+echo "  Wrapper-Befehl:     midea-ieco <Geraetename>   (falls $BIN_DIR im PATH ist)"
+echo "  Direkter Aufruf:    cd $INSTALL_DIR && venv/bin/python3 midea_ieco_ensure.py <Geraetename>"
 echo "  Alle Geraete:       venv/bin/python3 midea_ieco_ensure.py all"
 echo "  Token auffrischen:  venv/bin/python3 midea_refresh_tokens.py --all"
 echo ""
