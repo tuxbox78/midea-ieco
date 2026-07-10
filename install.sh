@@ -4,11 +4,15 @@
 # =============================================================================
 # Kann auf zwei Arten genutzt werden:
 #
-#   A) Direktausführung per curl (empfohlen fuer Erstinstallation):
+#   A) Direktausfuehrung per curl (empfohlen fuer Erstinstallation):
 #      bash -c "$(curl -fsSL https://raw.githubusercontent.com/tuxbox78/midea-ieco/main/install.sh)"
 #
 #   B) Lokal nach dem Klonen des Repos:
 #      cd midea-ieco && ./install.sh
+#
+# Installationsort: $HOME/midea-ieco (Standard, per curl-Aufruf), bzw. das
+# aktuelle Verzeichnis, wenn lokal aus einem bereits vorhandenen Repo-Ordner
+# gestartet. Ueberschreibbar per Umgebungsvariable MIDEA_IECO_DIR.
 #
 # Unterstuetzte Plattformen: Debian/Ubuntu/Raspberry Pi OS, Fedora/RHEL,
 # Arch Linux, Alpine, openSUSE, macOS (mit Homebrew).
@@ -16,15 +20,17 @@
 
 set -euo pipefail
 
+# --- Repository-Adresse: HIER ggf. anpassen, falls das Repo verschoben wird ---
+REPO_URL="https://github.com/tuxbox78/midea-ieco.git"
+REPO_ZIP_URL="https://github.com/tuxbox78/midea-ieco/archive/refs/heads/main.zip"
+# -------------------------------------------------------------------------
+
 # --- Farben -------------------------------------------------------------
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 info()  { echo -e "${BLUE}[INFO]${NC}  $*"; }
 ok()    { echo -e "${GREEN}[OK]${NC}    $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 error() { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
-
-REPO_URL="https://github.com/YOUR_USERNAME/midea-ieco.git"
-REPO_ZIP_URL="https://github.com/YOUR_USERNAME/midea-ieco/archive/refs/heads/main.zip"
 
 echo ""
 echo -e "${BLUE}=================================================${NC}"
