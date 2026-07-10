@@ -150,6 +150,16 @@ def save_config(config: dict) -> None:
     _atomic_write_json(CONFIG_PATH, config)
 
 
+def _clean_credential_value(value: object) -> str | None:
+    """Verwirft Nicht-Strings und bekannte Platzhalterwerte (PLACEHOLDER_VALUES).
+
+    Gilt gleichermassen fuer Werte aus credentials.json UND fuer per
+    --username/--password uebergebene CLI-Argumente - ein versehentlich aus
+    credentials.example.json kopierter Platzhalter (z.B. 'DEIN_PASSWORT') soll
+    in keinem der beiden Faelle unbemerkt an die Cloud gesendet werden."""
+    return value if isinstance(value, str) and value not in PLACEHOLDER_VALUES else None
+
+
 def load_credentials() -> tuple[str | None, str | None]:
     """Liest Benutzername/Passwort aus credentials.json, sofern vorhanden.
 
@@ -172,11 +182,7 @@ def load_credentials() -> tuple[str | None, str | None]:
         print(f"WARNUNG: {CREDENTIALS_PATH} enthaelt kein JSON-Objekt. "
               f"Nutze Argumente/Prompt.")
         return None, None
-
-    def clean(value: object) -> str | None:
-        return value if isinstance(value, str) and value not in PLACEHOLDER_VALUES else None
-
-    return clean(data.get("username")), clean(data.get("password"))
+    return _clean_credential_value(data.get("username")), _clean_credential_value(data.get("password"))
 
 
 def resolve_credentials(arg_username: str | None, arg_password: str | None) -> tuple[str, str]:
@@ -185,17 +191,30 @@ def resolve_credentials(arg_username: str | None, arg_password: str | None) -> t
     getpass-Prompt - Letzterer NUR wenn ein TTY vorhanden ist. In einem
     nicht-interaktiven Lauf (z.B. Cron) ohne verfuegbare Zugangsdaten wird mit
     klarer Meldung abgebrochen; es wird bewusst nie ohne TTY geprompted, um
-    Haenger/EOF-Fehler zu vermeiden."""
+    Haenger/EOF-Fehler zu vermeiden.
+
+    CLI-Argumente durchlaufen denselben Platzhalter-Filter wie credentials.json
+    (_clean_credential_value) - ein versehentlich uebergebener Platzhalterwert
+    faellt dadurch auf Datei/Prompt zurueck statt an die Cloud gesendet zu
+    werden. Bricht der Nutzer einen Prompt per Strg+D (EOF) ab, endet das
+    Skript - wie jeder andere Zugangsdaten-Fehlerfall - mit einer klaren
+    Meldung auf stderr statt einem rohen Traceback. Strg+C (KeyboardInterrupt)
+    wird bewusst NICHT abgefangen: das Skript soll dabei wie jedes andere
+    Python-Programm sofort abbrechen."""
     file_username, file_password = load_credentials()
-    username = arg_username or file_username
-    password = arg_password or file_password
+    username = _clean_credential_value(arg_username) or file_username
+    password = _clean_credential_value(arg_password) or file_password
 
     if (not username or not password) and sys.stdin.isatty():
         print("Zugangsdaten unvollstaendig - bitte interaktiv eingeben:")
-        if not username:
-            username = input("  Midea-E-Mail: ").strip()
-        if not password:
-            password = getpass.getpass("  Midea-Passwort: ")
+        try:
+            if not username:
+                username = input("  Midea-E-Mail: ").strip()
+            if not password:
+                password = getpass.getpass("  Midea-Passwort: ")
+        except EOFError:
+            print("\nFEHLER: Eingabe abgebrochen (EOF).", file=sys.stderr)
+            sys.exit(1)
 
     if not username or not password:
         print(

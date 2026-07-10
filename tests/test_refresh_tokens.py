@@ -245,5 +245,99 @@ class FetchDiscoverTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)  # Ausfuehrungsfehler -> kein Fallback
 
 
+class _CredentialsPathMixin(unittest.TestCase):
+    """Legt ein temporaeres Verzeichnis an und pinnt mrt.CREDENTIALS_PATH darauf."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "credentials.json"
+        orig = mrt.CREDENTIALS_PATH
+        mrt.CREDENTIALS_PATH = self.path
+        self.addCleanup(lambda: setattr(mrt, "CREDENTIALS_PATH", orig))
+
+
+def _fake_stdin(is_tty):
+    return SimpleNamespace(isatty=lambda: is_tty)
+
+
+class CleanCredentialValueTests(unittest.TestCase):
+    """#18: gemeinsamer Platzhalter-Filter fuer Datei- UND CLI-Werte."""
+
+    def test_valid_value_passes_through(self):
+        self.assertEqual(mrt._clean_credential_value("real@value.example"), "real@value.example")
+
+    def test_every_known_placeholder_rejected(self):
+        for placeholder in mrt.PLACEHOLDER_VALUES:
+            self.assertIsNone(mrt._clean_credential_value(placeholder))
+
+    def test_non_string_rejected(self):
+        self.assertIsNone(mrt._clean_credential_value(None))
+        self.assertIsNone(mrt._clean_credential_value(123))
+
+
+class ResolveCredentialsTests(_CredentialsPathMixin):
+    """#18: CLI-Placeholder werden wie Datei-Placeholder behandelt; EOF sauber gemeldet."""
+
+    def test_valid_cli_args_used_directly(self):
+        with redirect_stdout(io.StringIO()):
+            username, password = mrt.resolve_credentials("u@e.example", "realpw")
+        self.assertEqual((username, password), ("u@e.example", "realpw"))
+
+    def test_cli_username_placeholder_falls_back_to_file(self):
+        self.path.write_text(
+            json.dumps({"username": "file@e.example", "password": "filepw"}),
+            encoding="utf-8")
+        with redirect_stdout(io.StringIO()):
+            username, password = mrt.resolve_credentials("dein@account.example", None)
+        self.assertEqual((username, password), ("file@e.example", "filepw"))
+
+    def test_cli_password_placeholder_falls_back_to_file(self):
+        self.path.write_text(
+            json.dumps({"username": "file@e.example", "password": "filepw"}),
+            encoding="utf-8")
+        with redirect_stdout(io.StringIO()):
+            username, password = mrt.resolve_credentials("cli@e.example", "HIER_PASSWORT_EINTRAGEN")
+        self.assertEqual(username, "cli@e.example")
+        self.assertEqual(password, "filepw")
+
+    def test_no_tty_and_no_credentials_exits_1_without_prompting(self):
+        with mock.patch.object(mrt.sys, "stdin", _fake_stdin(False)), \
+                mock.patch("builtins.input", side_effect=AssertionError("darf nicht prompten")), \
+                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as cm:
+                mrt.resolve_credentials(None, None)
+        self.assertEqual(cm.exception.code, 1)
+
+    def test_eof_on_username_prompt_exits_1_with_message(self):
+        with mock.patch.object(mrt.sys, "stdin", _fake_stdin(True)), \
+                mock.patch("builtins.input", side_effect=EOFError), \
+                redirect_stdout(io.StringIO()), \
+                redirect_stderr(io.StringIO()) as err:
+            with self.assertRaises(SystemExit) as cm:
+                mrt.resolve_credentials(None, None)
+        self.assertEqual(cm.exception.code, 1)
+        self.assertIn("EOF", err.getvalue())
+
+    def test_eof_on_password_prompt_exits_1_with_message(self):
+        with mock.patch.object(mrt.sys, "stdin", _fake_stdin(True)), \
+                mock.patch("builtins.input", return_value="u@e.example"), \
+                mock.patch("midea_refresh_tokens.getpass.getpass", side_effect=EOFError), \
+                redirect_stdout(io.StringIO()), \
+                redirect_stderr(io.StringIO()) as err:
+            with self.assertRaises(SystemExit) as cm:
+                mrt.resolve_credentials(None, None)
+        self.assertEqual(cm.exception.code, 1)
+        self.assertIn("EOF", err.getvalue())
+
+    def test_keyboard_interrupt_not_swallowed(self):
+        # Strg+C soll NICHT wie EOF behandelt werden - bewusst ungefangen.
+        with mock.patch.object(mrt.sys, "stdin", _fake_stdin(True)), \
+                mock.patch("builtins.input", side_effect=KeyboardInterrupt), \
+                redirect_stdout(io.StringIO()):
+            with self.assertRaises(KeyboardInterrupt):
+                mrt.resolve_credentials(None, None)
+
+
 if __name__ == "__main__":
     unittest.main()
