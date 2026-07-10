@@ -164,14 +164,28 @@ async def ensure_ieco(dev_conf: dict, only_if_on: bool) -> bool:
                 if attempt < ACTION_RETRIES:
                     await asyncio.sleep(RETRY_DELAY)
                     await close_device(device)
+                    # Fuer den naechsten Versuch eine FRISCHE Verbindung
+                    # aufbauen (ein fehlgeschlagener Versuch kann das AC-Objekt
+                    # mit defektem Socket-Zustand hinterlassen). Scheitert schon
+                    # der Reconnect, ist ein weiterer apply()-Versuch auf dem
+                    # toten Objekt zwecklos - das Retry-Budget steckt bereits in
+                    # connect_and_refresh (drei interne Versuche). Darum hier
+                    # sauber abbrechen, statt in die naechste Iteration auf einem
+                    # geschlossenen Objekt zu laufen. Es wird jede Exception
+                    # abgefangen (nicht nur RuntimeError), damit z.B. ein Timeout
+                    # in get_capabilities() nicht den gesamten 'all'-Lauf mit
+                    # einem Traceback beendet, sondern nur dieses eine Geraet.
                     try:
                         device = await connect_and_refresh(dev_conf)
                         await device.get_capabilities()
                         if was_off:
                             device.power_state = True
                         device.ieco = True
-                    except RuntimeError as exc2:
+                    except Exception as exc2:
                         last_exc = exc2
+                        print(f"  [{name}] Reconnect vor Wiederholung "
+                              f"fehlgeschlagen ({type(exc2).__name__}): {exc2}")
+                        break
 
         if not applied:
             print(f"[{name}] FEHLER beim Setzen: {last_exc}")
