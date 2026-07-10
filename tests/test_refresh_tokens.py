@@ -14,6 +14,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
+from unittest import mock
 
 REPO_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_DIR))
@@ -85,6 +86,47 @@ class MsmartMissingProbeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("msmart-ng", result.stderr)
         self.assertNotIn("Hole Token", result.stdout + result.stderr)
+
+
+class SaveConfigTests(_ConfigPathMixin):
+    """#3: atomarer, fensterfreier 0600-Write; Original bleibt bei Fehler intakt."""
+
+    def test_success_writes_0600_and_content(self):
+        mrt.save_config({"devices": [{"name": "Wohnzimmer", "token": "abc"}]})
+        self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+        text = self.path.read_text(encoding="utf-8")
+        self.assertTrue(text.endswith("\n"))
+        self.assertEqual(json.loads(text)["devices"][0]["name"], "Wohnzimmer")
+
+    def test_crash_leaves_original_intact_and_no_tmp(self):
+        self.path.write_text('{"devices": [{"name": "OLD"}]}\n', encoding="utf-8")
+        self.path.chmod(0o600)
+        before = self.path.read_bytes()
+        with mock.patch("midea_refresh_tokens.json.dump",
+                        side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                mrt.save_config({"devices": [{"name": "NEW"}]})
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(list(Path(self.tmp.name).glob(".devices.json.*")), [])
+
+    def test_preexisting_0644_becomes_0600_atomic(self):
+        self.path.write_text('{"devices": []}\n', encoding="utf-8")
+        self.path.chmod(0o644)
+        ino_before = self.path.stat().st_ino
+        mrt.save_config({"devices": [{"name": "X"}]})
+        self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+        self.assertNotEqual(self.path.stat().st_ino, ino_before)
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
+                     "root umgeht Verzeichnisrechte")
+    def test_readonly_dir_raises_oserror(self):
+        ro = Path(self.tmp.name) / "ro"
+        ro.mkdir()
+        mrt.CONFIG_PATH = ro / "devices.json"
+        ro.chmod(0o555)
+        self.addCleanup(lambda: ro.chmod(0o755))
+        with self.assertRaises(OSError):
+            mrt.save_config({"devices": []})
 
 
 if __name__ == "__main__":

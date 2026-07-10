@@ -31,9 +31,11 @@ import argparse
 import asyncio
 import getpass
 import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 CONFIG_PATH = Path(__file__).parent / "devices.json"
@@ -78,10 +80,44 @@ def load_config() -> dict:
     return data
 
 
+def _atomic_write_json(path: Path, data: object) -> None:
+    """Schreibt ``data`` als JSON atomar und mit Rechten 0600 nach ``path``.
+
+    Ablauf: in eine temporaere Datei IM SELBEN Verzeichnis schreiben (damit
+    os.replace auf demselben Dateisystem bleibt), Rechte auf 0600 setzen, auf
+    Platte zwingen (flush + fsync) und erst dann per os.replace an den
+    endgueltigen Namen ruecken. Das garantiert zweierlei:
+      (a) kein Zeitfenster, in dem die Datei world-readable waere - mkstemp
+          legt sie von vornherein nur fuer den aktuellen Nutzer lesbar an;
+      (b) kein zerstoerter Torso - bricht das Schreiben ab, bleibt die
+          bisherige ``path``-Datei unveraendert; zurueck bleibt hoechstens
+          eine harmlose, git-ignorierte .tmp-Waise.
+    os.replace ist laut POSIX eine atomare Operation."""
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent),
+                                    prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_name, path)
+    except BaseException:
+        # Best-effort-Aufraeumen der temporaeren Datei; das Original bleibt
+        # in jedem Fall unangetastet. Fehler wird weitergereicht.
+        try:
+            os.unlink(tmp_name)
+        except FileNotFoundError:
+            pass
+        raise
+
+
 def save_config(config: dict) -> None:
-    with open(CONFIG_PATH, "w") as f:
-        json.dump(config, f, indent=2, ensure_ascii=False)
-    CONFIG_PATH.chmod(0o600)
+    """Schreibt devices.json atomar und mit Rechten 0600 (siehe
+    _atomic_write_json). Bei einem Schreibfehler bleibt die bisherige Datei
+    unveraendert; der Fehler (OSError) wird an den Aufrufer weitergereicht."""
+    _atomic_write_json(CONFIG_PATH, config)
 
 
 def load_credentials() -> tuple[str | None, str | None]:
@@ -319,7 +355,12 @@ def main() -> None:
         print(f"Neues Geraet '{args.name}' wurde NICHT gespeichert, da der Abruf fehlgeschlagen ist.")
 
     if new_entry is None or successful_new_entry:
-        save_config(config)
+        try:
+            save_config(config)
+        except OSError as exc:
+            print(f"FEHLER: devices.json konnte nicht geschrieben werden "
+                  f"({type(exc).__name__}: {exc}).", file=sys.stderr)
+            sys.exit(1)
         print(f"devices.json aktualisiert: {CONFIG_PATH}")
 
     sys.exit(0 if ok else 2)
