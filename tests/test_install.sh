@@ -32,7 +32,9 @@ extract_func() {  # $1=name $2=file
 # Stubs fuer Hilfsfunktionen, die extrahierte Funktionen evtl. aufrufen.
 info() { :; }
 warn() { :; }
-error() { echo "ERROR: $*" >&2; return 1; }
+# Wie in install.sh bricht error() ab (exit) - Funktionen, die error() rufen
+# koennen, werden daher in einer Subshell getestet.
+error() { echo "ERROR: $*" >&2; exit 1; }
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -150,6 +152,42 @@ n0=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["devices"][0
 id1=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["devices"][1]["id"])' "$DWORK/devices.json")
 rc=0; { [ "$n0" = "Wohn Zimmer" ] && [ "$id1" = "67890" ]; } || rc=1
 assert "$rc" "Tripel korrekt gepaart (Name mit Space; 2. Geraete-ID)"
+
+# ---------------------------------------------------------------------------
+echo "== ensure_install_dir: kein Besitz-Takeover (#1) =="
+# ---------------------------------------------------------------------------
+eval "$(extract_func ensure_install_dir "$INSTALL")"
+# Fake-sudo protokolliert seine Argumente und fuehrt sie unprivilegiert aus.
+SUDOBIN="$WORK/fakebin"; mkdir -p "$SUDOBIN"
+SUDO_LOG="$WORK/sudo.log"
+cat > "$SUDOBIN/sudo" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >> "$SUDO_LOG"
+exec "\$@"
+EOF
+chmod +x "$SUDOBIN/sudo"
+# Fake-sudo einmalig in den PATH: die eigentlichen Aufrufe laufen dann in einer
+# Subshell (fuer error()'s exit), ohne PATH dort erneut zu veraendern.
+export PATH="$SUDOBIN:$PATH"
+
+# S1: existiert + beschreibbar -> ok, kein sudo/chown.
+: > "$SUDO_LOG"; d1="$WORK/exists_ok"; mkdir -p "$d1"
+rc=0; ( ensure_install_dir "$d1" ) || rc=1
+rc2=0; { [ "$rc" -eq 0 ] && ! grep -q . "$SUDO_LOG"; } || rc2=1
+assert "$rc2" "S1 vorhandenes beschreibbares Verz.: ok, kein sudo/chown"
+
+# S2: existiert nicht, Parent beschreibbar -> angelegt, kein sudo/chown.
+: > "$SUDO_LOG"; mkdir -p "$WORK/np"; d2="$WORK/np/leaf"
+rc=0; ( ensure_install_dir "$d2" ) || rc=1
+rc2=0; { [ "$rc" -eq 0 ] && [ -d "$d2" ] && ! grep -q . "$SUDO_LOG"; } || rc2=1
+assert "$rc2" "S2 neues Verz. bei beschreibbarem Parent: ohne sudo/chown angelegt"
+
+# S3: existiert + NICHT beschreibbar -> Abbruch (error), KEIN chown.
+: > "$SUDO_LOG"; d3="$WORK/exists_ro"; mkdir -p "$d3"; chmod 000 "$d3"
+rc=0; ( ensure_install_dir "$d3" 2>/dev/null ) || rc=1
+chmod 755 "$d3"
+rc2=0; { [ "$rc" -ne 0 ] && ! grep -q chown "$SUDO_LOG"; } || rc2=1
+assert "$rc2" "S3 vorhandenes nicht-beschreibbares Verz.: Abbruch ohne chown"
 
 echo ""
 echo "RESULT(test_install.sh): $pass passed, $fail failed"

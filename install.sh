@@ -203,44 +203,49 @@ if ! command -v git &>/dev/null && ! command -v curl &>/dev/null; then
 fi
 
 # =============================================================================
-# 3. Zielverzeichnisse anlegen
+# 3. Installationsverzeichnis anlegen
 # =============================================================================
-# WICHTIG: Nur das ZIEL-Unterverzeichnis selbst wird bei Bedarf per chown
-# in den Besitz des aktuellen Nutzers ueberfuehrt - NIEMALS ein bereits
-# existierender, potenziell gemeinsam genutzter Elternordner wie /opt/local
-# selbst. So bleibt der Besitz von /opt/local unangetastet, falls dort
-# bereits andere, root-verwaltete Software liegt.
-ensure_target_dir() {
+# WICHTIG: Ein bereits BESTEHENDES Verzeichnis wird NIEMALS automatisch per
+# chown uebernommen - es koennte fremde/root-verwaltete Software enthalten
+# (z.B. ist der Default /opt/local/bin auf macOS das MacPorts-Bin-Verzeichnis).
+# Nur ein von uns SELBST frisch angelegtes Zielverzeichnis wird dem aktuellen
+# Nutzer uebereignet. Ein vorhandenes, aber nicht beschreibbares Verzeichnis
+# fuehrt zu einem klaren Abbruch mit Handlungsoptionen (kein Besitz-Takeover).
+ensure_install_dir() {
     local dir="$1"
-    local parent
-    parent="$(dirname "$dir")"
-
-    if [[ ! -d "$parent" ]]; then
-        if ! mkdir -p "$parent" 2>/dev/null; then
-            info "Benoetige sudo, um $parent anzulegen..."
-            sudo mkdir -p "$parent"
-        fi
-    fi
-
     if [[ -d "$dir" && -w "$dir" ]]; then
         return 0
     fi
-
-    if [[ ! -d "$dir" ]]; then
-        if mkdir -p "$dir" 2>/dev/null; then
-            return 0
-        fi
-        info "Benoetige sudo, um $dir anzulegen..."
-        sudo mkdir -p "$dir"
-        sudo chown "$(id -u):$(id -g)" "$dir"
-    elif [[ ! -w "$dir" ]]; then
-        info "Benoetige sudo, um Schreibrechte fuer $dir zu erhalten..."
-        sudo chown "$(id -u):$(id -g)" "$dir"
+    if [[ -d "$dir" && ! -w "$dir" ]]; then
+        local hint=""
+        [[ -f "$dir/midea_ieco_ensure.py" ]] && hint=" Das sieht nach einer frueheren Installation unter einem anderen Benutzer aus."
+        error "Installationsverzeichnis $dir existiert, ist aber nicht beschreibbar.$hint
+  Bitte eine Option waehlen:
+    - anderes Verzeichnis nutzen:   MIDEA_IECO_DIR=/dein/pfad  (Installer erneut ausfuehren)
+    - Rechte selbst korrigieren:    sudo chown -R $(id -un) $(printf '%q' "$dir")
+    - Verzeichnis entfernen, falls es nicht mehr benoetigt wird."
     fi
+    # Verzeichnis existiert noch nicht: zuerst die Elternkette anlegen (bei
+    # Bedarf per sudo, aber OHNE chown), dann das Blatt SELBST anlegen.
+    local parent; parent="$(dirname "$dir")"
+    if [[ ! -d "$parent" ]]; then
+        mkdir -p "$parent" 2>/dev/null || { info "Benoetige sudo, um $parent anzulegen..."; sudo mkdir -p "$parent"; }
+    fi
+    # 'mkdir' OHNE -p: ein zwischenzeitlich von Dritten angelegtes Verzeichnis
+    # (TOCTOU) wird NICHT als Erfolg gewertet - dann scheitert auch das folgende
+    # 'sudo mkdir' (ebenfalls ohne -p) und wir uebernehmen NICHTS Fremdes.
+    if mkdir "$dir" 2>/dev/null; then
+        return 0
+    fi
+    info "Benoetige sudo, um $dir anzulegen..."
+    sudo mkdir "$dir"
+    sudo chown "$(id -u):$(id -g)" "$dir"
 }
 
-ensure_target_dir "$INSTALL_DIR"
-ensure_target_dir "$BIN_DIR"
+ensure_install_dir "$INSTALL_DIR"
+# BIN_DIR wird NICHT hier vorbereitet - es wird in Schritt 12 bei Bedarf
+# angelegt und der Wrapper per 'install'/sudo hineingelegt, ohne dessen
+# Besitzverhaeltnisse zu aendern.
 
 # =============================================================================
 # 4. Projekt-Dateien besorgen
@@ -451,13 +456,33 @@ fi
 # =============================================================================
 chmod +x midea_ieco_ensure.py midea_refresh_tokens.py 2>/dev/null || true
 
+# BIN_DIR bei Bedarf anlegen - OHNE chown. Root-eigene bin-Verzeichnisse (z.B.
+# /opt/local/bin) sind der Normalfall; wir legen EINE Datei hinein, statt das
+# Verzeichnis zu uebernehmen.
+if [[ ! -d "$BIN_DIR" ]]; then
+    mkdir -p "$BIN_DIR" 2>/dev/null || { info "Benoetige sudo, um $BIN_DIR anzulegen..."; sudo mkdir -p "$BIN_DIR"; }
+fi
+
 WRAPPER_PATH="$BIN_DIR/midea-ieco"
-cat > "$WRAPPER_PATH" <<EOF
+# Wrapper zunaechst in eine temporaere Datei schreiben, dann installieren - so
+# laesst sich bei nicht beschreibbarem (root-eigenem) BIN_DIR gezielt EINE Datei
+# per sudo ablegen, ohne die Besitzverhaeltnisse des Verzeichnisses zu aendern.
+WRAPPER_TMP="$(mktemp)"
+CLEANUP_PATHS+=("$WRAPPER_TMP")
+cat > "$WRAPPER_TMP" <<EOF
 #!/usr/bin/env bash
 # Automatisch von install.sh erzeugter Wrapper.
 exec "$INSTALL_DIR/venv/bin/python3" "$INSTALL_DIR/midea_ieco_ensure.py" "\$@"
 EOF
-chmod +x "$WRAPPER_PATH"
+
+if [[ -w "$BIN_DIR" ]]; then
+    install -m 0755 "$WRAPPER_TMP" "$WRAPPER_PATH" 2>/dev/null \
+        || { cp "$WRAPPER_TMP" "$WRAPPER_PATH" && chmod 0755 "$WRAPPER_PATH"; }
+else
+    info "Benoetige sudo, um den Wrapper nach $BIN_DIR zu schreiben..."
+    sudo install -m 0755 "$WRAPPER_TMP" "$WRAPPER_PATH" 2>/dev/null \
+        || { sudo cp "$WRAPPER_TMP" "$WRAPPER_PATH" && sudo chmod 0755 "$WRAPPER_PATH"; }
+fi
 ok "Wrapper-Skript angelegt: $WRAPPER_PATH"
 
 case ":$PATH:" in

@@ -72,7 +72,7 @@ MIDEA_IECO_DIR=/your/custom/path MIDEA_IECO_BIN_DIR=/your/custom/bin \
   bash -c "$(curl -fsSL https://raw.githubusercontent.com/tuxbox78/midea-ieco/main/install.sh)"
 ```
 
-If `/opt/local` isn't writable by your user, the installer will use `sudo` once to create it and hand ownership back to you, so no further `sudo` calls are needed afterwards.
+If the install directory doesn't exist yet, the installer creates it and hands ownership to you (using `sudo` only if its parent isn't writable). It never takes over a directory that already exists: if the install directory is present but not writable, it stops and shows your options (choose another path via `MIDEA_IECO_DIR`, fix the permissions yourself, or remove it). The small `midea-ieco` wrapper is placed into the bin directory with a single `sudo install` step when that directory is root-owned (e.g. MacPorts' `/opt/local/bin`), without changing the directory's ownership.
 
 > **Before you begin:** Have your **MSmartHome username and password** ready — the same credentials used in the official Midea app. They are requested once during installation to fetch device tokens.
 
