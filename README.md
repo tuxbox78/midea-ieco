@@ -55,7 +55,7 @@ The app does not provide conditional logic such as "enable iECO only if the unit
 
 - Python 3.10 or later
 - A Midea Cloud account (**MSmartHome** or **Midea Smarthome**) in which the devices are already registered and working
-- The controlling computer must be on the same local network as the air conditioners (port 6444/TCP reachable — no client isolation or VLAN separation)
+- The controlling computer must be able to reach the air conditioners on port 6444/TCP — client/AP isolation must be disabled for the relevant network segment. VLAN separation between IoT devices and computers is fine as long as routing and firewall rules permit that port; see [Network troubleshooting](#network-troubleshooting) for details.
 
 ## Quick install (one-liner)
 

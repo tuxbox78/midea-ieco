@@ -55,7 +55,7 @@ Die App bietet keine bedingte Logik wie „iECO nur aktivieren, wenn die Anlage 
 
 - Python 3.10 oder neuer
 - Ein Midea-Cloud-Konto (**MSmartHome** oder **Midea Smarthome**), in dem die Geräte bereits eingerichtet und funktionsfähig sind
-- Der steuernde Computer muss sich im selben lokalen Netzwerk wie die Klimaanlagen befinden (Port 6444/TCP muss erreichbar sein – keine Client-Isolation oder VLAN-Trennung)
+- Der steuernde Computer muss die Klimaanlagen auf Port 6444/TCP erreichen können – Client-/AP-Isolation muss für das betreffende Netzwerksegment deaktiviert sein. Eine VLAN-Trennung zwischen IoT-Geräten und Computern ist unproblematisch, solange Routing und Firewall-Regeln diesen Port zulassen; Details siehe [Netzwerk-Fehlerbehebung](#netzwerk-fehlerbehebung).
 
 ## Schnellinstallation per Einzeiler
 
