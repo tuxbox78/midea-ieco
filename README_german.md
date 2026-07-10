@@ -14,7 +14,7 @@ Midea-Klimaanlagen wie die PortaSplit besitzen **zwei getrennte Energiesparmodi*
 
 | | **ECO** (Taste/Fernbedienung) | **iECO** (nur App/Cloud) |
 |---|---|---|
-| Aktivierung | Physische Taste am Gerät oder Fernbedienung | Ausschließlich über die MSmartHome- / 美的美居-App |
+| Aktivierung | Physische Taste am Gerät oder Fernbedienung | Ausschließlich über die MSmartHome- / Midea Smarthome-App |
 | Zieltemperatur | **Wird automatisch fix auf 24 °C** gesetzt, Lüfter auf Auto | **Bleibt bei der vom Nutzer eingestellten Zieltemperatur** (z. B. 21 °C, 25 °C usw.) — nicht fix |
 | Mechanismus | Einfacher fester Sollwert | Cloud-verbundener, adaptiver Algorithmus, der die Verdichterleistung feinfühlig um den vom Nutzer gewählten Sollwert herum regelt |
 | Automatische Abschaltung | Kann nach Inaktivitätsphase am Sollwert automatisch abschalten | Verlässt den Modus automatisch nach acht Stunden und kehrt zum normalen Auto-Modus zurück |
@@ -30,7 +30,7 @@ Messungen im Rahmen dieses Projekts ergaben rund 4 kWh **pro Tag** Mehrverbrauch
 
 ### Das Problem: iECO verschwindet nach manuellem Eingriff
 
-iECO verlässt den Modus automatisch nach acht Stunden und kehrt zum normalen Auto-Modus zurück. Noch wichtiger: iECO lässt sich derzeit **ausschließlich über die MSmartHome-App (美的美居)** aktivieren; es gibt keine physische iECO-Taste an der Fernbedienung oder am Gerät (die dort vorhandene Taste steuert nur den einfacheren, fest auf 24 °C gesetzten ECO-Modus).
+iECO verlässt den Modus automatisch nach acht Stunden und kehrt zum normalen Auto-Modus zurück. Noch wichtiger: iECO lässt sich derzeit **ausschließlich über die MSmartHome-App (Midea Smarthome)** aktivieren; es gibt keine physische iECO-Taste an der Fernbedienung oder am Gerät (die dort vorhandene Taste steuert nur den einfacheren, fest auf 24 °C gesetzten ECO-Modus).
 
 Wird die Klimaanlage anschließend manuell ausgeschaltet und wieder eingeschaltet – direkt am Gerät oder mit der Fernbedienung – bleibt iECO deaktiviert. Das fällt leicht nicht auf, weil die Anlage ansonsten normal zu funktionieren scheint und weiterhin die zuletzt eingestellte Zieltemperatur hält. Anstatt nach jedem manuellen Neustart daran zu denken, die App zu öffnen und iECO erneut zu aktivieren, automatisiert dieses Projekt diese Aufgabe zuverlässig im Hintergrund.
 
@@ -50,7 +50,7 @@ Die App bietet keine bedingte Logik wie „iECO nur aktivieren, wenn die Anlage 
 ## Voraussetzungen
 
 - Python 3.10 oder neuer
-- Ein Midea-Cloud-Konto (**MSmartHome** oder **美的美居**), in dem die Geräte bereits eingerichtet und funktionsfähig sind
+- Ein Midea-Cloud-Konto (**MSmartHome** oder **Midea Smarthome**), in dem die Geräte bereits eingerichtet und funktionsfähig sind
 - Der steuernde Computer muss sich im selben lokalen Netzwerk wie die Klimaanlagen befinden (Port 6444/TCP muss erreichbar sein – keine Client-Isolation oder VLAN-Trennung)
 
 ## Schnellinstallation per Einzeiler
@@ -70,7 +70,7 @@ MIDEA_IECO_DIR=/eigener/pfad MIDEA_IECO_BIN_DIR=/eigener/bin \
 
 Falls `/opt/local` für deinen Benutzer nicht beschreibbar ist, nutzt der Installer einmalig `sudo`, um das Verzeichnis anzulegen und dir anschließend den Besitz zu übertragen — danach sind keine weiteren `sudo`-Aufrufe mehr nötig.
 
-> **Bevor du beginnst:** Halte deinen **MSmartHome- (bzw. 美的美居-)Benutzernamen und dein Passwort** bereit – dieselben Zugangsdaten wie in der offiziellen Midea-App. Sie werden einmalig während der Installation zum Abholen der Geräte-Token abgefragt.
+> **Bevor du beginnst:** Halte deinen **MSmartHome- Benutzernamen und dein Passwort** bereit – dieselben Zugangsdaten wie in der offiziellen Midea-App. Sie werden einmalig während der Installation zum Abholen der Geräte-Token abgefragt.
 
 > **Empfohlen, aber nicht zwingend:** Vergib im Router feste IP-Adressen (DHCP-Reservierung nach MAC-Adresse) für deine Klimaanlagen, bevor du den Installer startest. Das verhindert, dass sich die IP nach einem Geräte- oder Router-Neustart ändert. Überspringst du diesen Schritt, oder ändert sich die IP später trotzdem, kannst du sie jederzeit direkt in `devices.json` nachtragen — ohne Neuinstallation.
 
