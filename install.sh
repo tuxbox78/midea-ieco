@@ -147,6 +147,25 @@ shell_quote_for_cron() {
     printf '%s' "${s//%/\\%}"   # unescaptes % wuerde cron zu Newline machen
 }
 
+# Prueft einen Geraetenamen. Rueckgabe 0 = gueltig; sonst 1 mit einem
+# Ablehnungsgrund auf stderr. Abgelehnt werden: leer, fuehrendes '-'
+# (sonst als Option missdeutet), das reservierte 'all' (steht fuer 'alle
+# Geraete') und Steuerzeichen (die u.a. eine spaetere Weiterverarbeitung
+# zerlegen koennten).
+is_valid_device_name() {
+    local name="$1"
+    if [[ -z "$name" ]]; then
+        echo "Name darf nicht leer sein." >&2; return 1
+    elif [[ "$name" == -* ]]; then
+        echo "Name darf nicht mit '-' beginnen (sonst als Option missdeutet)." >&2; return 1
+    elif [[ "$name" == "all" ]]; then
+        echo "'all' ist reserviert (steht fuer 'alle Geraete') - bitte anders benennen." >&2; return 1
+    elif [[ "$name" == *[[:cntrl:]]* ]]; then
+        echo "Name darf keine Steuerzeichen enthalten." >&2; return 1
+    fi
+    return 0
+}
+
 # =============================================================================
 # 2. Grundwerkzeuge: python3, git/curl, unzip
 # =============================================================================
@@ -168,7 +187,10 @@ ok "Python $PY_MAJOR.$PY_MINOR gefunden."
 if ! python3 -m venv --help &>/dev/null; then
     warn "venv-Modul fehlt. Versuche Installation..."
     case "$PKG_MGR" in
-        apt) install_pkg "python3-venv" || install_pkg "python${PY_MAJOR}.${PY_MINOR}-venv" ;;
+        # '|| true', damit ein fehlgeschlagener Installationsversuch unter
+        # 'set -e' NICHT hier abbricht - die verbindliche Pruefung (mit
+        # handlungsleitender Meldung) folgt unmittelbar danach.
+        apt) install_pkg "python3-venv" || install_pkg "python${PY_MAJOR}.${PY_MINOR}-venv" || true ;;
         *)   true ;;
     esac
 fi
@@ -232,7 +254,8 @@ if [[ ! -f "$INSTALL_DIR/midea_ieco_ensure.py" ]]; then
             git clone --quiet "$REPO_URL" "$INSTALL_DIR"
         fi
     elif command -v curl &>/dev/null; then
-        command -v unzip &>/dev/null || install_pkg unzip
+        command -v unzip &>/dev/null || install_pkg unzip \
+            || error "unzip wird fuer den ZIP-Download benoetigt, konnte aber nicht installiert werden (Paketmanager: $PKG_MGR). Bitte git oder unzip manuell installieren."
         TMP_DIR="$(mktemp -d)"
         CLEANUP_PATHS+=("$TMP_DIR")
         TMP_ZIP="$TMP_DIR/midea-ieco.zip"
@@ -342,8 +365,13 @@ DEVICE_NAMES=(); DEVICE_IPS=(); DEVICE_IDS=()
 for (( i=1; i<=DEVICE_COUNT; i++ )); do
     echo ""
     echo "  Geraet $i von $DEVICE_COUNT:"
-    read -r -p "    Name (z.B. Wohnzimmer)  : " DEV_NAME
-    [[ -z "$DEV_NAME" ]] && error "Gerätename darf nicht leer sein."
+    while true; do
+        read -r -p "    Name (z.B. Wohnzimmer)  : " DEV_NAME
+        if reason="$(is_valid_device_name "$DEV_NAME" 2>&1)"; then
+            break
+        fi
+        warn "$reason"
+    done
 
     while true; do
         read -r -p "    IP-Adresse              : " DEV_IP
@@ -361,28 +389,43 @@ for (( i=1; i<=DEVICE_COUNT; i++ )); do
 done
 
 # JSON wird ueber python3/json erzeugt statt per String-Konkatenation - das
-# macht Sonderzeichen in Geraetenamen (Anfuehrungszeichen, Backslashes)
-# automatisch sicher. Die Datei wird direkt mit Rechten 0600 angelegt
-# (os.open), es entsteht also kein kurzes Zeitfenster, in dem sie
-# world-readable waere.
-NAMES_JOINED=$(printf '%s\x1e' "${DEVICE_NAMES[@]}")
-IPS_JOINED=$(printf '%s\x1e' "${DEVICE_IPS[@]}")
-IDS_JOINED=$(printf '%s\x1e' "${DEVICE_IDS[@]}")
+# macht Sonderzeichen in Geraetenamen (Anfuehrungszeichen, Backslashes, Umlaute)
+# automatisch sicher. Die Werte werden als flache (name, ip, id)-Tripelfolge per
+# argv uebergeben (kein In-Band-Trennzeichen wie \x1e mehr, das ein Name enthalten
+# koennte). Geschrieben wird atomar mit mkstemp + os.replace und Rechten 0600 -
+# kein world-readable-Zeitfenster und kein zerstoerter Torso, auch wenn
+# devices.json bereits existierte.
+DEVICE_ARGS=()
+for (( i=0; i<DEVICE_COUNT; i++ )); do
+    DEVICE_ARGS+=("${DEVICE_NAMES[i]}" "${DEVICE_IPS[i]}" "${DEVICE_IDS[i]}")
+done
 
-python3 - "$NAMES_JOINED" "$IPS_JOINED" "$IDS_JOINED" <<'PYEOF'
-import json, os, sys
-names = sys.argv[1].split('\x1e')[:-1]
-ips = sys.argv[2].split('\x1e')[:-1]
-ids = sys.argv[3].split('\x1e')[:-1]
+python3 - "${DEVICE_ARGS[@]}" <<'PYEOF'
+import json, os, sys, tempfile
+args = sys.argv[1:]
 devices = [
-    {"name": n, "ip": ip, "port": 6444, "id": int(i), "token": "", "key": ""}
-    for n, ip, i in zip(names, ips, ids)
+    {"name": args[k], "ip": args[k + 1], "port": 6444,
+     "id": int(args[k + 2]), "token": "", "key": ""}
+    for k in range(0, len(args), 3)
 ]
-fd = os.open("devices.json", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-with os.fdopen(fd, "w", encoding="utf-8") as f:
-    json.dump({"devices": devices}, f, indent=2, ensure_ascii=False)
-    f.write("\n")
-os.chmod("devices.json", 0o600)  # falls die Datei bereits existierte
+target = "devices.json"
+directory = os.path.dirname(os.path.abspath(target)) or "."
+fd, tmp = tempfile.mkstemp(dir=directory,
+                           prefix="." + os.path.basename(target) + ".", suffix=".tmp")
+try:
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump({"devices": devices}, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, target)
+except BaseException:
+    try:
+        os.unlink(tmp)
+    except FileNotFoundError:
+        pass
+    raise
 PYEOF
 
 ok "devices.json geschrieben (chmod 600)."

@@ -96,6 +96,61 @@ got="$(sh -c "cd $cron_seen && pwd")"
 rc=0; [ "$got" = "$tricky" ] || rc=1
 assert "$rc" "Space/Quote/%-Pfad: cron-Kommandofeld erreicht das Verzeichnis"
 
+# ---------------------------------------------------------------------------
+echo "== set -e error-path fix (#6) =="
+# ---------------------------------------------------------------------------
+# Kontrolle: ohne '|| true' bricht set -e beim zweiten fehlgeschlagenen
+# install_pkg ab, BEVOR die nachfolgende Pruefung greift.
+buggy_out="$(bash -c '
+    set -e
+    install_pkg() { return 1; }
+    case apt in apt) install_pkg a || install_pkg b ;; esac
+    echo REACHED' 2>/dev/null || true)"
+rc=0; [ "$buggy_out" != "REACHED" ] || rc=1
+assert "$rc" "Kontrolle: altes Muster bricht vor der Pruefung ab"
+# Fix: mit '|| true' wird die nachfolgende Pruefung erreicht.
+fixed_out="$(bash -c '
+    set -e
+    install_pkg() { return 1; }
+    case apt in apt) install_pkg a || install_pkg b || true ;; esac
+    echo REACHED' 2>/dev/null || true)"
+rc=0; [ "$fixed_out" = "REACHED" ] || rc=1
+assert "$rc" "Fix: '|| true' laesst die nachfolgende Pruefung greifen"
+
+# ---------------------------------------------------------------------------
+echo "== is_valid_device_name (#9) =="
+# ---------------------------------------------------------------------------
+eval "$(extract_func is_valid_device_name "$INSTALL")"
+for good in "Wohnzimmer" "Wohn Zimmer" "Küche" "buero-2"; do
+    rc=0; is_valid_device_name "$good" 2>/dev/null || rc=1
+    assert "$rc" "gueltig: '$good'"
+done
+for bad in "" "-foo" "all"; do
+    rc=0; is_valid_device_name "$bad" 2>/dev/null && rc=1
+    assert "$rc" "abgelehnt: '$bad'"
+done
+rc=0; is_valid_device_name "$(printf 'a\036b')" 2>/dev/null && rc=1
+assert "$rc" "abgelehnt: Name mit RS-Steuerzeichen (\\x1e)"
+rc=0; is_valid_device_name "$(printf 'a\tb')" 2>/dev/null && rc=1
+assert "$rc" "abgelehnt: Name mit Tabulator"
+
+# ---------------------------------------------------------------------------
+echo "== devices.json triplet-argv write (#9 / #8) =="
+# ---------------------------------------------------------------------------
+extract_py_block() {  # $1=start-regex $2=file
+    awk -v re="$1" '$0 ~ re {f=1; next} f && /^PYEOF$/ {exit} f {print}' "$2"
+}
+PYSRC="$(extract_py_block 'DEVICE_ARGS.*PYEOF' "$INSTALL")"
+DWORK="$WORK/dev"; mkdir -p "$DWORK"
+( cd "$DWORK" && python3 -c "$PYSRC" \
+    "Wohn Zimmer" "192.168.0.5" "12345" "Küche" "192.168.0.6" "67890" )
+rc=0; [ "$(mode_of "$DWORK/devices.json")" = "600" ] || rc=1
+assert "$rc" "devices.json 0600"
+n0=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["devices"][0]["name"])' "$DWORK/devices.json")
+id1=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["devices"][1]["id"])' "$DWORK/devices.json")
+rc=0; { [ "$n0" = "Wohn Zimmer" ] && [ "$id1" = "67890" ]; } || rc=1
+assert "$rc" "Tripel korrekt gepaart (Name mit Space; 2. Geraete-ID)"
+
 echo ""
 echo "RESULT(test_install.sh): $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
