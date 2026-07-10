@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2026 Frank Seidel <frank@f-seidel.de>
+# SPDX-License-Identifier: MIT
 # Komplette Testsuite: Lint (shellcheck/bash -n), Python-Syntax, Python-Unit-
 # Tests und die install.sh-Funktionstests. Keine externen Abhaengigkeiten, keine
 # Hardware noetig. Aufruf: bash tests/run_all.sh

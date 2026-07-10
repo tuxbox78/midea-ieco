@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2026 Frank Seidel <frank@f-seidel.de>
+# SPDX-License-Identifier: MIT
 # Isolierte Funktionstests fuer install.sh. Einzelne Funktionen werden aus
 # install.sh extrahiert und mit gestubbten Hilfsfunktionen gesourct, damit die
 # Logik ohne einen echten (interaktiven, sudo-behafteten) Installer-Lauf

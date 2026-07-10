@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Frank Seidel <frank@f-seidel.de>
+# SPDX-License-Identifier: MIT
 """Unit-Tests fuer midea_ieco_ensure.py (stdlib unittest, Fake-msmart, keine Hardware).
 
 Ausfuehren: python3 -m unittest tests.test_ensure  (aus dem Repo-Root)

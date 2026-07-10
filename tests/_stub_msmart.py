@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Frank Seidel <frank@f-seidel.de>
+# SPDX-License-Identifier: MIT
 """Test-Hilfsmodul: registriert ein minimales Fake-``msmart``-Paket in
 ``sys.modules``, damit die Zielmodule ohne die echte Abhaengigkeit importierbar
 sind. VOR dem Import von ``midea_ieco_ensure`` (Top-Level-Import von msmart)

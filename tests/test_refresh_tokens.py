@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Frank Seidel <frank@f-seidel.de>
+# SPDX-License-Identifier: MIT
 """Unit-Tests fuer midea_refresh_tokens.py (stdlib unittest, keine Hardware).
 
 Ausfuehren: python3 -m unittest tests.test_refresh_tokens  (aus dem Repo-Root)
