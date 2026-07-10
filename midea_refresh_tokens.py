@@ -48,13 +48,35 @@ PLACEHOLDER_VALUES = frozenset({"", "dein@account.example", "DEIN_PASSWORT", "HI
 SUBPROCESS_TIMEOUT = 60
 VERIFY_TIMEOUT = 10
 
-# Matcht JEDEN tokenlist-Eintrag in der rohen JSON-Antwort der Cloud
-# (Format mit doppelten Anfuehrungszeichen, z.B.
-#  response: b'{"result": {"tokenlist": [{"udpId": "...", "key": "...", "token": "..."}]}...}')
-TOKENLIST_RE = re.compile(
-    r'"tokenlist"\s*:\s*\[.*?"key"\s*:\s*"([0-9a-fA-F]+)"\s*,\s*"token"\s*:\s*"([0-9a-fA-F]+)"'
-)
+# Extraktion der (key, token)-Paare aus der rohen --debug-Ausgabe der Cloud.
+# Beispielformat (einzeilig):
+#   response: b'{"result": {"tokenlist": [{"udpId": "..", "key": "HEX", "token": "HEX"}]}...}'
+# Annahmen (entsprechen dem beobachteten Format): tokenlist ist ein Array
+# FLACHER Objekte (keine verschachtelten Klammern); key/token sind Hex-Strings
+# und koennen innerhalb eines Eintrags in BELIEBIGER Reihenfolge stehen.
+# Mehrere Eintraege und mehrere tokenlist-Arrays werden alle beruecksichtigt.
+_TOKENLIST_ARRAY_RE = re.compile(r'"tokenlist"\s*:\s*\[(.*?)\]', re.DOTALL)
+_ENTRY_RE = re.compile(r"\{(.*?)\}", re.DOTALL)
+_KEY_RE = re.compile(r'"key"\s*:\s*"([0-9a-fA-F]+)"')
+_TOKEN_RE = re.compile(r'"token"\s*:\s*"([0-9a-fA-F]+)"')
 APPLIANCE_ID_RE = re.compile(r"applianceCodes['\"]?\s*[:=]\s*['\"]?(\d+)")
+
+
+def extract_token_key_pairs(text: str) -> list[tuple[str, str]]:
+    """Liefert ALLE (key, token)-Paare aus allen tokenlist-Arrays der rohen
+    Cloud-Antwort - reihenfolgeerhaltend und dedupliziert. Beruecksichtigt
+    beliebige Feldreihenfolge innerhalb eines Eintrags sowie mehrere Eintraege
+    bzw. mehrere tokenlist-Arrays (siehe Formatannahmen oben). Die alte,
+    strikt 'key vor token'-erwartende Extraktion war eine echte Teilmenge
+    dieser hier."""
+    pairs: list[tuple[str, str]] = []
+    for array_body in _TOKENLIST_ARRAY_RE.findall(text):
+        for entry_body in _ENTRY_RE.findall(array_body):
+            key = _KEY_RE.search(entry_body)
+            token = _TOKEN_RE.search(entry_body)
+            if key and token:
+                pairs.append((key.group(1), token.group(1)))
+    return list(dict.fromkeys(pairs))
 
 
 def load_config() -> dict:
@@ -204,7 +226,7 @@ def fetch_candidate_credentials(username: str, password: str, host: str) -> tupl
         raise RuntimeError(f"discover-Befehl endete mit Exit-Code {result.returncode}. "
                             f"Letzte Ausgabe: {tail}")
 
-    matches = TOKENLIST_RE.findall(combined_output)
+    matches = extract_token_key_pairs(combined_output)
     if not matches:
         tail = combined_output[-800:] if combined_output else "(keine Ausgabe)"
         raise RuntimeError(f"Kein tokenlist-Eintrag in der Ausgabe gefunden. Letzte Ausgabe: {tail}")

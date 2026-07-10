@@ -129,5 +129,49 @@ class SaveConfigTests(_ConfigPathMixin):
             mrt.save_config({"devices": []})
 
 
+class TokenExtractionTests(unittest.TestCase):
+    """#11: alle (key, token)-Paare, beliebige Feldreihenfolge, dedupliziert."""
+
+    def test_single_entry(self):
+        text = '"tokenlist": [{"udpId": "1", "key": "aabb", "token": "ccdd"}]'
+        self.assertEqual(mrt.extract_token_key_pairs(text), [("aabb", "ccdd")])
+
+    def test_two_entries_one_list_in_order(self):
+        text = ('"tokenlist": [{"key": "aa", "token": "bb"}, '
+                '{"key": "cc", "token": "dd"}]')
+        self.assertEqual(mrt.extract_token_key_pairs(text),
+                         [("aa", "bb"), ("cc", "dd")])
+
+    def test_two_separate_lists(self):
+        text = ('x "tokenlist": [{"key":"11","token":"22"}] y '
+                '"tokenlist": [{"key":"33","token":"44"}] z')
+        self.assertEqual(mrt.extract_token_key_pairs(text),
+                         [("11", "22"), ("33", "44")])
+
+    def test_swapped_field_order(self):
+        # token VOR key - die alte Regex haette das komplett verpasst.
+        text = '"tokenlist": [{"token": "bb", "udpId": "x", "key": "aa"}]'
+        self.assertEqual(mrt.extract_token_key_pairs(text), [("aa", "bb")])
+
+    def test_uppercase_hex(self):
+        text = '"tokenlist": [{"key": "ABCDEF", "token": "012ABC"}]'
+        self.assertEqual(mrt.extract_token_key_pairs(text), [("ABCDEF", "012ABC")])
+
+    def test_no_tokenlist_returns_empty(self):
+        self.assertEqual(mrt.extract_token_key_pairs("nothing here"), [])
+
+    def test_deduplicates_order_preserving(self):
+        text = ('"tokenlist": [{"key":"aa","token":"bb"},'
+                '{"key":"aa","token":"bb"},{"key":"cc","token":"dd"}]')
+        self.assertEqual(mrt.extract_token_key_pairs(text),
+                         [("aa", "bb"), ("cc", "dd")])
+
+    def test_old_format_still_matched_superset(self):
+        # Realistischer, einzeiliger bytes-repr wie im Doc-Kommentar.
+        text = ('response: b\'{"result": {"tokenlist": [{"udpId": "9", '
+                '"key": "deadbeef", "token": "cafe1234"}]}}\'')
+        self.assertIn(("deadbeef", "cafe1234"), mrt.extract_token_key_pairs(text))
+
+
 if __name__ == "__main__":
     unittest.main()
