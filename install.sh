@@ -96,6 +96,38 @@ install_pkg() {
     esac
 }
 
+# Schreibt {"username":..,"password":..} atomar und mit Rechten 0600 in die
+# Datei $1. Die Zugangsdaten werden ueber Umgebungsvariablen an python3
+# uebergeben, NICHT ueber argv - /proc/<pid>/environ ist (anders als
+# /proc/<pid>/cmdline) nicht fuer andere lokale Nutzer lesbar. Der atomare
+# mkstemp+os.replace-Weg vermeidet ein world-readable-Zeitfenster und einen
+# zerstoerten Torso, auch wenn die Zieldatei bereits existierte.
+write_credentials_file() {
+    local target="$1"
+    TARGET="$target" MIDEA_USER="$MIDEA_USER" MIDEA_PASS="$MIDEA_PASS" python3 - <<'PYEOF'
+import json, os, tempfile
+target = os.environ["TARGET"]
+data = {"username": os.environ["MIDEA_USER"], "password": os.environ["MIDEA_PASS"]}
+directory = os.path.dirname(os.path.abspath(target)) or "."
+fd, tmp = tempfile.mkstemp(dir=directory,
+                           prefix="." + os.path.basename(target) + ".", suffix=".tmp")
+try:
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, target)
+except BaseException:
+    try:
+        os.unlink(tmp)
+    except FileNotFoundError:
+        pass
+    raise
+PYEOF
+}
+
 # =============================================================================
 # 2. Grundwerkzeuge: python3, git/curl, unzip
 # =============================================================================
@@ -244,10 +276,18 @@ fi
 echo ""
 echo -e "${YELLOW}--- Midea-Zugangsdaten ---${NC}"
 read -r -p "  E-Mail-Adresse : " MIDEA_USER
-read -r -s -p "  Passwort       : " MIDEA_PASS
+# IFS= verhindert, dass fuehrende/abschliessende Leerzeichen im Passwort
+# abgeschnitten werden (-r schuetzt zusaetzlich Backslashes).
+IFS= read -r -s -p "  Passwort       : " MIDEA_PASS
 echo ""
 
 [[ -z "$MIDEA_USER" || -z "$MIDEA_PASS" ]] && error "E-Mail und Passwort duerfen nicht leer sein."
+
+# Zugangsdaten sofort sicher ablegen (0600), noch VOR der Geraetesuche - so
+# kann der Discover-Schritt sie ueber eine Config-Datei lesen, statt sie auf
+# der Kommandozeile zu uebergeben (sonst waere das Passwort via ps sichtbar).
+write_credentials_file credentials.json || error "credentials.json konnte nicht geschrieben werden."
+ok "Zugangsdaten in credentials.json gespeichert (chmod 600)."
 
 # =============================================================================
 # 8. Geraete im Netzwerk suchen
@@ -255,7 +295,12 @@ echo ""
 echo ""
 info "Suche Midea-Geraete im lokalen Netzwerk (kann etwas dauern)..."
 echo ""
-DISCOVER_OUTPUT=$(python3 -m midealocal.cli discover --username "$MIDEA_USER" --password "$MIDEA_PASS" 2>&1) || true
+# Passwort NICHT per argv an discover uebergeben: kurz eine midea-local.json
+# (0600) schreiben, die die CLI aus dem aktuellen Verzeichnis liest, danach
+# sofort wieder entfernen.
+write_credentials_file midea-local.json || error "midea-local.json konnte nicht geschrieben werden."
+DISCOVER_OUTPUT=$(python3 -m midealocal.cli discover 2>&1) || true
+rm -f midea-local.json
 echo "$DISCOVER_OUTPUT"
 echo ""
 
@@ -324,21 +369,8 @@ PYEOF
 ok "devices.json geschrieben (chmod 600)."
 
 # =============================================================================
-# 10. Zugangsdaten in credentials.json ablegen (ueber python3/json, damit
-#     Sonderzeichen im Passwort sicher escaped werden). Die Datei wird direkt
-#     mit Rechten 0600 angelegt (os.open) - kein world-readable-Zeitfenster.
-#     credentials.json ist git-ignoriert und wird nie versioniert.
+# 10. (Zugangsdaten wurden bereits in Schritt 7 in credentials.json abgelegt.)
 # =============================================================================
-python3 - "$MIDEA_USER" "$MIDEA_PASS" <<'PYEOF'
-import json, os, sys
-data = {"username": sys.argv[1], "password": sys.argv[2]}
-fd = os.open("credentials.json", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-with os.fdopen(fd, "w", encoding="utf-8") as f:
-    json.dump(data, f, indent=2, ensure_ascii=False)
-    f.write("\n")
-os.chmod("credentials.json", 0o600)  # falls die Datei bereits existierte
-PYEOF
-ok "Zugangsdaten in credentials.json gespeichert (chmod 600)."
 
 # =============================================================================
 # 11. Token/Key-Paare abrufen
