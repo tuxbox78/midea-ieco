@@ -250,6 +250,32 @@ ensure_install_dir "$INSTALL_DIR"
 # =============================================================================
 # 4. Projekt-Dateien besorgen
 # =============================================================================
+# Ermittelt das EINE Wurzelverzeichnis eines entpackten GitHub-Archiv-ZIPs
+# (Format <repo>-<branch>/...). Bricht mit klarer Fehlermeldung ab, statt eine
+# leere oder mehrdeutige Treffermenge stillschweigend an 'cp -R' zu uebergeben -
+# eine kuenftig geaenderte Archivstruktur oder ein beschaedigter Download
+# wuerden sonst unbemerkt falsche oder gar keine Dateien kopieren. error() ruft
+# exit auf; in einer Command-Substitution (siehe Aufrufstelle unten) beendet
+# das nur die Subshell - der Aufrufer verlaesst sich bewusst auf 'set -e', das
+# eine fehlgeschlagene Command-Substitution in einer EINFACHEN (nicht mit
+# 'local' deklarierten) Zuweisung erkennt und das Hauptskript stoppt. Deshalb
+# NICHT in eine 'local'-Deklaration verpacken - das wuerde den Exit-Code
+# verschlucken (bekannte Bash-Falle) und liesse EXTRACTED_ROOT leer, was ein
+# 'cp -R /. ...' ausloesen wuerde.
+resolve_extracted_root_dir() {
+    local dir="$1"
+    local -a subdirs=()
+    local entry
+    for entry in "$dir"/*/; do
+        [[ -d "$entry" ]] && subdirs+=("${entry%/}")
+    done
+    case "${#subdirs[@]}" in
+        1) printf '%s\n' "${subdirs[0]}"; return 0 ;;
+        0) error "Kein Wurzelverzeichnis im heruntergeladenen Archiv gefunden (Download beschaedigt oder Archivformat geaendert)." ;;
+        *) error "Unerwartete Archivstruktur: mehrere Wurzelverzeichnisse gefunden (${subdirs[*]})." ;;
+    esac
+}
+
 if [[ ! -f "$INSTALL_DIR/midea_ieco_ensure.py" ]]; then
     info "Lade Projekt-Dateien nach $INSTALL_DIR ..."
     if command -v git &>/dev/null; then
@@ -266,7 +292,8 @@ if [[ ! -f "$INSTALL_DIR/midea_ieco_ensure.py" ]]; then
         TMP_ZIP="$TMP_DIR/midea-ieco.zip"
         curl -fsSL "$REPO_ZIP_URL" -o "$TMP_ZIP"
         unzip -q "$TMP_ZIP" -d "$TMP_DIR/extract"
-        cp -R "$TMP_DIR"/extract/*/. "$INSTALL_DIR"/
+        EXTRACTED_ROOT="$(resolve_extracted_root_dir "$TMP_DIR/extract")"
+        cp -R "$EXTRACTED_ROOT"/. "$INSTALL_DIR"/
     else
         error "Weder git noch curl verfuegbar. Bitte Repository manuell herunterladen."
     fi

@@ -295,6 +295,45 @@ assert "$rc" "Wrapper ruft bei Ausfuehrung exakt den urspruenglichen Pfad auf"
 rc=0; [ -e "$MARKER" ] && rc=1
 assert "$rc" "kein Command-Substitution-Ausbruch beim Ausfuehren (kein Marker-File)"
 
+# ---------------------------------------------------------------------------
+echo "== resolve_extracted_root_dir: ZIP-Fallback-Extraktion (L3) =="
+# ---------------------------------------------------------------------------
+eval "$(extract_func resolve_extracted_root_dir "$INSTALL")"
+
+# Happy Path: genau ein Wurzelverzeichnis (GitHub-Archiv-Layout) -> dessen Pfad.
+r1="$WORK/one_root"; mkdir -p "$r1/midea-ieco-main/subdir"
+: > "$r1/midea-ieco-main/README.md"
+got=""; rc=0; got="$(resolve_extracted_root_dir "$r1" 2>/dev/null)" || rc=1
+rc2=0; { [ "$rc" -eq 0 ] && [ "$got" = "$r1/midea-ieco-main" ]; } || rc2=1
+assert "$rc2" "genau ein Wurzelverzeichnis: Pfad korrekt geliefert"
+
+# Realistisch: ein Wurzelverzeichnis PLUS lose Dateien direkt im Entpack-Ziel
+# (z.B. eine Begleitdatei im ZIP) -> lose Dateien werden ignoriert.
+r2="$WORK/one_root_plus_files"; mkdir -p "$r2/midea-ieco-main"
+: > "$r2/loose_file.txt"
+got=""; rc=0; got="$(resolve_extracted_root_dir "$r2" 2>/dev/null)" || rc=1
+rc2=0; { [ "$rc" -eq 0 ] && [ "$got" = "$r2/midea-ieco-main" ]; } || rc2=1
+assert "$rc2" "ein Wurzelverzeichnis + lose Dateien: lose Dateien ignoriert"
+
+# Leeres Entpack-Ziel (0 Unterverzeichnisse) -> Abbruch via error(), kein Treffer.
+# error() ruft exit auf, daher in einer Subshell isolieren (wie bei
+# ensure_install_dir/S3 oben) - sonst wuerde der gesamte Testlauf abbrechen.
+r3="$WORK/zero_roots"; mkdir -p "$r3"
+rc=0; ( resolve_extracted_root_dir "$r3" >/dev/null 2>&1 ) || rc=1
+rc2=0; [ "$rc" -ne 0 ] || rc2=1
+assert "$rc2" "kein Wurzelverzeichnis: Abbruch statt stillem Leerlauf"
+
+# Mehrere Wurzelverzeichnisse (unerwartete/veraenderte Archivstruktur) -> Abbruch.
+r4="$WORK/two_roots"; mkdir -p "$r4/first" "$r4/second"
+rc=0; ( resolve_extracted_root_dir "$r4" >/dev/null 2>&1 ) || rc=1
+rc2=0; [ "$rc" -ne 0 ] || rc2=1
+assert "$rc2" "mehrere Wurzelverzeichnisse: Abbruch statt unklarer Kopie"
+
+# Fehlermeldung nennt bei mehreren Treffern beide Verzeichnisnamen (Diagnose).
+err_msg="$(resolve_extracted_root_dir "$r4" 2>&1 >/dev/null || true)"
+rc=0; { case "$err_msg" in *first*second*|*second*first*) : ;; *) rc=1 ;; esac; }
+assert "$rc" "Fehlermeldung bei mehreren Treffern nennt beide Verzeichnisnamen"
+
 echo ""
 echo "RESULT(test_install.sh): $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
