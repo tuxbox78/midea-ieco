@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) ![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg) ![Platforms](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-informational.svg)
 
-**Hält iECO auf deiner Midea PortaSplit zuverlässig an — automatisch, lokal, ohne App.**
+**Hält iECO auf deiner Midea PortaSplit zuverlässig angeschaltet — automatisch, lokal, ohne App.**
 
 Kleine, zuverlässige Kommandozeilen-Werkzeuge zur lokalen Steuerung des **iECO-Modus** (und des allgemeinen Ein-/Ausschaltzustands) von Midea-Klimaanlagen, einschließlich der Midea PortaSplit und kompatibler Modelle von Comfee, Toshiba, Carrier, Klimaire und anderen. Die Werkzeuge vermeiden im Normalbetrieb die Abhängigkeit von einer instabilen Cloud-Verbindung.
 
@@ -12,7 +12,7 @@ Kleine, zuverlässige Kommandozeilen-Werkzeuge zur lokalen Steuerung des **iECO-
 
 **Was es tut**
 
-- Reaktiviert **iECO** automatisch nach jedem manuellen Aus/Ein und nach dem Acht-Stunden-Timeout
+- Reaktiviert **iECO** automatisch nach jedem manuellen Aus/Ein und nach dem automatischen Acht-Stunden-Timeout
 - Läuft vollständig im **lokalen Netzwerk** (im Normalbetrieb keine Cloud-Abhängigkeit), ausgelöst per cron, Siri-Kurzbefehl oder Homebridge
 - **Ändert nie deine Zieltemperatur** — stellt nur sicher, dass iECO bei dem von dir gewählten Sollwert aktiv ist
 
