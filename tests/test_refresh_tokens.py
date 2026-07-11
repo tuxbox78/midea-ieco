@@ -91,8 +91,7 @@ class MsmartMissingProbeTests(unittest.TestCase):
         work = tempfile.mkdtemp()
         self.addCleanup(lambda: shutil.rmtree(work, ignore_errors=True))
         result = subprocess.run(
-            [sys.executable, str(REPO_DIR / "midea_refresh_tokens.py"),
-             "--all", "--username", "x@example.com", "--password", "secret"],
+            [sys.executable, str(REPO_DIR / "midea_refresh_tokens.py"), "--all"],
             capture_output=True, text=True, cwd=work)
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("msmart-ng", result.stderr)
@@ -184,9 +183,12 @@ class TokenExtractionTests(unittest.TestCase):
         self.assertIn(("deadbeef", "cafe1234"), mrt.extract_token_key_pairs(text))
 
 
-class FetchDiscoverTests(unittest.TestCase):
-    """#5a / C4: Passwort ueber 0600-midea-local.json in einem PRO AUFRUF
-    isolierten Temp-Verzeichnis statt argv; Fallback; Verzeichnis-Isolierung."""
+class DiscoverInvocationTests(unittest.TestCase):
+    """0.2.0: discover laeuft OHNE Zugangsdaten. Belegt: (a) exakte, credential-
+    freie argv; (b) die leere {}-Isolations-Konfig (0600) im pro-Aufruf-Temp-CWD;
+    (c) das Aufraeumen des Temp-Verzeichnisses in Erfolg UND Fehler; (d) genau
+    EIN discover-Aufruf (kein argv-Fallback mehr); (e) Fehlerklassen -> RuntimeError
+    inkl. der neuen Guards fuer nicht anlegbares Temp-Verzeichnis / Konfig."""
 
     TL = '{"tokenlist": [{"key": "aa", "token": "bb"}]}'
 
@@ -194,29 +196,42 @@ class FetchDiscoverTests(unittest.TestCase):
     def _ns(rc=0, out="", err=""):
         return SimpleNamespace(returncode=rc, stdout=out, stderr=err)
 
-    def test_config_route_keeps_password_out_of_argv(self):
+    def test_argv_is_exact_and_credential_free(self):
         seen = {}
 
         def fake_run(cmd, **kw):
-            # Waehrend des Aufrufs liegt eine 0600-midea-local.json mit den
-            # Zugangsdaten im (temporaeren) CWD - NICHT auf der Kommandozeile.
+            seen["cmd"] = cmd
+            return self._ns(out=self.TL)
+
+        with mock.patch("midea_refresh_tokens.subprocess.run", side_effect=fake_run):
+            matches, _ = mrt.fetch_candidate_credentials("192.168.0.5")
+
+        self.assertEqual(matches, [("aa", "bb")])
+        self.assertEqual(seen["cmd"], [
+            sys.executable, "-m", "midealocal.cli", "discover",
+            "--host", "192.168.0.5", "--debug"])
+        # Keinerlei Zugangsdaten-Flags in der Prozess-argv.
+        self.assertNotIn("--username", seen["cmd"])
+        self.assertNotIn("--password", seen["cmd"])
+
+    def test_isolation_guard_is_empty_config_0600_in_cwd(self):
+        seen = {}
+
+        def fake_run(cmd, **kw):
+            # Determinismus-Guard: eine LEERE {}-Config (0600) liegt im
+            # temporaeren CWD, damit die CLI keine nutzer-globale Konfig zieht.
             cwd = kw["cwd"]
             cfg = Path(cwd) / "midea-local.json"
             self.assertTrue(cfg.exists())
             self.assertEqual(cfg.stat().st_mode & 0o777, 0o600)
-            self.assertEqual(json.loads(cfg.read_text(encoding="utf-8")),
-                             {"username": "u@e", "password": "secret"})
-            seen["cmd"], seen["cwd"] = cmd, cwd
+            self.assertEqual(json.loads(cfg.read_text(encoding="utf-8")), {})
+            seen["cwd"] = cwd
             return self._ns(out=self.TL)
 
-        with mock.patch("midea_refresh_tokens.subprocess.run", side_effect=fake_run), \
-                redirect_stderr(io.StringIO()):
-            matches, _ = mrt.fetch_candidate_credentials("u@e", "secret", "192.168.0.5")
+        with mock.patch("midea_refresh_tokens.subprocess.run", side_effect=fake_run):
+            mrt.fetch_candidate_credentials("192.168.0.5")
 
-        self.assertEqual(matches, [("aa", "bb")])
-        self.assertNotIn("--password", seen["cmd"])
-        self.assertNotIn("secret", seen["cmd"])
-        self.assertFalse(Path(seen["cwd"]).exists())  # Temp-Verzeichnis danach weg
+        self.assertFalse(Path(seen["cwd"]).exists())  # danach entfernt
 
     def test_two_calls_use_distinct_isolated_dirs(self):
         # Isolationsbeleg gegen ein Wettrennen zweier gleichzeitiger Laeufe:
@@ -227,146 +242,136 @@ class FetchDiscoverTests(unittest.TestCase):
             cwds.append(kw["cwd"])
             return self._ns(out=self.TL)
 
-        with mock.patch("midea_refresh_tokens.subprocess.run", side_effect=fake_run), \
-                redirect_stderr(io.StringIO()):
-            mrt.fetch_candidate_credentials("u@e", "secret", "192.168.0.5")
-            mrt.fetch_candidate_credentials("u@e", "secret", "192.168.0.6")
+        with mock.patch("midea_refresh_tokens.subprocess.run", side_effect=fake_run):
+            mrt.fetch_candidate_credentials("192.168.0.5")
+            mrt.fetch_candidate_credentials("192.168.0.6")
 
         self.assertEqual(len(cwds), 2)
         self.assertNotEqual(cwds[0], cwds[1])
         for cwd in cwds:
             self.assertFalse(Path(cwd).exists())
 
-    def test_fallback_to_argv_when_config_route_empty(self):
-        outputs = [self._ns(rc=0, out="no tokens here"), self._ns(rc=0, out=self.TL)]
-        cmds = []
-        cwds = []
+    def test_tempdir_removed_on_error(self):
+        seen = {}
 
         def fake_run(cmd, **kw):
-            cmds.append(cmd)
-            cwds.append(kw.get("cwd"))
-            return outputs[len(cmds) - 1]
-
-        with mock.patch("midea_refresh_tokens.subprocess.run", side_effect=fake_run), \
-                redirect_stdout(io.StringIO()):
-            matches, _ = mrt.fetch_candidate_credentials("u@e", "secret", "192.168.0.5")
-
-        self.assertEqual(matches, [("aa", "bb")])
-        self.assertEqual(len(cmds), 2)
-        self.assertNotIn("--password", cmds[0])       # Primaerweg ohne Passwort
-        self.assertIn("--password", cmds[1])          # Fallback mit Passwort
-        self.assertIn("secret", cmds[1])
-        # Primaerweg lief in einem eigenen Temp-CWD (danach entfernt); der
-        # argv-Fallback laeuft ohne gesetztes cwd.
-        self.assertIsNotNone(cwds[0])
-        self.assertIsNone(cwds[1])
-        self.assertFalse(Path(cwds[0]).exists())
-
-    def test_exec_error_does_not_fall_back(self):
-        calls = []
-
-        def fake_run(cmd, **kw):
-            calls.append(cmd)
+            seen["cwd"] = kw["cwd"]
             raise subprocess.TimeoutExpired(cmd, mrt.SUBPROCESS_TIMEOUT)
 
         with mock.patch("midea_refresh_tokens.subprocess.run", side_effect=fake_run):
             with self.assertRaises(RuntimeError):
-                mrt.fetch_candidate_credentials("u@e", "secret", "1.2.3.4")
-        self.assertEqual(len(calls), 1)  # Ausfuehrungsfehler -> kein Fallback
+                mrt.fetch_candidate_credentials("192.168.0.5")
+        self.assertFalse(Path(seen["cwd"]).exists())  # auch im Fehlerfall weg
+
+    def test_no_tokenlist_raises_and_runs_once(self):
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            return self._ns(rc=0, out="no tokens here")
+
+        with mock.patch("midea_refresh_tokens.subprocess.run", side_effect=fake_run):
+            with self.assertRaises(RuntimeError):
+                mrt.fetch_candidate_credentials("192.168.0.5")
+        self.assertEqual(len(calls), 1)  # kein zweiter (argv-)Aufruf mehr
+
+    def test_nonzero_exit_raises(self):
+        with mock.patch("midea_refresh_tokens.subprocess.run",
+                        side_effect=lambda cmd, **kw: self._ns(rc=2, err="boom")):
+            with self.assertRaises(RuntimeError):
+                mrt.fetch_candidate_credentials("192.168.0.5")
+
+    def test_timeout_becomes_runtimeerror(self):
+        def fake_run(cmd, **kw):
+            raise subprocess.TimeoutExpired(cmd, mrt.SUBPROCESS_TIMEOUT)
+
+        with mock.patch("midea_refresh_tokens.subprocess.run", side_effect=fake_run):
+            with self.assertRaisesRegex(RuntimeError, "nicht reagiert"):
+                mrt.fetch_candidate_credentials("1.2.3.4")
+
+    def test_midealocal_missing_becomes_runtimeerror(self):
+        with mock.patch("midea_refresh_tokens.subprocess.run",
+                        side_effect=FileNotFoundError()):
+            with self.assertRaisesRegex(RuntimeError, "nicht installiert"):
+                mrt.fetch_candidate_credentials("1.2.3.4")
+
+    def test_generic_oserror_becomes_runtimeerror(self):
+        # Ein sonstiger Subprozess-Startfehler (OSError-Unterklasse, aber KEIN
+        # FileNotFoundError) darf nicht als roher Traceback durchschlagen: er wird
+        # als RuntimeError gewrappt (update_device faengt nur RuntimeError).
+        # PermissionError ist eine OSError-Unterklasse - und belegt zugleich, dass
+        # die reihenfolge-sensible FileNotFoundError-Klausel NICHT faelschlich greift.
+        with mock.patch("midea_refresh_tokens.subprocess.run",
+                        side_effect=PermissionError("exec denied")):
+            with self.assertRaisesRegex(RuntimeError, "nicht gestartet werden"):
+                mrt.fetch_candidate_credentials("1.2.3.4")
+
+    def test_mkdtemp_failure_becomes_runtimeerror(self):
+        # Temp-Verzeichnis nicht anlegbar (z.B. voller Datentraeger) -> klarer
+        # RuntimeError statt rohem OSError-Traceback.
+        with mock.patch("midea_refresh_tokens.tempfile.mkdtemp",
+                        side_effect=OSError("no space")):
+            with self.assertRaisesRegex(RuntimeError, "Arbeitsverzeichnis"):
+                mrt.fetch_candidate_credentials("1.2.3.4")
+
+    def test_config_write_failure_becomes_runtimeerror_and_cleans_up(self):
+        # mkdtemp real (Verzeichnis entsteht wirklich), aber der {}-Write
+        # scheitert -> sauberer RuntimeError UND das Temp-Verzeichnis wird
+        # dennoch entfernt (finally). real_mkdtemp VOR dem Patch binden, sonst
+        # riefe der Spy sich selbst rekursiv auf.
+        created = {}
+        real_mkdtemp = tempfile.mkdtemp
+
+        def spy_mkdtemp(*a, **k):
+            created["dir"] = real_mkdtemp(*a, **k)
+            return created["dir"]
+
+        with mock.patch("midea_refresh_tokens.tempfile.mkdtemp", side_effect=spy_mkdtemp), \
+                mock.patch("midea_refresh_tokens._atomic_write_json",
+                           side_effect=OSError("nope")):
+            with self.assertRaisesRegex(RuntimeError, "Isolations-Konfig"):
+                mrt.fetch_candidate_credentials("1.2.3.4")
+        self.assertFalse(Path(created["dir"]).exists())
 
 
-class _CredentialsPathMixin(unittest.TestCase):
-    """Legt ein temporaeres Verzeichnis an und pinnt mrt.CREDENTIALS_PATH darauf."""
+class CredentialFreeMainTests(_ConfigPathMixin):
+    """0.2.0: main() fragt NIE nach Zugangsdaten (kein Prompt) und die frueheren
+    Flags --username/--password existieren nicht mehr (argparse lehnt sie ab)."""
 
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.path = Path(self.tmp.name) / "credentials.json"
-        orig = mrt.CREDENTIALS_PATH
-        mrt.CREDENTIALS_PATH = self.path
-        self.addCleanup(lambda: setattr(mrt, "CREDENTIALS_PATH", orig))
-
-
-def _fake_stdin(is_tty):
-    return SimpleNamespace(isatty=lambda: is_tty)
-
-
-class CleanCredentialValueTests(unittest.TestCase):
-    """#18: gemeinsamer Platzhalter-Filter fuer Datei- UND CLI-Werte."""
-
-    def test_valid_value_passes_through(self):
-        self.assertEqual(mrt._clean_credential_value("real@value.example"), "real@value.example")
-
-    def test_every_known_placeholder_rejected(self):
-        for placeholder in mrt.PLACEHOLDER_VALUES:
-            self.assertIsNone(mrt._clean_credential_value(placeholder))
-
-    def test_non_string_rejected(self):
-        self.assertIsNone(mrt._clean_credential_value(None))
-        self.assertIsNone(mrt._clean_credential_value(123))
-
-
-class ResolveCredentialsTests(_CredentialsPathMixin):
-    """#18: CLI-Placeholder werden wie Datei-Placeholder behandelt; EOF sauber gemeldet."""
-
-    def test_valid_cli_args_used_directly(self):
-        with redirect_stdout(io.StringIO()):
-            username, password = mrt.resolve_credentials("u@e.example", "realpw")
-        self.assertEqual((username, password), ("u@e.example", "realpw"))
-
-    def test_cli_username_placeholder_falls_back_to_file(self):
+    def test_main_never_prompts_and_processes(self):
         self.path.write_text(
-            json.dumps({"username": "file@e.example", "password": "filepw"}),
+            json.dumps({"devices": [{"name": "W", "ip": "1.2.3.4", "id": 1}]}),
             encoding="utf-8")
-        with redirect_stdout(io.StringIO()):
-            username, password = mrt.resolve_credentials("dein@account.example", None)
-        self.assertEqual((username, password), ("file@e.example", "filepw"))
+        processed = []
 
-    def test_cli_password_placeholder_falls_back_to_file(self):
-        self.path.write_text(
-            json.dumps({"username": "file@e.example", "password": "filepw"}),
-            encoding="utf-8")
-        with redirect_stdout(io.StringIO()):
-            username, password = mrt.resolve_credentials("cli@e.example", "HIER_PASSWORT_EINTRAGEN")
-        self.assertEqual(username, "cli@e.example")
-        self.assertEqual(password, "filepw")
+        def _fake_update(dev):
+            processed.append(dev)
+            return True
 
-    def test_no_tty_and_no_credentials_exits_1_without_prompting(self):
-        with mock.patch.object(mrt.sys, "stdin", _fake_stdin(False)), \
-                mock.patch("builtins.input", side_effect=AssertionError("darf nicht prompten")), \
-                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+        out = io.StringIO()
+        with mock.patch.dict(sys.modules, {"msmart": mock.MagicMock()}), \
+                mock.patch("builtins.input",
+                           side_effect=AssertionError("main() darf nicht prompten")), \
+                mock.patch.object(mrt, "update_device", _fake_update), \
+                mock.patch.object(mrt, "save_config", lambda cfg: None), \
+                mock.patch.object(mrt.sys, "argv", ["x", "--all"]), \
+                redirect_stdout(out):
             with self.assertRaises(SystemExit) as cm:
-                mrt.resolve_credentials(None, None)
-        self.assertEqual(cm.exception.code, 1)
+                mrt.main()
+        self.assertEqual(cm.exception.code, 0)
+        self.assertEqual(len(processed), 1)
+        self.assertNotIn("Zugangsdaten", out.getvalue())
 
-    def test_eof_on_username_prompt_exits_1_with_message(self):
-        with mock.patch.object(mrt.sys, "stdin", _fake_stdin(True)), \
-                mock.patch("builtins.input", side_effect=EOFError), \
-                redirect_stdout(io.StringIO()), \
-                redirect_stderr(io.StringIO()) as err:
-            with self.assertRaises(SystemExit) as cm:
-                mrt.resolve_credentials(None, None)
-        self.assertEqual(cm.exception.code, 1)
-        self.assertIn("EOF", err.getvalue())
-
-    def test_eof_on_password_prompt_exits_1_with_message(self):
-        with mock.patch.object(mrt.sys, "stdin", _fake_stdin(True)), \
-                mock.patch("builtins.input", return_value="u@e.example"), \
-                mock.patch("midea_refresh_tokens.getpass.getpass", side_effect=EOFError), \
-                redirect_stdout(io.StringIO()), \
-                redirect_stderr(io.StringIO()) as err:
-            with self.assertRaises(SystemExit) as cm:
-                mrt.resolve_credentials(None, None)
-        self.assertEqual(cm.exception.code, 1)
-        self.assertIn("EOF", err.getvalue())
-
-    def test_keyboard_interrupt_not_swallowed(self):
-        # Strg+C soll NICHT wie EOF behandelt werden - bewusst ungefangen.
-        with mock.patch.object(mrt.sys, "stdin", _fake_stdin(True)), \
-                mock.patch("builtins.input", side_effect=KeyboardInterrupt), \
-                redirect_stdout(io.StringIO()):
-            with self.assertRaises(KeyboardInterrupt):
-                mrt.resolve_credentials(None, None)
+    def test_removed_flags_are_rejected(self):
+        # --username/--password gibt es nicht mehr: argparse lehnt sie laut mit
+        # Exit 2 ab (statt sie still zu ignorieren). parse_args scheitert VOR der
+        # msmart-Pruefung, daher unabhaengig davon, ob msmart installiert ist.
+        result = subprocess.run(
+            [sys.executable, str(REPO_DIR / "midea_refresh_tokens.py"),
+             "--all", "--username", "x@e.example"],
+            capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("usage", (result.stdout + result.stderr).lower())
 
 
 class MalformedEntryTargetTests(_ConfigPathMixin):
@@ -377,20 +382,18 @@ class MalformedEntryTargetTests(_ConfigPathMixin):
     def _run(self, argv):
         processed = []
 
-        def _fake_update(dev, username, password):
+        def _fake_update(dev):
             processed.append(dev)
             return True
 
         out = io.StringIO()
         # msmart stubben, damit die Verfuegbarkeitspruefung in main() passiert;
         # update_device/save_config mocken, damit weder Hardware noch ein
-        # Dateischreibzugriff noetig ist. Zugangsdaten via CLI (Datei gepinnt weg).
+        # Dateischreibzugriff noetig ist.
         with mock.patch.dict(sys.modules, {"msmart": mock.MagicMock()}), \
-                mock.patch.object(mrt, "CREDENTIALS_PATH", self.path.parent / "no_creds.json"), \
                 mock.patch.object(mrt, "update_device", _fake_update), \
                 mock.patch.object(mrt, "save_config", lambda cfg: None), \
-                mock.patch.object(mrt.sys, "argv",
-                                  ["x"] + argv + ["--username", "u@e.example", "--password", "pw"]), \
+                mock.patch.object(mrt.sys, "argv", ["x"] + argv), \
                 redirect_stdout(out):
             with self.assertRaises(SystemExit) as cm:
                 mrt.main()

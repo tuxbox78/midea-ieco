@@ -7,7 +7,7 @@
 # Zwei Betriebsmodi (Auswahl ueber Argumente, siehe print_usage):
 #   (ohne)         Erstinstallation bzw. interaktive Einrichtung (Onboarding).
 #   --update       NUR aktualisieren: Code + Abhaengigkeiten + Wrapper erneuern,
-#                  OHNE Onboarding. devices.json/credentials.json/Cron bleiben
+#                  OHNE Onboarding. devices.json/Cron bleiben
 #                  unangetastet. Wird vom erzeugten Befehl 'midea-ieco-update'
 #                  aufgerufen.
 #   --reconfigure  Onboarding erneut durchlaufen, auch wenn schon konfiguriert
@@ -102,7 +102,7 @@ t() {
 
   (no option)     First-time / interactive setup (onboarding).
   --update        Update only: refresh code + dependencies + wrappers.
-                  Does NOT touch devices.json / credentials.json / cron.
+                  Does NOT touch devices.json / cron.
                   (Same as the generated command 'midea-ieco-update'.)
   --reconfigure   Re-run setup even if already configured.
                   Backs up an existing devices.json to .bak first.
@@ -116,7 +116,7 @@ Directories overridable via environment variables:
 
   (ohne Option)   Erstinstallation bzw. interaktive Einrichtung (Onboarding).
   --update        Nur aktualisieren: Code + Abhaengigkeiten + Wrapper erneuern.
-                  Ruehrt devices.json / credentials.json / Cron NICHT an.
+                  Ruehrt devices.json / Cron NICHT an.
                   (Entspricht dem erzeugten Befehl 'midea-ieco-update'.)
   --reconfigure   Einrichtung erneut durchlaufen, auch wenn schon konfiguriert.
                   Sichert eine vorhandene devices.json vorher nach .bak.
@@ -259,15 +259,8 @@ Verzeichnisse ueber Umgebungsvariablen ueberschreibbar:
                                  de='  Neu einrichten:       install.sh --reconfigure' ;;
         devices_backed_up) en='Existing devices.json backed up to devices.json.bak.'
                            de='Vorhandene devices.json nach devices.json.bak gesichert.' ;;
-        hdr_credentials)   en='Midea app credentials';  de='Midea-APP-Zugangsdaten' ;;
-        prompt_email)      en='  E-mail address : ';  de='  E-Mail-Adresse : ' ;;
-        prompt_password)   en='  Password       : ';  de='  Passwort       : ' ;;
-        err_credentials_empty) en='E-mail and password must not be empty.'
-                               de='E-Mail und Passwort duerfen nicht leer sein.' ;;
-        err_credentials_write) en='credentials.json could not be written.'
-                               de='credentials.json konnte nicht geschrieben werden.' ;;
-        credentials_saved) en='Credentials saved to credentials.json (chmod 600).'
-                           de='Zugangsdaten in credentials.json gespeichert (chmod 600).' ;;
+        hint_obsolete_credentials) en='A credentials.json from an earlier version is no longer needed (0.2.0 fetches device tokens without any cloud credentials). You may delete it: rm %s'
+                                   de='Eine credentials.json aus einer frueheren Version wird nicht mehr benoetigt (0.2.0 holt die Geraete-Token ohne jegliche Cloud-Zugangsdaten). Du kannst sie loeschen: rm %s' ;;
         discover_searching) en='Searching for Midea devices on the local network (may take a moment)...'
                             de='Suche Midea-Geraete im lokalen Netzwerk (kann etwas dauern)...' ;;
         discover_found)    en='Devices found - enter this IP and device ID below:'
@@ -502,38 +495,6 @@ check_core_imports() {
     python3 -c "import midealocal.cli, msmart.device.AC.device" 2>/dev/null
 }
 
-# Schreibt {"username":..,"password":..} atomar und mit Rechten 0600 in die
-# Datei $1. Die Zugangsdaten werden ueber Umgebungsvariablen an python3
-# uebergeben, NICHT ueber argv - /proc/<pid>/environ ist (anders als
-# /proc/<pid>/cmdline) nicht fuer andere lokale Nutzer lesbar. Der atomare
-# mkstemp+os.replace-Weg vermeidet ein world-readable-Zeitfenster und einen
-# zerstoerten Torso, auch wenn die Zieldatei bereits existierte.
-write_credentials_file() {
-    local target="$1"
-    TARGET="$target" MIDEA_USER="$MIDEA_USER" MIDEA_PASS="$MIDEA_PASS" python3 - <<'PYEOF'
-import json, os, tempfile
-target = os.environ["TARGET"]
-data = {"username": os.environ["MIDEA_USER"], "password": os.environ["MIDEA_PASS"]}
-directory = os.path.dirname(os.path.abspath(target)) or "."
-fd, tmp = tempfile.mkstemp(dir=directory,
-                           prefix="." + os.path.basename(target) + ".", suffix=".tmp")
-try:
-    os.fchmod(fd, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-        f.write("\n")
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, target)
-except BaseException:
-    try:
-        os.unlink(tmp)
-    except FileNotFoundError:
-        pass
-    raise
-PYEOF
-}
-
 # Quotet einen Pfad fuer die sichere Verwendung im Kommando-Feld eines
 # crontab-Eintrags. cron fuehrt das Kommando ueber /bin/sh aus und wandelt ein
 # UNescaptes '%' in einen Zeilenumbruch/stdin-Trenner um (man 5 crontab). Daher:
@@ -574,7 +535,7 @@ is_valid_device_name() {
 }
 
 # Zerlegt die "<IP>\t<Geraete-ID>"-Zeilenliste des Discovery-Snippets (Abschnitt
-# 8) in die globalen Arrays DISC_IPS und DISC_IDS. Leere oder unvollstaendige
+# 7) in die globalen Arrays DISC_IPS und DISC_IDS. Leere oder unvollstaendige
 # Zeilen werden uebersprungen. Ausgelagert, damit die Zuordnung testbar ist.
 parse_discovered() {  # $1 = mehrzeilige "IP<TAB>ID"-Liste
     DISC_IPS=(); DISC_IDS=()
@@ -693,8 +654,9 @@ resolve_extracted_root_dir() {
 # Laedt das aktuelle GitHub-Archiv und legt seinen Inhalt ueber $INSTALL_DIR.
 # Genutzt fuer die ZIP-Erstinstallation UND fuer das ZIP-Update (ohne Git).
 # 'cp -R extracted/. INSTALL_DIR/' ueberlagert NUR die im Archiv enthaltenen
-# (getrackten) Dateien; devices.json/credentials.json/venv/logs sind git-ignoriert
-# und daher nicht im Archiv - sie bleiben strukturell unangetastet.
+# (getrackten) Dateien; devices.json/venv/logs (und eine evtl. aus 0.1.x
+# verbliebene credentials.json) sind git-ignoriert und daher nicht im Archiv -
+# sie bleiben strukturell unangetastet.
 # tmp_dir wird explizit am Ende entfernt (nicht nur ueber den EXIT-Trap): der
 # Update-fetch-Pfad verlaesst das Skript anschliessend per 'exec', wodurch der
 # Trap NICHT mehr feuert. CLEANUP_PATHS bleibt als Sicherung fuer den Fehlerpfad.
@@ -970,6 +932,18 @@ is_already_configured() {
     [[ -f "$INSTALL_DIR/devices.json" ]]
 }
 
+# Weist einmalig darauf hin, falls aus einer 0.1.x-Installation noch eine
+# credentials.json herumliegt: seit 0.2.0 wird sie nicht mehr benoetigt (der
+# Token-Abruf laeuft ohne Cloud-Zugangsdaten). BEWUSST wird sie NICHT
+# automatisch geloescht - es ist eine Nutzerdatei mit Klartext-Passwort, deren
+# Entfernung eine bewusste Nutzerentscheidung bleibt; wir geben nur den Hinweis.
+# Gibt immer 0 zurueck, damit ein Aufruf unter 'set -e' nie einen Ablauf stoppt.
+hint_obsolete_credentials() {
+    [[ -f "$INSTALL_DIR/credentials.json" ]] \
+        && warn "$(t hint_obsolete_credentials "$INSTALL_DIR/credentials.json")"
+    return 0
+}
+
 # Liefert eine kurze Versionsreferenz fuer die Update-Meldung: bevorzugt den
 # git-Kurz-Hash, sonst die oberste "## [x.y.z]"-Version aus CHANGELOG.md
 # (ZIP-Installation ohne Git), sonst "unbekannt". Rein informativ - gibt IMMER
@@ -1065,6 +1039,7 @@ run_update() {
                 info "$(t update_version_changed "$prev_ref" "$new_ref")"
             fi
             info "$(t update_see_changelog)"
+            hint_obsolete_credentials
             echo ""
             exit 0
             ;;
@@ -1119,6 +1094,7 @@ if [[ "$RECONFIGURE" -eq 0 ]] && is_already_configured; then
     info "$(t already_configured)"
     info "$(t already_cfg_update)"
     info "$(t already_cfg_reconfigure)"
+    hint_obsolete_credentials
     exit 0
 fi
 
@@ -1147,26 +1123,7 @@ if [[ "$CONTINUE_SETUP" =~ ^[nN]$ ]]; then
 fi
 
 # =============================================================================
-# 7. Midea-Cloud-Zugangsdaten abfragen
-# =============================================================================
-echo ""
-echo -e "${YELLOW}--- $(t hdr_credentials) ---${NC}"
-read -r -p "$(t prompt_email)" MIDEA_USER
-# IFS= verhindert, dass fuehrende/abschliessende Leerzeichen im Passwort
-# abgeschnitten werden (-r schuetzt zusaetzlich Backslashes).
-IFS= read -r -s -p "$(t prompt_password)" MIDEA_PASS
-echo ""
-
-[[ -z "$MIDEA_USER" || -z "$MIDEA_PASS" ]] && error "$(t err_credentials_empty)"
-
-# Zugangsdaten sofort sicher ablegen (0600), noch VOR der Geraetesuche - so
-# kann der Discover-Schritt sie ueber eine Config-Datei lesen, statt sie auf
-# der Kommandozeile zu uebergeben (sonst waere das Passwort via ps sichtbar).
-write_credentials_file credentials.json || error "$(t err_credentials_write)"
-ok "$(t credentials_saved)"
-
-# =============================================================================
-# 8. Geraete im Netzwerk suchen
+# 7. Geraete im Netzwerk suchen
 # =============================================================================
 echo ""
 info "$(t discover_searching)"
@@ -1209,7 +1166,7 @@ else
 fi
 
 # =============================================================================
-# 9. devices.json interaktiv anlegen (ueber python3/json fuer sichere Escapes)
+# 8. devices.json interaktiv anlegen (ueber python3/json fuer sichere Escapes)
 # =============================================================================
 echo ""
 echo -e "${YELLOW}--- $(t hdr_device_config) ---${NC}"
@@ -1217,7 +1174,7 @@ echo -e "${YELLOW}--- $(t hdr_device_config) ---${NC}"
 IP_REGEX='^([0-9]{1,3}\.){3}[0-9]{1,3}$'
 DEVICE_NAMES=(); DEVICE_IPS=(); DEVICE_IDS=()
 
-# IP+ID der in Abschnitt 8 erkannten Geraete uebernehmen, damit der Nutzer die
+# IP+ID der in Abschnitt 7 erkannten Geraete uebernehmen, damit der Nutzer die
 # (langen, fehleranfaelligen) Werte nicht von Hand abtippen muss.
 DISC_IPS=(); DISC_IDS=()
 if [[ "$DISCOVER_RC" -eq 0 && -n "$DISCOVERED" ]]; then
@@ -1318,11 +1275,7 @@ PYEOF
 ok "$(t devices_written)"
 
 # =============================================================================
-# 10. (Zugangsdaten wurden bereits in Schritt 7 in credentials.json abgelegt.)
-# =============================================================================
-
-# =============================================================================
-# 11. Token/Key-Paare abrufen
+# 9. Token/Key-Paare abrufen
 # =============================================================================
 echo ""
 info "$(t tokens_fetching)"
@@ -1334,13 +1287,13 @@ else
 fi
 
 # =============================================================================
-# 12. Wrapper in BIN_DIR anlegen
+# 10. Wrapper in BIN_DIR anlegen
 # =============================================================================
 chmod +x midea_ieco_ensure.py midea_refresh_tokens.py 2>/dev/null || true
 install_all_wrappers
 
 # =============================================================================
-# 13. Schnelltest
+# 11. Schnelltest
 # =============================================================================
 echo ""
 read -r -p "$(t prompt_test_run)" DO_TEST
@@ -1357,7 +1310,7 @@ fi
 deactivate 2>/dev/null || true
 
 # =============================================================================
-# 14. Cron-Job-Vorschlag (idempotent - keine Duplikate bei erneutem Lauf)
+# 12. Cron-Job-Vorschlag (idempotent - keine Duplikate bei erneutem Lauf)
 # =============================================================================
 CRON_MARKER="# midea-ieco-managed"
 # Pfad cron-sicher quoten (Leerzeichen/Sonderzeichen/%); dieselbe gequotete
@@ -1405,4 +1358,5 @@ echo -e "${GREEN}   $(t banner_install_done)${NC}"
 echo -e "${GREEN}=================================================${NC}"
 echo ""
 printf '%s\n' "$(t final_summary "$INSTALL_DIR" "$BIN_DIR" "$INSTALL_DIR")"
+hint_obsolete_credentials
 echo ""

@@ -8,7 +8,7 @@
 
 Kleine, zuverlässige Kommandozeilen-Werkzeuge zur lokalen Steuerung des **iECO-Modus** (und des allgemeinen Ein-/Ausschaltzustands) von Midea-Klimaanlagen, einschließlich der Midea PortaSplit und kompatibler Modelle von Comfee, Toshiba, Carrier, Klimaire und anderen. Die Werkzeuge vermeiden im Normalbetrieb die Abhängigkeit von einer instabilen Cloud-Verbindung.
 
-`msmart-ng` kann iECO direkt über das lokale Netzwerk steuern. Midea-Cloud-Zugangsdaten werden nur einmalig zur Beschaffung gültiger Gerätezugangsdaten benötigt sowie erneut, wenn diese aufgefrischt werden müssen.
+`msmart-ng` steuert iECO direkt über das lokale Netzwerk. Token und Key, die es dazu je Gerät braucht, werden lokal mit `midea-local` beschafft und in `devices.json` gespeichert — **ein Midea-Cloud-Passwort ist nie nötig**, denn diese Tokens sind an das Gerät gebunden, nicht an dein Konto (siehe *[Token-/Key-Paare abrufen](#3-token-key-paare-abrufen)* unten).
 
 **Was es tut**
 
@@ -23,7 +23,7 @@ Kleine, zuverlässige Kommandozeilen-Werkzeuge zur lokalen Steuerung des **iECO-
 - **Klimageräte:** Midea PortaSplit und iECO-fähige Midea-Rebrands (Comfee, Toshiba, Carrier, Klimaire, …), bereits in der **MSmartHome- / Midea-Smarthome-App** eingebunden und per WLAN verbunden.
 - **Ausführender Rechner:** ein kleiner, **dauerhaft laufender** Computer im selben LAN wie die Anlage — Raspberry Pi, Heimserver, NAS oder Mac. **Python 3.11+** (aktuelles Raspberry Pi OS liefert es). (Nicht das iPhone selbst.)
 - **Netzwerk:** Der Host muss jede Anlage auf **TCP-Port 6444** erreichen, ohne Client-/AP-Isolation in diesem Segment. Eine **feste IP** (DHCP-Reservierung) wird empfohlen, ist aber nicht zwingend — du kannst sie jederzeit später in `devices.json` ändern. Eine VLAN-Trennung zwischen IoT-Geräten und Computern ist unproblematisch, solange Routing- und Firewall-Regeln diesen Port zulassen; siehe [Netzwerk-Fehlerbehebung](#netzwerk-fehlerbehebung).
-- **Midea-Cloud-Konto:** ein **MSmartHome- / Midea-Smarthome**-Konto, in dem die Geräte bereits eingerichtet und funktionsfähig sind, einmalig zum Abholen der lokalen Geräte-Tokens (und erneut nur, falls diese später aufgefrischt werden müssen).
+- **Midea-App (nur einmalig):** Jede Anlage muss bereits in der **MSmartHome- / Midea-Smarthome-App** eingerichtet und online sein — so kommt sie ins WLAN. Danach wird die App nicht mehr gebraucht, und **diese Skripte fragen nie nach deinem Midea-Konto oder Passwort**: Geräte-Tokens werden lokal beschafft (siehe *[Token-/Key-Paare abrufen](#3-token-key-paare-abrufen)*).
 
 ## Zweck & Alternativen
 
@@ -57,14 +57,14 @@ Ein manuell heruntergeladenes Skript akzeptiert zusätzlich das Flag `--lang en|
 
 Existiert das Installationsverzeichnis noch nicht, legt der Installer es an und überträgt dir den Besitz (`sudo` nur, falls der übergeordnete Ordner nicht beschreibbar ist). Ein bereits bestehendes Verzeichnis wird nie übernommen: ist das Installationsverzeichnis vorhanden, aber nicht beschreibbar, bricht der Installer ab und zeigt deine Optionen (anderen Pfad über `MIDEA_IECO_DIR` wählen, Rechte selbst korrigieren oder Verzeichnis entfernen). Der kleine `midea-ieco`-Wrapper wird bei einem root-eigenen Bin-Verzeichnis (z. B. MacPorts’ `/opt/local/bin`) mit einem einzigen `sudo install`-Schritt abgelegt, ohne dessen Besitzverhältnisse zu ändern.
 
-> **Bevor du beginnst:** Halte deinen **MSmartHome-Benutzernamen und dein Passwort** bereit – dieselben Zugangsdaten wie in der offiziellen Midea-App. Sie werden einmalig während der Installation zum Abholen der Geräte-Token abgefragt.
+> **Bevor du beginnst:** Stelle sicher, dass jede Anlage bereits in der **MSmartHome- / Midea-Smarthome-App** eingebunden und per WLAN verbunden ist. Der Installer braucht **kein Midea-Konto und kein Passwort** — er erkennt die Geräte im lokalen Netzwerk und holt deren Tokens direkt.
 
 Der Installer erledigt automatisch:
 
 1. Erkennung von Betriebssystem und Paketmanager, Installation fehlender Voraussetzungen (`python3`, `python3-venv`, `git`/`curl`)
 2. Anlegen einer virtuellen Python-Umgebung und Installation von `msmart-ng` und `midea-local`
-3. Abfrage deiner Midea-Cloud-Zugangsdaten und Ausführung der Geräteerkennung
-4. Interaktive Eingabe von Gerätenamen, IPs und IDs zum Aufbau von `devices.json`
+3. Geräteerkennung im lokalen Netzwerk (ein UDP-Broadcast — kein Cloud-Login)
+4. Bestätigung der erkannten IP/Geräte-ID je Anlage und nur noch Namensvergabe (oder alles von Hand) zum Aufbau von `devices.json`
 5. Abruf der Token-/Key-Paare und sichere Speicherung (`chmod 600`)
 6. Anlegen der Wrapper-Befehle `midea-ieco`, `midea-ieco-update` und `midea-ieco-refresh-tokens`, Angebot zur Aufnahme des Bin-Verzeichnisses in den `PATH` sowie optionaler Testlauf und optionale Cron-Job-Einrichtung
 
@@ -84,8 +84,9 @@ python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 
-# 3. Geräte ermitteln und IDs sowie IP-Adressen notieren
-python3 -m midealocal.cli discover --username "DEINE_SMARTHOME_EMAIL" --password "DEIN_SMARTHOME_PASSWORT"
+# 3. Geräte im lokalen Netzwerk ermitteln und je IP und Geräte-ID notieren
+#    (ein lokaler UDP-Broadcast — kein Cloud-Login):
+python3 -c "from midealocal.discover import discover; [print(d.get('ip_address'), d.get('device_id')) for d in (discover() or {}).values()]"
 
 # 4. Im Router feste IP-Adressen für die Klimaanlagen vergeben
 #    (DHCP-Reservierung nach MAC-Adresse), damit die Konfiguration dauerhaft stabil bleibt.
@@ -94,15 +95,10 @@ python3 -m midealocal.cli discover --username "DEINE_SMARTHOME_EMAIL" --password
 # 5. devices.json aus der Vorlage erstellen, dann bearbeiten (siehe „Einmalige Einrichtung" unten)
 cp devices.example.json devices.json
 
-# 6. credentials.json aus der Vorlage mit den Midea-Cloud-Zugangsdaten erstellen,
-#    dann Zugriff einschränken (enthält das Cloud-Passwort im Klartext):
-cp credentials.example.json credentials.json   # dann username/password eintragen
-chmod 600 credentials.json
-
-# 7. Token-/Key-Paare für alle Geräte abrufen
+# 6. Token-/Key-Paare für alle Geräte abrufen (kein Midea-Konto/Passwort nötig)
 python3 midea_refresh_tokens.py --all
 
-# 8. Test: iECO für ein Gerät aktivieren (Gerät muss im Netz erreichbar sein)
+# 7. Test: iECO für ein Gerät aktivieren (Gerät muss im Netz erreichbar sein)
 python3 midea_ieco_ensure.py Wohnzimmer
 
 # Der SSH-/Kurzbefehle-Wrapper midea_ieco_ensure.sh ist bereits ausführbar;
@@ -117,10 +113,10 @@ chmod +x midea_ieco_ensure.sh
 ### 1. Geräte-IDs und IP-Adressen ermitteln
 
 ```bash
-python3 -m midealocal.cli discover --username "DEIN_KONTO" --password "DEIN_PASSWORT"
+python3 -c "from midealocal.discover import discover; [print(d.get('ip_address'), d.get('device_id')) for d in (discover() or {}).values()]"
 ```
 
-Notiere Geräte-ID (`id`) und IP-Adresse für jedes Gerät.
+Das ist ein lokaler UDP-Broadcast — kein Cloud-Login. Notiere Geräte-ID und IP-Adresse für jedes Gerät.
 
 ### 2. `devices.json` anlegen
 
@@ -149,38 +145,15 @@ Notiere Geräte-ID (`id`) und IP-Adresse für jedes Gerät.
 
 Token und Key können anfangs leer bleiben; `midea_refresh_tokens.py` holt sie im nächsten Schritt.
 
-### 3. Zugangsdaten in `credentials.json` hinterlegen
-
-Vorlage kopieren und die Midea-Cloud-Zugangsdaten eintragen:
-
-```bash
-cp credentials.example.json credentials.json
-```
-
-```json
-{
-  "username": "dein@konto.beispiel",
-  "password": "deinPasswort"
-}
-```
-
-Da diese Datei dein Cloud-Passwort im Klartext enthält, anschließend den Zugriff einschränken (der Installer erledigt das automatisch):
-
-```bash
-chmod 600 credentials.json
-```
-
-Alternativ lassen sich die Werte per `--username`/`--password` bei jedem Aufruf übergeben, oder das Skript fragt interaktiv nach, wenn keine Datei vorhanden ist.
-
-### 4. Token-/Key-Paare abrufen
+### 3. Token-/Key-Paare abrufen
 
 ```bash
 python3 midea_refresh_tokens.py --all
 ```
 
-Das Skript führt `python3 -m midealocal.cli discover --debug` aus, extrahiert Token und Key aus dessen Ausgabe per regulärem Ausdruck und schreibt sie zurück in `devices.json`. Es setzt dabei auch automatisch `chmod 600` auf die Konfigurationsdatei.
+Das Skript führt `python3 -m midealocal.cli discover --debug` aus, extrahiert Token und Key aus dessen Ausgabe, **verifiziert jeden Kandidaten gegen das tatsächliche Gerät** und schreibt den funktionierenden zurück in `devices.json` (atomar, mit `chmod 600`). **Ein Midea-Konto oder Passwort ist dabei nicht im Spiel.**
 
-> **Warum `midea-local` statt `msmart-ng discover`?** `midea-local` meldet sich mit deinem eigenen Midea-Konto an und erhält daher gerätespezifische Zugangsdaten, die mit diesem Konto verknüpft sind. `msmart-ng discover --auto` kann ein internes Hilfskonto verwenden und liefert ggf. Zugangsdaten, die sich bei jedem Aufruf ändern oder schnell ablaufen – damit ungeeignet für den unbeaufsichtigten Dauerbetrieb.
+> **Woher kommen Token und Key — und warum kein Midea-Passwort?** Sie sind an das **Gerät** (dessen UDP-ID) gebunden, nicht an ein Cloud-Konto, und jede authentifizierte Cloud-Session darf sie für jedes beliebige Gerät anfordern. Heute vergibt nur noch die **NetHome-Plus**-Cloud-API sie: Midea hat den `getToken`-Endpunkt der MSmartHome- und Meiju-Clouds serverseitig abgeschaltet (sie antworten mit `errorCode 3004 "value is illegal"` — im Juli 2026 real gegen ein Gerät verifiziert), und dein MSmartHome-Konto existiert auf der NetHome-Plus-Cloud gar nicht. `midea-local` meldet sich deshalb — genau wie `msmart-ng` — mit seinem **eingebauten** Hilfskonto an, und dieses Projekt übergibt **gar keine Zugangsdaten**. Der eigentliche Schutz liegt woanders: Jeder Kandidat wird vor dem Speichern gegen das Gerät verifiziert, und ein bestehender Wert wird nur bei Erfolg überschrieben — sollte Midea auch diese letzte API abschalten, bleiben deine zuletzt gültigen Tokens erhalten und die lokale Steuerung läuft weiter. (Der Mechanismus ist in `midea-local` 6.6.1 und 6.10.0 identisch; gegen die gepinnte 6.6.1 verifiziert.)
 
 Ein neues Gerät lässt sich auch direkt über Name und IP-Adresse hinzufügen:
 
@@ -196,7 +169,7 @@ Um eine bestehende Installation auf den neuesten Stand zu bringen:
 midea-ieco-update
 ```
 
-Das erneuert **den Code, die gepinnten Abhängigkeiten und die Wrapper-Befehle** und rührt `devices.json`, `credentials.json` sowie Cron-Jobs **nicht** an. Es funktioniert unabhängig davon, ob der Installer per `git` oder per ZIP-Download eingerichtet hat. Der Befehl wird bei der Installation automatisch angelegt, direkt neben `midea-ieco` im Bin-Verzeichnis (liegt also im `PATH`, sofern dieses Verzeichnis darin ist).
+Das erneuert **den Code, die gepinnten Abhängigkeiten und die Wrapper-Befehle** und rührt `devices.json` sowie Cron-Jobs **nicht** an. Es funktioniert unabhängig davon, ob der Installer per `git` oder per ZIP-Download eingerichtet hat. Der Befehl wird bei der Installation automatisch angelegt, direkt neben `midea-ieco` im Bin-Verzeichnis (liegt also im `PATH`, sofern dieses Verzeichnis darin ist). Liegt aus 0.1.x noch eine `credentials.json` auf der Platte, weist der Updater darauf hin, dass sie nun ungenutzt ist und entfernt werden kann.
 
 Intern startet er den Installer in einem eigenen Update-Modus (`install.sh --update`): keine Einrichtungsfragen, keine Neukonfiguration. Er lädt die neuen Dateien zuerst und startet dann die frisch geladene Skriptkopie neu, sodass die laufende Update-Ausführung nie die Datei ist, die gerade überschrieben wird. Anschließend zeigt er die Versionsänderung an und verweist auf [`CHANGELOG.md`](CHANGELOG.md).
 
@@ -238,16 +211,16 @@ Mit `--only-if-on` schaltet das Skript keine Anlage ein. Eine ausgeschaltete Anl
 
 ### Token-/Key-Werte auffrischen
 
-Falls ein Gerät `Connection reset`, einen Timeout oder ein Zugangsdatenproblem meldet:
+Falls ein Gerät `Connection reset`, einen Timeout oder ein Token-/Key-Problem meldet:
 
 ```bash
 midea-ieco-refresh-tokens --name Wohnzimmer
 midea-ieco-refresh-tokens --all
 ```
 
-Dieser Wrapper-Befehl wird neben `midea-ieco` installiert; ohne Bin-Verzeichnis im `PATH` lautet das Äquivalent `venv/bin/python3 midea_refresh_tokens.py --all`.
+Dieser Wrapper-Befehl wird neben `midea-ieco` installiert; ohne Bin-Verzeichnis im `PATH` lautet das Äquivalent `venv/bin/python3 midea_refresh_tokens.py --all`. Er braucht **kein Midea-Konto und kein Passwort**.
 
-In der Praxis bleiben Zugangsdaten oft lange gültig. Auffrischen ist sinnvoll, wenn sich die App-Session grundlegend ändert (z. B. nach einer Passwortänderung beim Midea-Konto) oder wenn ein Gerät neu mit dem Netzwerk verbunden wurde.
+In der Praxis bleiben Geräte-Tokens oft lange gültig. Auffrischen ist sinnvoll, wenn eine Anlage neu gekoppelt oder neu mit dem Netzwerk verbunden wurde oder wenn die lokale Authentifizierung zu scheitern beginnt. Dein Midea-Konto-Passwort spielt hier keine Rolle — es wird nie verwendet.
 
 ## Cron-Automatisierung
 
@@ -257,7 +230,7 @@ Falls du nicht die automatische Cron-Einrichtung von `install.sh` genutzt hast, 
 # Alle 20 Minuten: iECO reaktivieren, ohne Geräte einzuschalten
 */20 * * * * cd /opt/local/midea-ieco && venv/bin/python3 midea_ieco_ensure.py all --only-if-on >> ieco.log 2>&1
 
-# Jeden Sonntag um 03:00 Uhr: Zugangsdaten vorsorglich auffrischen
+# Jeden Sonntag um 03:00 Uhr: Geräte-Tokens vorsorglich auffrischen
 0 3 * * 0 cd /opt/local/midea-ieco && venv/bin/python3 midea_refresh_tokens.py --all >> refresh.log 2>&1
 ```
 
@@ -299,7 +272,7 @@ Ein gesunder `ieco.log`-Block — das Wohnzimmergerät war an, iECO aus (wird al
 Gesamtergebnis: OK.
 ```
 
-Jede Zeile mit **FEHLER** kennzeichnet ein Problem bei genau diesem Gerät; `Gesamtergebnis: FEHLER` bedeutet, dass mindestens ein Gerät nicht in Ordnung war. Da die Cron-Zeilen `2>&1` nutzen, landen auch Warnungen der zugrunde liegenden `msmart-ng`-Bibliothek in derselben Datei. Die Logs enthalten Gerätenamen, IP-Adressen und den Ein-/iECO-Zustand — **niemals** deine Token, Keys oder das Cloud-Passwort (die stehen ausschließlich in den `chmod 600`-Konfigdateien).
+Jede Zeile mit **FEHLER** kennzeichnet ein Problem bei genau diesem Gerät; `Gesamtergebnis: FEHLER` bedeutet, dass mindestens ein Gerät nicht in Ordnung war. Da die Cron-Zeilen `2>&1` nutzen, landen auch Warnungen der zugrunde liegenden `msmart-ng`-Bibliothek in derselben Datei. Die Logs enthalten Gerätenamen, IP-Adressen und den Ein-/iECO-Zustand — **niemals** deine Geräte-Token oder Keys (die stehen ausschließlich in der `chmod 600`-`devices.json`).
 
 ### Lesen und Beobachten
 
@@ -408,6 +381,10 @@ Du brauchst irgendeinen Computer, der läuft, wenn die Automatisierung greifen s
 
 Ja. Der Normalbetrieb läuft vollständig lokal über dein LAN. Die Cloud wird nur zum Abholen oder Auffrischen der Geräte-Tokens (`midea_refresh_tokens.py`) kontaktiert, nie für die tägliche iECO-Steuerung.
 
+**Brauche ich mein Midea-Konto oder Passwort?**
+
+Nein. Geräte-Tokens werden über das lokale Netzwerk mit dem eingebauten Hilfskonto von `midea-local` beschafft — Midea vergibt diese Tokens inzwischen nur noch über eine Cloud-API, und das ist nicht die MSmartHome-API; dein MSmartHome-Login könnte sie also ohnehin nicht abholen. Tokens sind an das Gerät gebunden, nicht an dein Konto, deshalb fragt der Installer nie nach einem Passwort und speichert keins. Die MSmartHome-App brauchst du nur einmalig, um die Anlage ins WLAN zu bringen.
+
 **Brauche ich Home Assistant?**
 
 Nein — ohne auszukommen ist gerade der Sinn (siehe **Zweck & Alternativen** oben). Wer bereits Home Assistant nutzt, ist mit der Integration `midea_ac_lan` besser bedient.
@@ -453,14 +430,12 @@ Die App bietet keine bedingte Logik wie „iECO nur aktivieren, wenn die Anlage 
 
 | Datei | Zweck |
 |---|---|
-| `install.sh` | Einmal-Installer (zugleich `--update`-Motor hinter `midea-ieco-update`): richtet venv, Abhängigkeiten, `devices.json`, `credentials.json`, Tokens, die Wrapper-Befehle und Cron-Job ein |
+| `install.sh` | Einmal-Installer (zugleich `--update`-Motor hinter `midea-ieco-update`): richtet venv, Abhängigkeiten, `devices.json`, Tokens, die Wrapper-Befehle und Cron-Job ein |
 | `midea_ieco_ensure.py` | Prüft und setzt den Einschaltzustand und iECO für ein oder alle konfigurierten Geräte |
-| `midea_refresh_tokens.py` | Holt frische Token-/Key-Paare von der Midea Cloud und aktualisiert `devices.json` |
+| `midea_refresh_tokens.py` | Holt frische Token-/Key-Paare (ohne Cloud-Passwort) und aktualisiert `devices.json` |
 | `midea_ieco_ensure.sh` | Wrapper für SSH/Kurzbefehle: startet `midea_ieco_ensure.py` mit dem venv-Python und reicht alle Argumente weiter |
 | `devices.example.json` | Vorlage für `devices.json` — kopieren, dann eigene Geräte eintragen |
-| `credentials.example.json` | Vorlage für `credentials.json` — Midea-Cloud-E-Mail und Passwort |
 | `devices.json` | Lokale Gerätekonfiguration (Name, IP, Port, ID, Token, Key). Lokal erzeugt, **git-ignoriert** |
-| `credentials.json` | Midea-Cloud-Zugangsdaten, gelesen von `midea_refresh_tokens.py`. Lokal mit `chmod 600` erzeugt, **git-ignoriert** |
 
 ## Erkenntnisse aus der Entwicklung
 
@@ -475,17 +450,18 @@ python3 -c "import inspect; from msmart.device.AC.device import AirConditioner a
 | `TypeError: device_selector() got an unexpected keyword argument` | Die `midea-local`-API hat sich geändert | Installierte Signatur prüfen: `python3 -c "import inspect; from midealocal.devices import device_selector; print(inspect.signature(device_selector))"` |
 | `Device is not capable of property IECO` | Capabilities wurden auf dem für `apply()` genutzten Objekt nie abgefragt — `supports_ieco` wird ausschließlich durch `get_capabilities()` befüllt | `get_capabilities()` auf dem frischen, authentifizierten `AC`-Objekt aufrufen, bevor capability-gebundene Properties gesetzt werden und `apply()` läuft. Zum *Setzen* ist die Reihenfolge relativ zu `refresh()` egal; zum *Lesen* des aktuellen Zustands nicht — siehe nächste Zeile |
 | `device.ieco` (oder `eco`) liest `False`, obwohl der Modus am Gerät aktiv ist | `refresh()` pollt nur die Properties aus `_supported_properties`, und diese Menge wird von `get_capabilities()` befüllt. Auf einem frischen Objekt, das nur authentifiziert und refresht hat, wird IECO nie gepollt, `device.ieco` bleibt also beim Default `False` | `get_capabilities()` **vor** `refresh()` aufrufen, wann immer der echte Zustand gelesen wird (Statusanzeige, Verifikation nach `apply()`). Genau das macht `midea_ieco_ensure.py` beim Initial-Status und beim Verifikations-Reconnect |
-| Capability-Abfrage läuft ab / `Failed to query capabilities` obwohl Zugangsdaten korrekt sind | Anfangs fehlgedeutet als „das Gerät beantwortet `get_capabilities()` nur im eingeschalteten Zustand" — weder der `msmart-ng`-Code noch der finale Ablauf stützen das; eine durch einen vorherigen Fehlversuch defekte Verbindung erzeugt dasselbe Symptom (siehe nächste Zeile) | Mit komplett frischer Verbindung erneut versuchen: `midea_ieco_ensure.py` erstellt bei jedem Retry ein neues `AC`-Objekt und fragt die Capabilities erneut ab. Der ausgelieferte Ablauf fragt Capabilities vor dem Einschalten ab |
+| Capability-Abfrage läuft ab / `Failed to query capabilities` obwohl Token/Key korrekt sind | Anfangs fehlgedeutet als „das Gerät beantwortet `get_capabilities()` nur im eingeschalteten Zustand" — weder der `msmart-ng`-Code noch der finale Ablauf stützen das; eine durch einen vorherigen Fehlversuch defekte Verbindung erzeugt dasselbe Symptom (siehe nächste Zeile) | Mit komplett frischer Verbindung erneut versuchen: `midea_ieco_ensure.py` erstellt bei jedem Retry ein neues `AC`-Objekt und fragt die Capabilities erneut ab. Der ausgelieferte Ablauf fragt Capabilities vor dem Einschalten ab |
 | `[Errno 104] Connection reset by peer` nach mehreren Versuchen | Ein fehlgeschlagener Verbindungsversuch hinterließ das `AC`-Objekt mit einem defekten Socket-Zustand | Bei jedem Wiederholungsversuch ein **neues** `AC`-Objekt erstellen |
-| Token/Key funktionieren plötzlich nicht mehr | Meist das vorige Socket-Problem, seltener echte Zugangsdaten-Invalidierung | `midea_refresh_tokens.py --name <Gerät>` ausführen |
-| `msmart-ng discover` liefert Zugangsdaten, die kurz danach nicht mehr funktionieren | `--auto` verwendet ein internes Hilfskonto mit temporären Schlüsseln | `midea_refresh_tokens.py` über `midea-local` verwenden, um dauerhafte Zugangsdaten zu erhalten |
+| Token/Key funktionieren plötzlich nicht mehr | Meist das vorige Socket-Problem, seltener eine echte Token-Invalidierung | `midea_refresh_tokens.py --name <Gerät>` ausführen |
+| `msmart-ng discover --auto` liefert gelegentlich Schlüssel, die kurz danach nicht mehr funktionieren | Sowohl `msmart-ng` als auch `midea-local` melden sich mit einem eingebauten Hilfskonto an, und Tokens sind gerätegebunden (nicht kontogebunden) — es geht also nicht um *welches* Konto. Die kurzlebigen Ausfälle waren höchstwahrscheinlich das Frisch-Socket-Problem oben, kein echtes Ablaufen | `midea_refresh_tokens.py` (über `midea-local`) nutzen: es **verifiziert jeden Token gegen das Gerät** vor dem Speichern und behält bei Fehlschlag den zuletzt gültigen Wert |
+| `getToken` scheitert / keine `tokenlist`, wenn ein `cloud_name` von MSmartHome oder Meiju genutzt wird | Midea hat die Token-API dieser Clouds abgeschaltet (`errorCode 3004 "value is illegal"`); nur NetHome Plus vergibt noch Tokens (Juli 2026 verifiziert) | `midealocal` sein Default-Hilfskonto (NetHome Plus) nutzen lassen — keinen `cloud_name`/keine Zugangsdaten übergeben. `midea_refresh_tokens.py` tut das und schirmt die CLI zusätzlich gegen jede nutzer-globale Config ab |
 | Verwechslung zwischen „ECO" und „iECO" in Logs/UI | Mideas eigene Doku und App verwenden für zwei unterschiedliche Mechanismen ähnliche Bezeichnungen | Merke: normales ECO = fix 24 °C via Taste/Fernbedienung; iECO = eigener Sollwert via App/Cloud-Algorithmus |
 
 ## Sicherheitshinweise
 
-- `devices.json` und `credentials.json` enthalten sensible Werte (Geräte-Token/-Key bzw. dein Cloud-Passwort): dauerhaft bei `chmod 600` belassen. Beide sind **git-ignoriert**, deine echten Werte werden also nie versioniert — nur die `*.example.json`-Vorlagen. (Ein früher Commit enthielt zwar eine `devices.json`, jedoch ausschließlich funktionslose Dummy-Platzhalter; echte Zugangsdaten liegen an keiner Stelle der Git-History.)
-- Dein Midea-Cloud-Passwort liegt in `credentials.json` (Klartext) und wird von `midea_refresh_tokens.py` gelesen. Es wird in keine versionierte Quelldatei geschrieben.
-- `midea-local.json` ist eine kurzlebige 0600-Datei, die nur während einer Cloud-Abfrage existiert, um dem `midealocal`-CLI die Zugangsdaten über eine Config-Datei statt über die Prozess-Kommandozeile zu übergeben (damit das Passwort nicht in `ps` sichtbar ist). `midea_refresh_tokens.py` legt sie in einem privaten, pro Aufruf frischen Temp-Verzeichnis an und entfernt sie sofort. Der Name ist als Sicherheitsnetz **git-ignoriert**.
+- **Es wird nirgends ein Midea-Cloud-Passwort gespeichert.** Seit 0.2.0 holen die Skripte die Geräte-Tokens ohne jegliche Cloud-Zugangsdaten — es gibt also keine Passwortdatei zu schützen. (Wer von 0.1.x aktualisiert, hat evtl. noch eine `credentials.json` auf der Platte — sie ist nun ungenutzt; der Installer weist darauf hin, und du kannst sie gefahrlos `rm`. Sie bleibt **git-ignoriert**.)
+- `devices.json` enthält sensible Werte (Token/Key je Gerät): dauerhaft bei `chmod 600` belassen. Sie ist **git-ignoriert**, deine echten Werte werden also nie versioniert — nur die `devices.example.json`-Vorlage. (Ein früher Commit enthielt zwar eine `devices.json`, jedoch ausschließlich funktionslose Dummy-Platzhalter; echte Zugangsdaten liegen an keiner Stelle der Git-History.)
+- `midea-local.json` ist eine Wegwerf-0600-Datei, die `midea_refresh_tokens.py` **ausschließlich in einem privaten, pro Aufruf frischen Temp-Verzeichnis** anlegt — ein leeres `{}`, das die `midealocal`-CLI auf eine deterministische, zugangsdatenfreie Abfrage festnagelt (unabhängig von jeder nutzer-globalen Config). Sie landet nie im Projektbaum und wird sofort entfernt; der Name ist als Sicherheitsnetz **git-ignoriert**.
 - Für Siri über SSH SSH-Schlüssel-Authentifizierung verwenden und SSH **nicht** per Port-Weiterleitung ins Internet freigeben. Für Remote-Zugriff stattdessen ein VPN (z. B. Tailscale) nutzen.
 
 ## Lizenz und Weitergabe

@@ -51,8 +51,13 @@ extract_func() {  # $1=name $2=file
     awk -v n="$1" '$0 ~ "^"n"\\(\\) \\{" {f=1} f {print} f && /^}/ {exit}' "$2"
 }
 
-# Stubs fuer Hilfsfunktionen, die extrahierte Funktionen evtl. aufrufen.
+# Stubs fuer Hilfsfunktionen, die extrahierte Funktionen evtl. aufrufen. Sie
+# werden nur INDIREKT (aus den eval'ten install.sh-Funktionen) gerufen und sind
+# statisch daher scheinbar "nie invoked". Der SC2329-Guard steht am warn-Stub,
+# weil der Hint-Test warn zeitweise ueberschreibt (mehrere Definitionen loesen
+# SC2329 sonst genau hier aus).
 info() { :; }
+# shellcheck disable=SC2329
 warn() { :; }
 ok()   { :; }
 # Wie in install.sh bricht error() ab (exit) - Funktionen, die error() rufen
@@ -76,36 +81,38 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 # ---------------------------------------------------------------------------
-echo "== write_credentials_file (#8 atomar/0600, #5b env-Uebergabe) =="
+echo "== hint_obsolete_credentials (0.2.0: Hinweis statt Auto-Loeschen) =="
 # ---------------------------------------------------------------------------
-eval "$(extract_func write_credentials_file "$INSTALL")"
+eval "$(extract_func t "$INSTALL")"
+eval "$(extract_func hint_obsolete_credentials "$INSTALL")"
+LANG_CHOICE=de
+# Das globale warn oben ist ein stiller Stub; hier lokal so umdefinieren, dass
+# die Ausgabe beobachtbar wird. Am Ende des Abschnitts wieder zuruecksetzen.
+# shellcheck disable=SC2329  # indirekt via hint_obsolete_credentials aufgerufen
+warn() { echo "WARN:$*"; }
 
-MIDEA_USER='a@b.example'
-MIDEA_PASS='p ä"x\y'   # Leerzeichen, Umlaut, Quote, Backslash
+# (a) credentials.json vorhanden -> Hinweis mit Pfad und 'rm', Rueckgabe 0.
+INSTALL_DIR="$WORK/hint_present"; mkdir -p "$INSTALL_DIR"; : > "$INSTALL_DIR/credentials.json"
+out="$(hint_obsolete_credentials)"; rc_call=$?
+rc=0
+[ "$rc_call" -eq 0 ] || rc=1
+case "$out" in *rm*"$INSTALL_DIR/credentials.json"*) : ;; *) rc=1 ;; esac
+assert "$rc" "vorhandene credentials.json: Hinweis (rm <pfad>), Rueckgabe 0"
 
-write_credentials_file "$WORK/credentials.json"
-rc=0; [ "$(mode_of "$WORK/credentials.json")" = "600" ] || rc=1
-assert "$rc" "credentials.json mit 0600 angelegt"
+# (b) credentials.json fehlt -> keine Ausgabe, Rueckgabe 0 (kein Fehler).
+INSTALL_DIR="$WORK/hint_absent"; mkdir -p "$INSTALL_DIR"
+out="$(hint_obsolete_credentials)"; rc_call=$?
+rc=0; { [ "$rc_call" -eq 0 ] && [ -z "$out" ]; } || rc=1
+assert "$rc" "fehlende credentials.json: still, Rueckgabe 0"
 
-got_user=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["username"])' "$WORK/credentials.json")
-got_pass=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["password"])' "$WORK/credentials.json")
-rc=0; { [ "$got_user" = "$MIDEA_USER" ] && [ "$got_pass" = "$MIDEA_PASS" ]; } || rc=1
-assert "$rc" "Sonderzeichen-Roundtrip (User+Passwort) korrekt"
+# (c) Die Datei wird NICHT geloescht - bewusste Nutzerentscheidung (kein Auto-rm).
+INSTALL_DIR="$WORK/hint_keep"; mkdir -p "$INSTALL_DIR"; : > "$INSTALL_DIR/credentials.json"
+hint_obsolete_credentials >/dev/null
+rc=0; [ -f "$INSTALL_DIR/credentials.json" ] || rc=1
+assert "$rc" "credentials.json bleibt erhalten (kein Auto-Loeschen)"
 
-# Vorbestehende 0644-Datei -> atomarer Ersatz (Inode wechselt), Ergebnis 0600.
-printf 'alt' > "$WORK/c2.json"; chmod 644 "$WORK/c2.json"
-ino1=$(inode_of "$WORK/c2.json")
-write_credentials_file "$WORK/c2.json"
-ino2=$(inode_of "$WORK/c2.json")
-rc=0; { [ "$(mode_of "$WORK/c2.json")" = "600" ] && [ "$ino1" != "$ino2" ]; } || rc=1
-assert "$rc" "vorbestehende 0644 -> 0600 via Inode-Wechsel (atomar)"
-
-# Keine .tmp-Waise im Zielverzeichnis.
-shopt -s nullglob dotglob
-leftovers=("$WORK"/.credentials.json.*.tmp "$WORK"/.c2.json.*.tmp)
-shopt -u nullglob dotglob
-rc=0; [ "${#leftovers[@]}" -eq 0 ] || rc=1
-assert "$rc" "keine .tmp-Waise"
+# shellcheck disable=SC2329  # stiller Stub, indirekt genutzt
+warn() { :; }   # stillen Stub wiederherstellen
 
 # ---------------------------------------------------------------------------
 echo "== shell_quote_for_cron (#4) =="
@@ -803,10 +810,11 @@ assert "$rc" "resolve_lang: Env schlaegt Locale"
 # ---------------------------------------------------------------------------
 echo "== i18n: t()-Katalog vollstaendig + Interpolation =="
 # ---------------------------------------------------------------------------
-eval "$(extract_func t "$INSTALL")"
+t_src="$(extract_func t "$INSTALL")"
+eval "$t_src"
 
-# Jeder im Skript per $(t <key>) referenzierte Schluessel MUSS in EN und DE eine
-# nicht-leere Uebersetzung liefern - Schutz vor Drift und Tippfehlern.
+# Vorwaerts: jeder im Skript per $(t <key>) referenzierte Schluessel MUSS in EN
+# und DE eine nicht-leere Uebersetzung liefern - Schutz vor Drift und Tippfehlern.
 # grep-/sed-Muster sind bewusst literal ('$(t ' als Text, keine Expansion).
 # shellcheck disable=SC2016
 used_keys="$(grep -oE '\$\(t [a-z][a-z0-9_]*' "$INSTALL" | sed 's/^\$(t //' | sort -u)"
@@ -819,6 +827,19 @@ while IFS= read -r key; do
     done
 done <<< "$used_keys"
 assert "$rc" "t(): alle referenzierten Schluessel in EN und DE vorhanden"
+
+# Rueckwaerts (0.2.0): JEDER im Katalog definierte Schluessel MUSS auch verwendet
+# werden. So wird eine verwaiste Uebersetzung - etwa nach dem Entfernen eines
+# Aufrufers wie der frueheren Zugangsdaten-Abfrage - zum Testfehler, statt
+# unbemerkt liegenzubleiben. Definierende Zeilen im Katalog: '        <key>) en=...'.
+defined_keys="$(printf '%s\n' "$t_src" | sed -nE 's/^ {8}([a-z][a-z0-9_]*)\)[[:space:]]+en=.*/\1/p' | sort -u)"
+rc=0
+while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    # shellcheck disable=SC2016
+    grep -qE '\$\(t '"${key}"'[ )]' "$INSTALL" || { echo "    verwaist: '$key'"; rc=1; }
+done <<< "$defined_keys"
+assert "$rc" "t(): kein verwaister Katalog-Schluessel (jeder wird verwendet)"
 
 # printf-Interpolation + korrekte Sprache (dynamischer Wert nur als Argument).
 LANG_CHOICE=de

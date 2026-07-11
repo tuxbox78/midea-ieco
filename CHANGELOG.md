@@ -6,13 +6,15 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-11
+
 ### Added
 - `midea-ieco-update` command (and an `install.sh --update` mode) to update an
   existing installation in place: refreshes the code, the pinned dependencies,
-  and the wrapper commands **without** touching `devices.json`,
-  `credentials.json`, or cron jobs. Works for both git- and ZIP-based installs.
-  The updater fetches first and then re-execs the freshly fetched script, so the
-  running updater is never the file being overwritten.
+  and the wrapper commands **without** touching `devices.json` or cron jobs.
+  Works for both git- and ZIP-based installs. The updater fetches first and then
+  re-execs the freshly fetched script, so the running updater is never the file
+  being overwritten.
 - The installer offers to add the bin directory (e.g. `/opt/local/bin`) to your
   `PATH` via an idempotent, self-guarding block in the shell rc chosen by your
   login shell (`~/.bashrc` / `~/.zshrc` / `~/.profile`). Only with your
@@ -28,6 +30,13 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `venv/bin/python3 midea_refresh_tokens.py`.
 
 ### Changed
+- **Token retrieval is now credential-free.** `midea_refresh_tokens.py` runs a
+  single `midealocal.cli discover` call with no `--username`/`--password`, and
+  writes an empty `midea-local.json` (`{}`) into a private per-call temporary
+  directory used as the CLI's working dir. That pins the lookup to `midealocal`'s
+  default (NetHome Plus) helper account and makes it independent of any
+  user-global config — deterministic across hosts. The former command-line
+  fallback (which briefly exposed the password in `ps`) is removed with it.
 - Re-running `install.sh` on an already-configured installation no longer
   repeats the interactive onboarding (which would overwrite `devices.json`); it
   now refreshes code, dependencies, and wrappers, then exits. Use
@@ -36,6 +45,29 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `list` is now a reserved target word (like `all`): the installer rejects a
   device named `list`, and the overview flags a device already named
   `all`/`list` from an earlier install as unreachable from the command line.
+- Both READMEs rewrite the token-retrieval story to match reality (device-bound
+  tokens, the NetHome Plus API, the built-in helper account) and drop the earlier
+  "`midea-local` signs in with your own account for account-bound credentials"
+  explanation, which did not hold up.
+
+### Removed
+- **The Midea-cloud-credentials prompt, the `credentials.json` file, the
+  `--username`/`--password` flags of `midea_refresh_tokens.py`, and the
+  `credentials.example.json` template.** Fetching device tokens never actually
+  used them: tokens are bound to the device (its UDP id), not to a cloud account,
+  and Midea now issues them only through the NetHome Plus cloud API — the
+  MSmartHome and Meiju `getToken` endpoints answer `errorCode 3004 "value is
+  illegal"` (verified against a real unit in July 2026). Both `midea-local` and
+  `msmart-ng` therefore sign in with a built-in helper account, so passing your
+  own credentials had no effect. The installer no longer asks for a password, and
+  none is stored anywhere. An existing `credentials.json` from 0.1.x is **not**
+  deleted automatically (it may hold a plaintext password) — the installer and
+  updater point out that it is now unused and can be removed.
+
+### Fixed
+- Corrected a stale version reference in `midea_refresh_tokens.py`: the
+  isolation-config mechanism is verified against the pinned `midea-local` 6.6.1
+  (the code path is identical in 6.6.1 and 6.10.0).
 
 ## [0.1.0] - 2026-07-10
 
@@ -117,5 +149,6 @@ First public release.
 - The manual cron log-rotation example truncates `refresh.log` as well as
   `ieco.log`, matching the installer-generated job.
 
-[Unreleased]: https://github.com/tuxbox78/midea-ieco/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/tuxbox78/midea-ieco/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/tuxbox78/midea-ieco/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/tuxbox78/midea-ieco/releases/tag/v0.1.0

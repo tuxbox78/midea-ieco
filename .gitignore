@@ -1,12 +1,17 @@
 # Secrets & per-user runtime config — NEVER commit these.
-# (Exact filenames, so the tracked *.example.json templates are NOT ignored.)
-credentials.json
+# (Exact filenames, so the tracked devices.example.json template is NOT ignored.)
 devices.json
 # Backup written by `install.sh --reconfigure` before it overwrites devices.json.
 # Holds the same real token/key values, so it must never be committed either.
 devices.json.bak
-# Short-lived credential file handed to the midealocal CLI; normally removed
-# right after use, ignored so a killed run can never leave it tracked.
+# Legacy: 0.1.x asked for the Midea cloud password and stored it here. 0.2.0 no
+# longer creates or reads this file (device tokens are fetched without any cloud
+# credentials), but keep it ignored so an upgraded install can never commit an
+# old one that still holds a plaintext password.
+credentials.json
+# Isolation config for the midealocal CLI. 0.2.0 writes it only inside a
+# per-call temp dir (an empty {} that pins the CLI away from a user-global
+# config), never in the project tree — ignored purely defensively.
 midea-local.json
 
 # Python virtual environment & bytecode caches

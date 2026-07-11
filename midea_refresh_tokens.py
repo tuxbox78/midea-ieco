@@ -4,26 +4,28 @@
 """
 midea_refresh_tokens.py
 
-Holt frische Token/Key-Paare aus der Midea-Cloud (ueber den bewaehrten
-Befehl `python3 -m midealocal.cli discover --debug`) und aktualisiert
-devices.json. Verifiziert JEDES gefundene Token/Key-Paar mit einer
-echten lokalen Verbindung, bevor es gespeichert wird.
+Holt frische Token/Key-Paare fuer die konfigurierten Geraete und aktualisiert
+devices.json. Verifiziert JEDES gefundene Token/Key-Paar mit einer echten
+lokalen Verbindung zum Geraet, bevor es gespeichert wird.
 
-Zugangsdaten (Benutzername/Passwort) werden standardmaessig aus
-credentials.json im Skriptverzeichnis gelesen (Vorlage:
-credentials.example.json; danach `chmod 600 credentials.json`). Alternativ
-lassen sie sich per --username/--password uebergeben oder - bei
-interaktivem Aufruf ohne hinterlegte Datei - direkt eingeben.
-
-Sicherheitshinweis: Standardmaessig werden die Zugangsdaten dem midealocal-
-Unterprozess ueber eine nur fuer den aktuellen Nutzer lesbare midea-local.json
-(0600) in einem privaten, pro Aufruf frisch angelegten Temp-Verzeichnis
-uebergeben - NICHT auf der Kommandozeile. Nur falls
-dieser Weg kein Ergebnis liefert, wird einmalig auf die Kommandozeilen-
-Uebergabe zurueckgefallen; dann ist das Passwort waehrend der Laufzeit des
-Unterprozesses kurzzeitig ueber `ps aux` bzw. /proc/<pid>/cmdline sichtbar.
-Betreibe dieses Skript vorsichtshalber nur auf vertrauenswuerdigen
-Einzelbenutzer-Servern.
+Funktionsweise / warum OHNE Cloud-Zugangsdaten:
+    Token und Key sind an die UDP-ID des jeweiligen GERAETS gebunden, nicht an
+    ein Cloud-Konto. Sie werden ueber `python3 -m midealocal.cli discover
+    --host <ip> --debug` bezogen. Die Token-Vergabe laeuft heute ausschliesslich
+    ueber die NetHome-Plus-Cloud-API; die getToken-Endpunkte von MSmartHome und
+    Meiju hat Midea serverseitig abgeschaltet (sie quittieren errorCode 3004
+    "value is illegal" - am 2026-07-11 real gegen ein Geraet verifiziert). Ein
+    EIGENES MSmartHome-Konto ist damit fuer den Token-Abruf nutzlos, und auf der
+    NetHome-Plus-Cloud existiert es gar nicht. `midealocal` meldet sich deshalb
+    mit seinem eingebauten NetHome-Plus-Konto an - genau das tut auch msmart-ng.
+    Dieses Skript uebergibt der CLI daher BEWUSST keine Zugangsdaten (die frueher
+    abgefragte credentials.json entfiel mit 0.2.0). Der eigentliche Wert liegt
+    woanders: jeder Kandidat wird VOR dem Speichern gegen das Geraet verifiziert,
+    und bestehende Werte werden nur nach erfolgreicher Verifikation ueberschrieben
+    - faellt die Cloud-API eines Tages aus, bleiben die zuletzt gueltigen Tokens
+    erhalten und die lokale Steuerung laeuft weiter.
+    (Mechanik quellcode-identisch in midea-local 6.6.1 und 6.10.0; real
+    verifiziert gegen die gepinnte 6.6.1 am 2026-07-11.)
 
 Nutzung:
     python3 midea_refresh_tokens.py --name Wohnzimmer
@@ -33,7 +35,6 @@ Nutzung:
 
 import argparse
 import asyncio
-import getpass
 import json
 import os
 import re
@@ -44,12 +45,6 @@ import tempfile
 from pathlib import Path
 
 CONFIG_PATH = Path(__file__).parent / "devices.json"
-CREDENTIALS_PATH = Path(__file__).parent / "credentials.json"
-
-# Platzhalterwerte aus credentials.example.json: werden wie "nicht gesetzt"
-# behandelt, damit ein versehentlich unbearbeitetes Beispiel klar abgewiesen
-# wird, statt in einem verwirrenden Cloud-Authentifizierungsfehler zu enden.
-PLACEHOLDER_VALUES = frozenset({"", "dein@account.example", "DEIN_PASSWORT", "HIER_PASSWORT_EINTRAGEN"})
 SUBPROCESS_TIMEOUT = 60
 VERIFY_TIMEOUT = 10
 
@@ -148,125 +143,65 @@ def save_config(config: dict) -> None:
     _atomic_write_json(CONFIG_PATH, config)
 
 
-def _clean_credential_value(value: object) -> str | None:
-    """Verwirft Nicht-Strings und bekannte Platzhalterwerte (PLACEHOLDER_VALUES).
+def _run_discover(host: str) -> subprocess.CompletedProcess:
+    """Fuehrt `midealocal.cli discover --host <host> --debug` in einem privaten,
+    pro Aufruf frisch angelegten Temp-Verzeichnis aus und gibt das Ergebnis
+    zurueck.
 
-    Gilt gleichermassen fuer Werte aus credentials.json UND fuer per
-    --username/--password uebergebene CLI-Argumente - ein versehentlich aus
-    credentials.example.json kopierter Platzhalter (z.B. 'DEIN_PASSWORT') soll
-    in keinem der beiden Faelle unbemerkt an die Cloud gesendet werden."""
-    return value if isinstance(value, str) and value not in PLACEHOLDER_VALUES else None
+    Bewusst OHNE --username/--password: die Token-Vergabe laeuft ohnehin ueber
+    midealocals eingebautes NetHome-Plus-Konto (siehe Modul-Docstring), eigene
+    Zugangsdaten waeren wirkungslos. Damit taucht auch garantiert kein Passwort
+    in der Prozess-argv auf.
 
+    In das Temp-Verzeichnis wird eine LEERE midea-local.json ({}) geschrieben und
+    zum CWD des Unterprozesses gemacht. Grund: get_config_file_path() der CLI
+    bevorzugt eine midea-local.json im aktuellen Verzeichnis vor der nutzer-
+    globalen Konfiguration (~/.config/midea-local/midea-local.json). Ohne diesen
+    Guard koennte eine dort hinterlegte Config (z.B. mit einem cloud_name wie
+    "SmartHome") den Abruf auf eine serverseitig abgeschaltete Cloud-API umleiten
+    und so je nach Host unterschiedlich scheitern. Die leere {}-Datei
+    ueberschreibt NICHTS (der Merge der CLI fuellt nur FEHLENDE Namespace-Felder),
+    macht das Verhalten aber deterministisch und unabhaengig von der Host-
+    Umgebung. Ein eigenes Temp-Verzeichnis je Aufruf isoliert zudem gleichzeitige
+    Laeufe (Wochen-Cron trifft manuellen Aufruf) gegeneinander. Es wird in jedem
+    Fall wieder entfernt.
 
-def load_credentials() -> tuple[str | None, str | None]:
-    """Liest Benutzername/Passwort aus credentials.json, sofern vorhanden.
-
-    Rueckgabe: (username, password). Fehlt die Datei, ist sie unlesbar oder
-    kein gueltiges JSON-Objekt, oder enthaelt sie nur Platzhalter/leere Werte,
-    wird fuer das jeweilige Feld None zurueckgegeben - der Aufrufer entscheidet
-    dann ueber CLI-Argumente oder interaktiven Prompt. Ein Syntaxfehler in der
-    Datei wird als Warnung gemeldet, damit eine kaputte Datei nicht
-    stillschweigend uebergangen wird."""
-    if not CREDENTIALS_PATH.exists():
-        return None, None
-    try:
-        with open(CREDENTIALS_PATH, encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, ValueError) as exc:  # ValueError deckt JSONDecodeError UND UnicodeDecodeError (nicht-UTF-8-Datei) ab
-        print(f"WARNUNG: {CREDENTIALS_PATH} konnte nicht gelesen werden "
-              f"({type(exc).__name__}: {exc}). Nutze Argumente/Prompt.")
-        return None, None
-    if not isinstance(data, dict):
-        print(f"WARNUNG: {CREDENTIALS_PATH} enthaelt kein JSON-Objekt. "
-              f"Nutze Argumente/Prompt.")
-        return None, None
-    return _clean_credential_value(data.get("username")), _clean_credential_value(data.get("password"))
-
-
-def resolve_credentials(arg_username: str | None, arg_password: str | None) -> tuple[str, str]:
-    """Ermittelt die endgueltigen Zugangsdaten nach fester Praezedenz:
-    1. explizite CLI-Argumente, 2. credentials.json, 3. interaktiver
-    getpass-Prompt - Letzterer NUR wenn ein TTY vorhanden ist. In einem
-    nicht-interaktiven Lauf (z.B. Cron) ohne verfuegbare Zugangsdaten wird mit
-    klarer Meldung abgebrochen; es wird bewusst nie ohne TTY geprompted, um
-    Haenger/EOF-Fehler zu vermeiden.
-
-    CLI-Argumente durchlaufen denselben Platzhalter-Filter wie credentials.json
-    (_clean_credential_value) - ein versehentlich uebergebener Platzhalterwert
-    faellt dadurch auf Datei/Prompt zurueck statt an die Cloud gesendet zu
-    werden. Bricht der Nutzer einen Prompt per Strg+D (EOF) ab, endet das
-    Skript - wie jeder andere Zugangsdaten-Fehlerfall - mit einer klaren
-    Meldung auf stderr statt einem rohen Traceback. Strg+C (KeyboardInterrupt)
-    wird bewusst NICHT abgefangen: das Skript soll dabei wie jedes andere
-    Python-Programm sofort abbrechen."""
-    file_username, file_password = load_credentials()
-    username = _clean_credential_value(arg_username) or file_username
-    password = _clean_credential_value(arg_password) or file_password
-
-    if (not username or not password) and sys.stdin.isatty():
-        print("Zugangsdaten unvollstaendig - bitte interaktiv eingeben:")
-        try:
-            if not username:
-                username = input("  Midea-E-Mail: ").strip()
-            if not password:
-                password = getpass.getpass("  Midea-Passwort: ")
-        except EOFError:
-            print("\nFEHLER: Eingabe abgebrochen (EOF).", file=sys.stderr)
-            sys.exit(1)
-
-    if not username or not password:
-        print(
-            "FEHLER: Keine gueltigen Zugangsdaten verfuegbar. Hinterlege sie in "
-            f"{CREDENTIALS_PATH} (Vorlage credentials.example.json kopieren, "
-            "ausfuellen, dann 'chmod 600 credentials.json') oder uebergib "
-            "--username/--password.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    return username, password
-
-
-def _run_discover(host: str, *, use_config: bool,
-                  username: str, password: str) -> subprocess.CompletedProcess:
-    """Fuehrt `midealocal.cli discover --host <host> --debug` aus.
-
-    use_config=True: schreibt die Zugangsdaten in eine midea-local.json (0600)
-    in einem PRO AUFRUF frisch angelegten, privaten Temp-Verzeichnis und macht
-    dieses zum CWD des Unterprozesses; --username/--password bleiben WEG. Die
-    midealocal-CLI bevorzugt eine midea-local.json im aktuellen Verzeichnis
-    (get_config_file_path()) und fuellt daraus nur fehlende Argumente - so
-    erscheint das Passwort nicht in der Prozess-argv (verifiziert gegen
-    midea-local 6.10.0). Ein eigenes Temp-Verzeichnis je Aufruf isoliert
-    gleichzeitige Laeufe (z.B. Wochen-Cron trifft manuellen Aufruf) gegen ein
-    Wettrennen um eine gemeinsame Datei und haelt das Projektverzeichnis frei
-    von Zugangsdaten-Resten. Es wird in jedem Fall wieder entfernt.
-    use_config=False: uebergibt die Zugangsdaten auf der Kommandozeile
-    (Fallback; Passwort dabei kurzzeitig via ps sichtbar).
-
-    Wirft RuntimeError bei einem klaren Ausfuehrungsfehler (Timeout, midealocal
-    nicht installiert)."""
+    Wirft RuntimeError bei jedem Ausfuehrungsfehler (Temp-Verzeichnis oder
+    Isolations-Konfig nicht anlegbar, Timeout, midealocal nicht installiert,
+    sonstiger Subprozess-Startfehler)."""
     cmd = [sys.executable, "-m", "midealocal.cli", "discover", "--host", host, "--debug"]
-    run_kwargs = {"capture_output": True, "text": True, "timeout": SUBPROCESS_TIMEOUT}
-    tmpdir = None
     try:
-        if use_config:
-            tmpdir = tempfile.mkdtemp(prefix="midea-local-discover-")
-            _atomic_write_json(Path(tmpdir) / "midea-local.json",
-                               {"username": username, "password": password})
-            run_kwargs["cwd"] = tmpdir
-        else:
-            cmd[4:4] = ["--username", username, "--password", password]
+        tmpdir = tempfile.mkdtemp(prefix="midea-local-discover-")
+    except OSError as exc:
+        raise RuntimeError("Temporaeres Arbeitsverzeichnis fuer discover konnte nicht "
+                           f"angelegt werden ({type(exc).__name__}: {exc}).") from exc
+    try:
         try:
-            return subprocess.run(cmd, **run_kwargs)
+            _atomic_write_json(Path(tmpdir) / "midea-local.json", {})
+        except OSError as exc:
+            raise RuntimeError("Isolations-Konfig fuer discover konnte nicht geschrieben "
+                               f"werden ({type(exc).__name__}: {exc}).") from exc
+        try:
+            return subprocess.run(cmd, capture_output=True, text=True,
+                                  timeout=SUBPROCESS_TIMEOUT, cwd=tmpdir)
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(f"discover-Befehl hat nach {SUBPROCESS_TIMEOUT}s nicht reagiert "
                                 f"(Geraet unter {host} erreichbar?)") from exc
         except FileNotFoundError as exc:
+            # FileNotFoundError ist eine OSError-Unterklasse und MUSS vor dem
+            # generischen 'except OSError' stehen, damit hier die spezifische
+            # Meldung ("midealocal nicht installiert") greift.
             raise RuntimeError("midealocal ist im aktuellen Python-Interpreter nicht installiert "
                                 "(falsches venv aktiv?)") from exc
+        except OSError as exc:
+            # Jeder sonstige Startfehler des Unterprozesses (z.B. PermissionError)
+            # wird ebenfalls als RuntimeError gewrappt - update_device faengt nur
+            # RuntimeError; ohne dieses Wrapping schluege ein solcher Fehler als
+            # roher Traceback durch und beendete einen ganzen 'all'-Lauf.
+            raise RuntimeError("discover-Befehl konnte nicht gestartet werden "
+                               f"({type(exc).__name__}: {exc}).") from exc
     finally:
-        if tmpdir is not None:
-            shutil.rmtree(tmpdir, ignore_errors=True)
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def _parse_discover_output(result: subprocess.CompletedProcess) -> tuple[list[tuple[str, str]], str | None]:
@@ -285,27 +220,18 @@ def _parse_discover_output(result: subprocess.CompletedProcess) -> tuple[list[tu
     return matches, (appliance_ids[0] if appliance_ids else None)
 
 
-def fetch_candidate_credentials(username: str, password: str, host: str) -> tuple[list[tuple[str, str]], str | None]:
+def fetch_candidate_credentials(host: str) -> tuple[list[tuple[str, str]], str | None]:
     """Ruft discover --debug auf und gibt ALLE gefundenen (key, token)-
     Kandidaten zurueck, sowie die gemeldete Appliance-ID (falls vorhanden).
-    Wirft RuntimeError bei einem klaren Ausfuehrungsfehler.
+    Wirft RuntimeError bei einem klaren Ausfuehrungsfehler (Timeout, kein
+    tokenlist-Eintrag in der Ausgabe, midealocal nicht installiert).
 
-    Primaerweg: Zugangsdaten via temporaerer midea-local.json (kein Passwort in
-    der Prozess-argv). Liefert dieser Weg kein verwertbares Ergebnis - etwa weil
-    eine aeltere midealocal-Version die Config-Datei nicht auswertet -, wird
-    EINMAL auf die Kommandozeilen-Variante zurueckgefallen (mit deutlicher
-    Warnung, da das Passwort dabei kurzzeitig ueber ps sichtbar ist). Ein echter
-    Ausfuehrungsfehler (Timeout, midealocal fehlt) loest KEINEN Fallback aus -
-    er wuerde ohnehin identisch scheitern."""
-    result = _run_discover(host, use_config=True, username=username, password=password)
-    try:
-        return _parse_discover_output(result)
-    except RuntimeError as exc_cfg:
-        print(f"WARNUNG: discover ueber midea-local.json lieferte kein Ergebnis "
-              f"({exc_cfg}). Falle einmalig auf die Kommandozeilen-Variante "
-              f"zurueck (Passwort dabei kurzzeitig via ps sichtbar).")
-        result = _run_discover(host, use_config=False, username=username, password=password)
-        return _parse_discover_output(result)
+    Es gibt genau EINEN Weg (siehe _run_discover): der discover-Aufruf ohne
+    Zugangsdaten. Ein frueherer Kommandozeilen-Fallback (Passwort via argv)
+    entfiel mit 0.2.0, weil eigene Zugangsdaten fuer den Token-Abruf ohnehin
+    wirkungslos sind - siehe Modul-Docstring."""
+    result = _run_discover(host)
+    return _parse_discover_output(result)
 
 
 async def verify_credentials(ip: str, port: int, device_id: int, key: str, token: str) -> bool:
@@ -337,7 +263,13 @@ async def verify_credentials(ip: str, port: int, device_id: int, key: str, token
                 pass
 
 
-def update_device(dev_conf: dict, username: str, password: str) -> bool:
+def update_device(dev_conf: dict) -> bool:
+    """Frischt Token/Key EINES Geraets auf: holt Kandidaten per credential-freiem
+    discover, verifiziert sie der Reihe nach gegen das echte Geraet und speichert
+    das erste funktionierende (key, token)-Paar in-place in dev_conf. Rueckgabe
+    True bei Erfolg, sonst False. Bestehende Werte werden NUR bei erfolgreicher
+    Verifikation ueberschrieben - schlaegt alles fehl, bleibt dev_conf
+    unveraendert (kein kaputter Eintrag nach einem Fehlversuch)."""
     name = dev_conf.get("name", "unbekannt")
     host = dev_conf.get("ip")
     if not host:
@@ -346,7 +278,7 @@ def update_device(dev_conf: dict, username: str, password: str) -> bool:
 
     print(f"[{name}] Hole Token/Key-Kandidaten ueber {host} ...")
     try:
-        candidates, appliance_id = fetch_candidate_credentials(username, password, host)
+        candidates, appliance_id = fetch_candidate_credentials(host)
     except RuntimeError as exc:
         print(f"[{name}] FEHLER beim Token-Abruf: {exc}")
         return False
@@ -385,25 +317,26 @@ def update_device(dev_conf: dict, username: str, password: str) -> bool:
 
 
 def main() -> None:
+    """CLI-Einstieg: wertet --all bzw. --name/--host aus, prueft die msmart-
+    Verfuegbarkeit VOR jedem Cloud-Kontakt, frischt die betroffenen Geraete auf
+    (update_device) und schreibt devices.json atomar zurueck. Exit-Code: 0 =
+    Erfolg, 2 = mindestens ein Geraet fehlgeschlagen, 1 = Nutzungs-/Konfig-Fehler
+    (msmart fehlt, leere Geraeteliste bei --all, neues Geraet ohne --host,
+    Schreibfehler)."""
     parser = argparse.ArgumentParser(
         description="Holt frische Midea Token/Key-Paare per discover --debug, "
                     "verifiziert sie, und aktualisiert devices.json."
     )
-    parser.add_argument("--username", help="Midea-Account (Standard: aus credentials.json)")
-    parser.add_argument("--password", help="Midea-Passwort (Standard: aus credentials.json)")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--all", action="store_true", help="Alle Geraete aus devices.json aktualisieren")
     group.add_argument("--name", help="Name des Geraets (neu oder bestehend)")
     parser.add_argument("--host", help="IP-Adresse (nur zusammen mit --name fuer NEUE Geraete)")
     args = parser.parse_args()
 
-    username, password = resolve_credentials(args.username, args.password)
-
     # Fruehzeitige, klare Meldung statt eines rohen Tracebacks mitten im Lauf,
     # falls msmart-ng im aktiven Interpreter fehlt (verify_credentials importiert
-    # es erst spaet per Lazy-Import). Bewusst ERST nach parse_args und
-    # resolve_credentials, damit --help und Zugangsdaten-Fehler weiterhin ohne
-    # installiertes msmart funktionieren; und VOR jedem Cloud-Kontakt.
+    # es erst spaet per Lazy-Import). Bewusst ERST nach parse_args, damit --help
+    # weiterhin ohne installiertes msmart funktioniert; und VOR jedem Cloud-Kontakt.
     try:
         import msmart  # noqa: F401  (reine Verfuegbarkeitspruefung)
     except ImportError:
@@ -444,7 +377,7 @@ def main() -> None:
     ok = True
     successful_new_entry = False
     for dev in targets:
-        success = update_device(dev, username, password)
+        success = update_device(dev)
         ok = ok and success
         if dev is new_entry and success:
             successful_new_entry = True
