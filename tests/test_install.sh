@@ -163,7 +163,7 @@ for good in "Wohnzimmer" "Wohn Zimmer" "Küche" "buero-2"; do
     rc=0; is_valid_device_name "$good" 2>/dev/null || rc=1
     assert "$rc" "gueltig: '$good'"
 done
-for bad in "" "-foo" "all"; do
+for bad in "" "-foo" "all" "list"; do
     rc=0; is_valid_device_name "$bad" 2>/dev/null && rc=1
     assert "$rc" "abgelehnt: '$bad'"
 done
@@ -379,6 +379,30 @@ rc=0; grep -q -- '--update' "$WBIN/midea-ieco-update" || rc=1
 assert "$rc" "install_bin_wrapper: Update-Wrapper reicht --update weiter"
 rc=0; grep -qF '"$@"' "$WBIN/midea-ieco-update" || rc=1
 assert "$rc" "install_bin_wrapper: Update-Wrapper reicht alle Argumente weiter (\$@)"
+
+# Refresh-Tokens-Wrapper: 'exec <pfad>/venv/bin/python3 <pfad>/midea_refresh_tokens.py "$@"'
+# - muss pfad-sicher den venv-Python auf das Refresh-Skript ansetzen und darf
+# (wie die anderen) am boesartigen TRICKY_DIR NICHT ausbrechen.
+: > "$TRICKY_DIR/midea_refresh_tokens.py"
+install_bin_wrapper "midea-ieco-refresh-tokens" "exec ${Q}/venv/bin/python3 ${Q}/midea_refresh_tokens.py \"\$@\"" >/dev/null 2>&1
+rc=0; bash -n "$WBIN/midea-ieco-refresh-tokens" 2>/dev/null || rc=1
+assert "$rc" "install_bin_wrapper: Refresh-Wrapper syntaktisch valide (bash -n)"
+rc=0; grep -qF 'midea_refresh_tokens.py' "$WBIN/midea-ieco-refresh-tokens" || rc=1
+assert "$rc" "install_bin_wrapper: Refresh-Wrapper ruft midea_refresh_tokens.py"
+rc=0; grep -qF '"$@"' "$WBIN/midea-ieco-refresh-tokens" || rc=1
+assert "$rc" "install_bin_wrapper: Refresh-Wrapper reicht alle Argumente weiter (\$@)"
+rc=0; [ -e "$MARKER" ] && rc=1
+assert "$rc" "install_bin_wrapper: Refresh-Wrapper - kein Command-Substitution-Ausbruch"
+
+# install_all_wrappers muss ALLE drei Wrapper verdrahten (Schutz gegen ein
+# versehentlich entferntes install_bin_wrapper aus der Funktion). Die
+# schliessende Anfuehrung in "$w\"" verhindert, dass 'midea-ieco' faelschlich
+# auch die laengeren Namen mitmatcht.
+AW="$(extract_func install_all_wrappers "$INSTALL")"
+for w in "midea-ieco" "midea-ieco-update" "midea-ieco-refresh-tokens"; do
+    rc=0; printf '%s\n' "$AW" | grep -qF "install_bin_wrapper \"$w\"" || rc=1
+    assert "$rc" "install_all_wrappers verdrahtet Wrapper: $w"
+done
 
 # ---------------------------------------------------------------------------
 echo "== resolve_extracted_root_dir: ZIP-Fallback-Extraktion (L3) =="
