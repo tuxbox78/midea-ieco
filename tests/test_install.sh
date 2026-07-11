@@ -448,6 +448,21 @@ out=$(PYTHONPATH="$FMLE" python3 -c "$DISCSRC" 2>/dev/null); drc=$?
 rc=0; [ "$drc" -eq 2 ] || rc=1
 assert "$rc" "Discovery: Fehler in discover() -> Exit 2 (kein Traceback-Abbruch)"
 
+# ---------------------------------------------------------------------------
+echo "== parse_discovered: Discovery-Zeilen -> IP/ID-Arrays (Auto-Befuellung) =="
+# ---------------------------------------------------------------------------
+eval "$(extract_func parse_discovered "$INSTALL")"
+
+parse_discovered "$(printf '192.168.0.186\t153931629346858\n192.168.0.185\t152832117825892')"
+rc=0; { [ "${#DISC_IPS[@]}" -eq 2 ] \
+    && [ "${DISC_IPS[0]}" = "192.168.0.186" ] && [ "${DISC_IDS[0]}" = "153931629346858" ] \
+    && [ "${DISC_IPS[1]}" = "192.168.0.185" ] && [ "${DISC_IDS[1]}" = "152832117825892" ]; } || rc=1
+assert "$rc" "parse_discovered: zwei Zeilen -> zwei korrekte IP/ID-Paare"
+
+parse_discovered "$(printf '192.168.0.7\t789\n\t')"
+rc=0; { [ "${#DISC_IPS[@]}" -eq 1 ] && [ "${DISC_IPS[0]}" = "192.168.0.7" ] && [ "${DISC_IDS[0]}" = "789" ]; } || rc=1
+assert "$rc" "parse_discovered: unvollstaendige Zeile wird uebersprungen"
+
 echo ""
 echo "RESULT(test_install.sh): $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

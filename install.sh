@@ -175,6 +175,17 @@ is_valid_device_name() {
     return 0
 }
 
+# Zerlegt die "<IP>\t<Geraete-ID>"-Zeilenliste des Discovery-Snippets (Abschnitt
+# 8) in die globalen Arrays DISC_IPS und DISC_IDS. Leere oder unvollstaendige
+# Zeilen werden uebersprungen. Ausgelagert, damit die Zuordnung testbar ist.
+parse_discovered() {  # $1 = mehrzeilige "IP<TAB>ID"-Liste
+    DISC_IPS=(); DISC_IDS=()
+    local _ip _id
+    while IFS=$'\t' read -r _ip _id; do
+        [[ -n "$_ip" && -n "$_id" ]] && { DISC_IPS+=("$_ip"); DISC_IDS+=("$_id"); }
+    done <<< "$1"
+}
+
 # =============================================================================
 # 2. Grundwerkzeuge: python3, git/curl, unzip
 # =============================================================================
@@ -475,37 +486,67 @@ fi
 # =============================================================================
 echo ""
 echo -e "${YELLOW}--- Geraetekonfiguration ---${NC}"
-read -r -p "  Anzahl der Klimaanlagen: " DEVICE_COUNT
-[[ "$DEVICE_COUNT" =~ ^[1-9][0-9]*$ ]] || error "Ungueltige Anzahl: '$DEVICE_COUNT'."
 
 IP_REGEX='^([0-9]{1,3}\.){3}[0-9]{1,3}$'
 DEVICE_NAMES=(); DEVICE_IPS=(); DEVICE_IDS=()
 
-for (( i=1; i<=DEVICE_COUNT; i++ )); do
-    echo ""
-    echo "  Geraet $i von $DEVICE_COUNT:"
-    while true; do
-        read -r -p "    Name (z.B. Wohnzimmer)  : " DEV_NAME
-        if reason="$(is_valid_device_name "$DEV_NAME" 2>&1)"; then
-            break
-        fi
-        warn "$reason"
-    done
+# IP+ID der in Abschnitt 8 erkannten Geraete uebernehmen, damit der Nutzer die
+# (langen, fehleranfaelligen) Werte nicht von Hand abtippen muss.
+DISC_IPS=(); DISC_IDS=()
+if [[ "$DISCOVER_RC" -eq 0 && -n "$DISCOVERED" ]]; then
+    parse_discovered "$DISCOVERED"
+fi
 
-    while true; do
-        read -r -p "    IP-Adresse              : " DEV_IP
-        [[ "$DEV_IP" =~ $IP_REGEX ]] && break
-        warn "Ungueltiges IP-Format. Beispiel: 192.168.0.186"
-    done
+USE_DISCOVERED=""
+if [[ "${#DISC_IPS[@]}" -gt 0 ]]; then
+    read -r -p "  ${#DISC_IPS[@]} Geraet(e) erkannt - IP/ID automatisch uebernehmen und nur Namen vergeben? [J/n]: " ANS_AUTO
+    [[ ! "$ANS_AUTO" =~ ^[nN]$ ]] && USE_DISCOVERED="yes"
+fi
 
-    while true; do
-        read -r -p "    Geraete-ID (nur Ziffern): " DEV_ID
-        [[ "$DEV_ID" =~ ^[0-9]+$ ]] && break
-        warn "Geraete-ID muss numerisch sein (siehe 'id' aus der Discover-Ausgabe)."
+if [[ -n "$USE_DISCOVERED" ]]; then
+    # Auto-Befuellung: IP/ID stammen aus der Discovery, nur noch Name je Geraet.
+    for (( i=0; i<${#DISC_IPS[@]}; i++ )); do
+        echo ""
+        echo "  Geraet $((i + 1)) von ${#DISC_IPS[@]}:  IP ${DISC_IPS[i]}   ID ${DISC_IDS[i]}"
+        while true; do
+            read -r -p "    Name (z.B. Wohnzimmer): " DEV_NAME
+            if reason="$(is_valid_device_name "$DEV_NAME" 2>&1)"; then
+                break
+            fi
+            warn "$reason"
+        done
+        DEVICE_NAMES+=("$DEV_NAME"); DEVICE_IPS+=("${DISC_IPS[i]}"); DEVICE_IDS+=("${DISC_IDS[i]}")
     done
+else
+    # Manuelle Eingabe (Fallback: nichts erkannt oder bewusst abgelehnt).
+    read -r -p "  Anzahl der Klimaanlagen: " DEVICE_COUNT
+    [[ "$DEVICE_COUNT" =~ ^[1-9][0-9]*$ ]] || error "Ungueltige Anzahl: '$DEVICE_COUNT'."
+    for (( i=1; i<=DEVICE_COUNT; i++ )); do
+        echo ""
+        echo "  Geraet $i von $DEVICE_COUNT:"
+        while true; do
+            read -r -p "    Name (z.B. Wohnzimmer)  : " DEV_NAME
+            if reason="$(is_valid_device_name "$DEV_NAME" 2>&1)"; then
+                break
+            fi
+            warn "$reason"
+        done
 
-    DEVICE_NAMES+=("$DEV_NAME"); DEVICE_IPS+=("$DEV_IP"); DEVICE_IDS+=("$DEV_ID")
-done
+        while true; do
+            read -r -p "    IP-Adresse              : " DEV_IP
+            [[ "$DEV_IP" =~ $IP_REGEX ]] && break
+            warn "Ungueltiges IP-Format. Beispiel: 192.168.0.186"
+        done
+
+        while true; do
+            read -r -p "    Geraete-ID (nur Ziffern): " DEV_ID
+            [[ "$DEV_ID" =~ ^[0-9]+$ ]] && break
+            warn "Geraete-ID muss numerisch sein (siehe 'id' aus der Discover-Ausgabe)."
+        done
+
+        DEVICE_NAMES+=("$DEV_NAME"); DEVICE_IPS+=("$DEV_IP"); DEVICE_IDS+=("$DEV_ID")
+    done
+fi
 
 # JSON wird ueber python3/json erzeugt statt per String-Konkatenation - das
 # macht Sonderzeichen in Geraetenamen (Anfuehrungszeichen, Backslashes, Umlaute)
@@ -515,7 +556,7 @@ done
 # kein world-readable-Zeitfenster und kein zerstoerter Torso, auch wenn
 # devices.json bereits existierte.
 DEVICE_ARGS=()
-for (( i=0; i<DEVICE_COUNT; i++ )); do
+for (( i=0; i<${#DEVICE_NAMES[@]}; i++ )); do
     DEVICE_ARGS+=("${DEVICE_NAMES[i]}" "${DEVICE_IPS[i]}" "${DEVICE_IDS[i]}")
 done
 

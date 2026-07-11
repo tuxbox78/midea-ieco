@@ -43,7 +43,10 @@ First public release.
   address and device ID** — the two values needed for `devices.json`. The old
   code parsed the INFO log of `midealocal.cli discover`, which prints only
   device state (temperature, mode) and no IP/ID, so its IP-address regex always
-  missed and warned even when devices were found.
+  missed and warned even when devices were found. The interactive setup can now
+  **auto-fill** those discovered IP/device-id pairs and ask only for a name per
+  device (manual entry stays available as a fallback), so the long device IDs no
+  longer have to be retyped by hand.
 - Corrected the supported Python floor to **3.11** (previously documented as
   3.10, which never actually worked). `midea-local` is now pinned to **6.6.1** —
   the newest release still supporting Python 3.11 (6.7.0+ require 3.12; no
