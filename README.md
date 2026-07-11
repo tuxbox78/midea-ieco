@@ -253,6 +253,79 @@ Remember log rotation, for example with `logrotate` or simply:
 0 0 1 * * truncate -s 0 /opt/local/midea-ieco/ieco.log /opt/local/midea-ieco/refresh.log
 ```
 
+## Logs
+
+The cron jobs are the only thing that writes log files. `midea_ieco_ensure.py` and `midea_refresh_tokens.py` just print to standard output/error; the cron lines above redirect that into files with `>> …log 2>&1`. **Run either script manually (or over SSH/Siri) and nothing is written to a file** — the output goes to your terminal instead. If you never set up cron, no log files exist.
+
+### Which files, and where
+
+| File | Written by | Contains |
+|---|---|---|
+| `ieco.log` | the every-20-minutes `midea_ieco_ensure.py all --only-if-on` job | one block per run: each unit's before/after state and the overall result |
+| `refresh.log` | the weekly `midea_refresh_tokens.py --all` job | one block per run: token retrieval and verification per unit |
+
+Both live in your install directory — by default `/opt/local/midea-ieco/`, or wherever `MIDEA_IECO_DIR` points. Both are git-ignored (`*.log`), so they are never committed.
+
+To capture a **manual** run the same way, redirect it yourself:
+
+```bash
+cd /opt/local/midea-ieco
+venv/bin/python3 midea_ieco_ensure.py all --only-if-on >> ieco.log 2>&1
+```
+
+### What a run looks like
+
+A healthy `ieco.log` block — the living-room unit was on with iECO off (so it gets enabled); the bedroom was off and is left untouched:
+
+```text
+[Wohnzimmer] Status vor Aktion: power=True, mode=cool, ieco=False, eco=False
+[Wohnzimmer] Status nach Aktion: power=True, mode=cool, ieco=True, eco=False
+[Wohnzimmer] OK: iECO ist aktiv (vom Geraet bestaetigt).
+[Schlafzimmer] --only-if-on aktiv und Geraet ist aus. Keine Aktion, keine weiteren Abfragen.
+Gesamtergebnis: OK.
+```
+
+> **The scripts log in German.** Key phrases: *Status vor/nach Aktion* = state before/after the action · *OK: iECO ist aktiv* = iECO confirmed on · *Geraet ist aus* = unit is off, skipped · *Bereits im gewuenschten Zustand* = already correct, nothing to do · *Gesamtergebnis: OK.* = the whole run succeeded. Any line containing **FEHLER** ("error") is a failure for that unit; `Gesamtergebnis: FEHLER` means at least one unit had a problem.
+
+Because the cron lines use `2>&1`, warnings from the underlying `msmart-ng` library land in the same file. Logs contain device names, IP addresses, and power/iECO state — **never** your tokens, keys, or cloud password (those live only in the `chmod 600` config files).
+
+### Reading and monitoring them
+
+```bash
+tail -n 40 /opt/local/midea-ieco/ieco.log     # last run (newest lines at the bottom)
+tail -f  /opt/local/midea-ieco/ieco.log       # follow live
+grep -n FEHLER /opt/local/midea-ieco/*.log    # jump straight to problems
+grep Gesamtergebnis /opt/local/midea-ieco/ieco.log | tail -n 5   # recent run verdicts
+```
+
+> **No timestamps.** The scripts don't print the date/time, so entries are ordered only by append (newest last). To stamp each line, pipe through `ts` (from the `moreutils` package) — but note that cron treats `%` specially, so escape it as `\%`:
+>
+> ```cron
+> */20 * * * * cd /opt/local/midea-ieco && venv/bin/python3 midea_ieco_ensure.py all --only-if-on 2>&1 | ts '\%Y-\%m-\%d \%H:\%M:\%S' >> ieco.log
+> ```
+
+### Keeping them from growing: rotation
+
+With no rotation, `ieco.log` gains a block every 20 minutes and grows steadily. Two options:
+
+- **Simple (shipped):** the optional monthly `truncate` cron job shown under [Cron automation](#cron-automation) empties both files on the 1st of each month. It keeps them tiny but keeps **no** history — right after it runs the files are empty, which is normal.
+- **With history:** use `logrotate` instead (and then drop the `truncate` job). Create `/etc/logrotate.d/midea-ieco`:
+
+  ```
+  /opt/local/midea-ieco/*.log {
+      weekly
+      rotate 8
+      compress
+      missingok
+      notifempty
+      copytruncate
+  }
+  ```
+
+  `copytruncate` matters here: the log is an appended-to file with no daemon to signal, so logrotate copies then truncates it in place instead of renaming it.
+
+> **Permissions.** cron typically creates the logs world-readable (mode 0644, depending on the daemon's umask); the config files with secrets stay at 0600. The logs hold no secrets, but if you consider device names/IPs sensitive, run `chmod 600 /opt/local/midea-ieco/*.log` once — appending and `truncate` both preserve the mode, so it sticks.
+
 ## Siri and iOS Shortcuts
 
 The simplest solution without additional server software is the native iOS Shortcuts action **Run Script over SSH**.

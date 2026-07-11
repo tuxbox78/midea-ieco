@@ -254,6 +254,77 @@ Log-Rotation nicht vergessen, z. B. mit `logrotate` oder einfach:
 0 0 1 * * truncate -s 0 /opt/local/midea-ieco/ieco.log /opt/local/midea-ieco/refresh.log
 ```
 
+## Logs
+
+Die Cron-Jobs sind das Einzige, was überhaupt Logdateien schreibt. `midea_ieco_ensure.py` und `midea_refresh_tokens.py` geben nur auf die Standard-Aus-/Fehlerausgabe aus; die Cron-Zeilen oben lenken das per `>> …log 2>&1` in Dateien um. **Ein manueller Aufruf (oder per SSH/Siri) schreibt nichts in eine Datei** — die Ausgabe landet stattdessen im Terminal. Ohne eingerichteten Cron-Job existieren keine Logdateien.
+
+### Welche Dateien, und wo
+
+| Datei | Geschrieben von | Inhalt |
+|---|---|---|
+| `ieco.log` | dem 20-Minuten-Job `midea_ieco_ensure.py all --only-if-on` | ein Block pro Lauf: Vorher-/Nachher-Zustand jedes Geräts und das Gesamtergebnis |
+| `refresh.log` | dem wöchentlichen Job `midea_refresh_tokens.py --all` | ein Block pro Lauf: Token-Abruf und -Verifikation je Gerät |
+
+Beide liegen im Installationsverzeichnis — standardmäßig `/opt/local/midea-ieco/`, bzw. dort, wohin `MIDEA_IECO_DIR` zeigt. Beide sind git-ignoriert (`*.log`) und werden daher nie versioniert.
+
+Um einen **manuellen** Lauf genauso festzuhalten, selbst umleiten:
+
+```bash
+cd /opt/local/midea-ieco
+venv/bin/python3 midea_ieco_ensure.py all --only-if-on >> ieco.log 2>&1
+```
+
+### Wie ein Lauf aussieht
+
+Ein gesunder `ieco.log`-Block — das Wohnzimmergerät war an, iECO aus (wird also aktiviert); das Schlafzimmer war aus und bleibt unangetastet:
+
+```text
+[Wohnzimmer] Status vor Aktion: power=True, mode=cool, ieco=False, eco=False
+[Wohnzimmer] Status nach Aktion: power=True, mode=cool, ieco=True, eco=False
+[Wohnzimmer] OK: iECO ist aktiv (vom Geraet bestaetigt).
+[Schlafzimmer] --only-if-on aktiv und Geraet ist aus. Keine Aktion, keine weiteren Abfragen.
+Gesamtergebnis: OK.
+```
+
+Jede Zeile mit **FEHLER** kennzeichnet ein Problem bei genau diesem Gerät; `Gesamtergebnis: FEHLER` bedeutet, dass mindestens ein Gerät nicht in Ordnung war. Da die Cron-Zeilen `2>&1` nutzen, landen auch Warnungen der zugrunde liegenden `msmart-ng`-Bibliothek in derselben Datei. Die Logs enthalten Gerätenamen, IP-Adressen und den Ein-/iECO-Zustand — **niemals** deine Token, Keys oder das Cloud-Passwort (die stehen ausschließlich in den `chmod 600`-Konfigdateien).
+
+### Lesen und Beobachten
+
+```bash
+tail -n 40 /opt/local/midea-ieco/ieco.log     # letzter Lauf (neueste Zeilen unten)
+tail -f  /opt/local/midea-ieco/ieco.log       # live mitverfolgen
+grep -n FEHLER /opt/local/midea-ieco/*.log    # direkt zu Problemen springen
+grep Gesamtergebnis /opt/local/midea-ieco/ieco.log | tail -n 5   # letzte Gesamtergebnisse
+```
+
+> **Keine Zeitstempel.** Die Skripte geben kein Datum/keine Uhrzeit aus; Einträge sind nur nach Anhänge-Reihenfolge sortiert (neueste unten). Zum Voranstellen eines Zeitstempels durch `ts` leiten (aus dem Paket `moreutils`) — Achtung: Cron behandelt `%` besonders, daher als `\%` escapen:
+>
+> ```cron
+> */20 * * * * cd /opt/local/midea-ieco && venv/bin/python3 midea_ieco_ensure.py all --only-if-on 2>&1 | ts '\%Y-\%m-\%d \%H:\%M:\%S' >> ieco.log
+> ```
+
+### Gegen unbegrenztes Wachstum: Rotation
+
+Ohne Rotation wächst `ieco.log` alle 20 Minuten um einen Block. Zwei Wege:
+
+- **Einfach (mitgeliefert):** der optionale monatliche `truncate`-Cron-Job aus [Cron-Automatisierung](#cron-automatisierung) leert beide Dateien am 1. jedes Monats. Sie bleiben winzig, es gibt aber **keine** Historie — direkt nach dem Lauf sind die Dateien leer, das ist normal.
+- **Mit Historie:** stattdessen `logrotate` nutzen (und dann den `truncate`-Job weglassen). `/etc/logrotate.d/midea-ieco` anlegen:
+
+  ```
+  /opt/local/midea-ieco/*.log {
+      weekly
+      rotate 8
+      compress
+      missingok
+      notifempty
+      copytruncate
+  }
+  ```
+
+  `copytruncate` ist hier wichtig: Das Log ist eine per Append beschriebene Datei ohne Daemon, dem man ein Signal geben könnte — logrotate kopiert es daher und leert es an Ort und Stelle, statt es umzubenennen.
+
+> **Rechte.** Cron legt die Logs typischerweise für alle lesbar an (Modus 0644, abhängig von der umask des Daemons); die Konfigdateien mit Geheimnissen bleiben bei 0600. Die Logs enthalten keine Geheimnisse — falls dir Gerätenamen/IPs aber sensibel sind, einmalig `chmod 600 /opt/local/midea-ieco/*.log` ausführen: Anhängen und `truncate` erhalten die Rechte, es bleibt also bestehen.
+
 ## Siri und iOS Kurzbefehle
 
 Die einfachste Lösung ohne zusätzliche Serversoftware ist die native iOS-Kurzbefehl-Aktion **Skript per SSH ausführen**.
