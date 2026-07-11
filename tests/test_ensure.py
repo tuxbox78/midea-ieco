@@ -417,5 +417,66 @@ class OverviewWithoutMsmartTests(unittest.TestCase):
         self.assertIn("Beispiele:", result.stdout)
 
 
+class MalformedEntryDeviceSelectionTests(unittest.TestCase):
+    """Auch der Steuerungspfad (all / <name>) - nicht nur die Uebersicht - darf
+    an einem Nicht-Objekt-Eintrag in devices.json NICHT mit TypeError abbrechen:
+    er wird gemeldet und uebersprungen, gueltige Geraete werden verarbeitet."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "devices.json"
+        orig = mie.CONFIG_PATH
+        mie.CONFIG_PATH = self.path
+        self.addCleanup(lambda: setattr(mie, "CONFIG_PATH", orig))
+
+    def _write(self, obj):
+        self.path.write_text(json.dumps(obj), encoding="utf-8")
+
+    def _run(self, argv):
+        self.processed = []
+
+        async def _ok(dev_conf, only_if_on):
+            self.processed.append(dev_conf)
+            return True
+
+        async def _boom(*a, **k):
+            raise AssertionError("connect_and_refresh sollte nicht aufgerufen werden")
+
+        out = io.StringIO()
+        with ExitStack() as es:
+            es.enter_context(mock.patch.object(mie, "ensure_ieco", _ok))
+            es.enter_context(mock.patch.object(mie, "connect_and_refresh", _boom))
+            es.enter_context(mock.patch.object(mie.asyncio, "sleep", _anoop))
+            es.enter_context(mock.patch.object(mie.sys, "argv", ["midea-ieco"] + argv))
+            es.enter_context(redirect_stdout(out))
+            with self.assertRaises(SystemExit) as cm:
+                asyncio.run(mie.main())
+        return cm.exception.code, out.getvalue()
+
+    def test_all_skips_nondict_and_processes_valid(self):
+        self._write({"devices": ["oops", 123, None,
+                                 {"name": "W", "ip": "1.2.3.4", "id": 1, "token": "t", "key": "k"}]})
+        code, out = self._run(["all"])
+        self.assertEqual(code, 0)
+        self.assertIn("WARNUNG", out)
+        self.assertEqual(len(self.processed), 1)
+
+    def test_named_target_found_despite_nondict_sibling(self):
+        # Ohne den Guard wuerde d["name"] auf "oops" hier mit TypeError abbrechen.
+        self._write({"devices": ["oops",
+                                 {"name": "W", "ip": "1.2.3.4", "id": 1, "token": "t", "key": "k"}]})
+        code, _ = self._run(["W"])
+        self.assertEqual(code, 0)
+        self.assertEqual(len(self.processed), 1)
+
+    def test_all_with_only_nondict_entries_exits_1(self):
+        self._write({"devices": ["oops", 123]})
+        code, out = self._run(["all"])
+        self.assertEqual(code, 1)
+        self.assertIn("WARNUNG", out)
+        self.assertEqual(len(self.processed), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

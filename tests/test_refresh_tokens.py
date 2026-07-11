@@ -369,5 +369,52 @@ class ResolveCredentialsTests(_CredentialsPathMixin):
                 mrt.resolve_credentials(None, None)
 
 
+class MalformedEntryTargetTests(_ConfigPathMixin):
+    """main() ueberspringt Nicht-Objekt-Eintraege in devices.json mit Warnung,
+    statt mit AttributeError (d.get auf einem Nicht-Objekt) abzubrechen -
+    gueltige Geraete werden normal verarbeitet."""
+
+    def _run(self, argv):
+        processed = []
+
+        def _fake_update(dev, username, password):
+            processed.append(dev)
+            return True
+
+        out = io.StringIO()
+        # msmart stubben, damit die Verfuegbarkeitspruefung in main() passiert;
+        # update_device/save_config mocken, damit weder Hardware noch ein
+        # Dateischreibzugriff noetig ist. Zugangsdaten via CLI (Datei gepinnt weg).
+        with mock.patch.dict(sys.modules, {"msmart": mock.MagicMock()}), \
+                mock.patch.object(mrt, "CREDENTIALS_PATH", self.path.parent / "no_creds.json"), \
+                mock.patch.object(mrt, "update_device", _fake_update), \
+                mock.patch.object(mrt, "save_config", lambda cfg: None), \
+                mock.patch.object(mrt.sys, "argv",
+                                  ["x"] + argv + ["--username", "u@e.example", "--password", "pw"]), \
+                redirect_stdout(out):
+            with self.assertRaises(SystemExit) as cm:
+                mrt.main()
+        return cm.exception.code, out.getvalue(), processed
+
+    def test_all_skips_nondict_and_processes_valid(self):
+        self.path.write_text(
+            json.dumps({"devices": ["oops", 123, {"name": "W", "ip": "1.2.3.4", "id": 1}]}),
+            encoding="utf-8")
+        code, out, processed = self._run(["--all"])
+        self.assertEqual(code, 0)
+        self.assertIn("WARNUNG", out)
+        self.assertEqual(len(processed), 1)
+
+    def test_named_skips_nondict_sibling(self):
+        # Ohne den Guard wuerde d.get("name") auf "oops" hier mit AttributeError
+        # abbrechen (Nicht-Objekt hat kein .get).
+        self.path.write_text(
+            json.dumps({"devices": ["oops", {"name": "W", "ip": "1.2.3.4", "id": 1}]}),
+            encoding="utf-8")
+        code, out, processed = self._run(["--name", "W"])
+        self.assertEqual(code, 0)
+        self.assertEqual(len(processed), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

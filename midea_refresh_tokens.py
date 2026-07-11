@@ -415,14 +415,24 @@ def main() -> None:
     config = load_config()
     devices = config.setdefault("devices", [])
 
+    # Nicht-Objekt-Eintraege (nur durch Hand-Edit moeglich) koennen keine
+    # Geraete sein: ueberspringen und melden, statt spaeter mit einem
+    # AttributeError (d.get auf einem Nicht-Objekt) abzubrechen. Sie bleiben in
+    # config erhalten - save_config schreibt sie unveraendert zurueck.
+    valid_devices = [d for d in devices if isinstance(d, dict)]
+    skipped = len(devices) - len(valid_devices)
+    if skipped:
+        print(f"WARNUNG: {skipped} unerwartete(r) Eintrag/Eintraege in "
+              f"{CONFIG_PATH.name} uebersprungen (kein Objekt).")
+
     if args.all:
-        if not devices:
+        if not valid_devices:
             print("devices.json enthaelt noch keine Geraete. Nutze --name/--host fuer ein neues Geraet.")
             sys.exit(1)
-        targets = devices
+        targets = valid_devices
         new_entry = None
     else:
-        targets = [d for d in devices if d.get("name") == args.name]
+        targets = [d for d in valid_devices if d.get("name") == args.name]
         new_entry = None
         if not targets:
             if not args.host:

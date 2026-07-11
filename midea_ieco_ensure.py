@@ -365,10 +365,19 @@ async def main() -> None:
         sys.exit(0)
 
     config = load_config()
-    devices = config["devices"]
+    # Nicht-Objekt-Eintraege (nur durch Hand-Edit moeglich) koennen keine
+    # Geraete sein: klar melden und ueberspringen, statt spaeter im
+    # Steuerungspfad mit einem TypeError abzubrechen (konsistent zur Uebersicht).
+    # d.get statt d["name"] faengt zusaetzlich einen Objekt-Eintrag ohne
+    # "name"-Feld ab, statt einen KeyError zu werfen.
+    devices = [d for d in config["devices"] if isinstance(d, dict)]
+    skipped = len(config["devices"]) - len(devices)
+    if skipped:
+        print(f"WARNUNG: {skipped} unerwartete(r) Eintrag/Eintraege in "
+              f"{CONFIG_PATH.name} uebersprungen (kein Objekt).")
 
     if args.target != TARGET_ALL:
-        devices = [d for d in devices if d["name"] == args.target]
+        devices = [d for d in devices if d.get("name") == args.target]
         if not devices:
             print(f"Geraet '{args.target}' nicht in devices.json gefunden.")
             sys.exit(1)
