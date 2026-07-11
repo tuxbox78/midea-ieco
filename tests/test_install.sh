@@ -52,13 +52,15 @@ extract_func() {  # $1=name $2=file
 }
 
 # Stubs fuer Hilfsfunktionen, die extrahierte Funktionen evtl. aufrufen. Sie
-# werden nur INDIREKT (aus den eval'ten install.sh-Funktionen) gerufen und sind
-# statisch daher scheinbar "nie invoked". Der SC2329-Guard steht am warn-Stub,
-# weil der Hint-Test warn zeitweise ueberschreibt (mehrere Definitionen loesen
-# SC2329 sonst genau hier aus).
+# werden nur INDIREKT (aus den eval'ten install.sh-Funktionen) gerufen. Bewusst
+# je GENAU EINE Definition: eine spaeter ueberschriebene (geshadowte) Stub-
+# Funktion meldet shellcheck sonst als unerreichbar (SC2317 auf aelteren, SC2329
+# auf neueren Versionen) - genau das liess die CI mit shellcheck 0.9.0 scheitern.
+# warn legt seine Meldung still in WARN_MSG ab (keine Ausgabe), damit der Hint-
+# Test sie ohne eine zweite warn-Definition pruefen kann.
+WARN_MSG=""
 info() { :; }
-# shellcheck disable=SC2329
-warn() { :; }
+warn() { WARN_MSG="$*"; }
 ok()   { :; }
 # Wie in install.sh bricht error() ab (exit) - Funktionen, die error() rufen
 # koennen, werden daher in einer Subshell getestet.
@@ -86,33 +88,32 @@ echo "== hint_obsolete_credentials (0.2.0: Hinweis statt Auto-Loeschen) =="
 eval "$(extract_func t "$INSTALL")"
 eval "$(extract_func hint_obsolete_credentials "$INSTALL")"
 LANG_CHOICE=de
-# Das globale warn oben ist ein stiller Stub; hier lokal so umdefinieren, dass
-# die Ausgabe beobachtbar wird. Am Ende des Abschnitts wieder zuruecksetzen.
-# shellcheck disable=SC2329  # indirekt via hint_obsolete_credentials aufgerufen
-warn() { echo "WARN:$*"; }
+# hint_obsolete_credentials wird DIREKT (nicht in $(...)) aufgerufen, damit das
+# in warn gesetzte WARN_MSG in dieser Shell ankommt - in einer Command-
+# Substitution liefe warn in einer Subshell und WARN_MSG bliebe hier leer.
 
-# (a) credentials.json vorhanden -> Hinweis mit Pfad und 'rm', Rueckgabe 0.
+# (a) credentials.json vorhanden -> Hinweis (rm + Pfad) landet in WARN_MSG, RC 0.
 INSTALL_DIR="$WORK/hint_present"; mkdir -p "$INSTALL_DIR"; : > "$INSTALL_DIR/credentials.json"
-out="$(hint_obsolete_credentials)"; rc_call=$?
+WARN_MSG=""
+hint_obsolete_credentials; rc_call=$?
 rc=0
 [ "$rc_call" -eq 0 ] || rc=1
-case "$out" in *rm*"$INSTALL_DIR/credentials.json"*) : ;; *) rc=1 ;; esac
+case "$WARN_MSG" in *rm*"$INSTALL_DIR/credentials.json"*) : ;; *) rc=1 ;; esac
 assert "$rc" "vorhandene credentials.json: Hinweis (rm <pfad>), Rueckgabe 0"
 
-# (b) credentials.json fehlt -> keine Ausgabe, Rueckgabe 0 (kein Fehler).
+# (b) credentials.json fehlt -> warn wird NICHT gerufen (WARN_MSG bleibt Sentinel),
+# Rueckgabe 0 (kein Fehler).
 INSTALL_DIR="$WORK/hint_absent"; mkdir -p "$INSTALL_DIR"
-out="$(hint_obsolete_credentials)"; rc_call=$?
-rc=0; { [ "$rc_call" -eq 0 ] && [ -z "$out" ]; } || rc=1
+WARN_MSG="__kein_warn__"
+hint_obsolete_credentials; rc_call=$?
+rc=0; { [ "$rc_call" -eq 0 ] && [ "$WARN_MSG" = "__kein_warn__" ]; } || rc=1
 assert "$rc" "fehlende credentials.json: still, Rueckgabe 0"
 
 # (c) Die Datei wird NICHT geloescht - bewusste Nutzerentscheidung (kein Auto-rm).
 INSTALL_DIR="$WORK/hint_keep"; mkdir -p "$INSTALL_DIR"; : > "$INSTALL_DIR/credentials.json"
-hint_obsolete_credentials >/dev/null
+hint_obsolete_credentials
 rc=0; [ -f "$INSTALL_DIR/credentials.json" ] || rc=1
 assert "$rc" "credentials.json bleibt erhalten (kein Auto-Loeschen)"
-
-# shellcheck disable=SC2329  # stiller Stub, indirekt genutzt
-warn() { :; }   # stillen Stub wiederherstellen
 
 # ---------------------------------------------------------------------------
 echo "== shell_quote_for_cron (#4) =="
