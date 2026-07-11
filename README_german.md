@@ -57,7 +57,7 @@ Der Installer erledigt automatisch:
 3. Abfrage deiner Midea-Cloud-Zugangsdaten und Ausführung der Geräteerkennung
 4. Interaktive Eingabe von Gerätenamen, IPs und IDs zum Aufbau von `devices.json`
 5. Abruf der Token-/Key-Paare und sichere Speicherung (`chmod 600`)
-6. Anlegen der Wrapper-Befehle `midea-ieco` und `midea-ieco-update` sowie optionaler Testlauf und optionale Cron-Job-Einrichtung
+6. Anlegen der Wrapper-Befehle `midea-ieco` und `midea-ieco-update`, Angebot zur Aufnahme des Bin-Verzeichnisses in den `PATH` sowie optionaler Testlauf und optionale Cron-Job-Einrichtung
 
 ### Manuelle Installation (Alternative)
 

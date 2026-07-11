@@ -13,6 +13,11 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `credentials.json`, or cron jobs. Works for both git- and ZIP-based installs.
   The updater fetches first and then re-execs the freshly fetched script, so the
   running updater is never the file being overwritten.
+- The installer offers to add the bin directory (e.g. `/opt/local/bin`) to your
+  `PATH` via an idempotent, self-guarding block in the shell rc chosen by your
+  login shell (`~/.bashrc` / `~/.zshrc` / `~/.profile`). Only with your
+  confirmation and a TTY; for non-interactive runs or paths with unusual
+  characters it prints a manual hint instead of editing anything.
 
 ### Changed
 - Re-running `install.sh` on an already-configured installation no longer

@@ -546,6 +546,84 @@ EOF
     ok "Wrapper-Skript angelegt: $target"
 }
 
+# Marker, an dem ein bereits eingetragener PATH-Block in einer Shell-Startdatei
+# wiedererkannt wird (Idempotenz) und den der Nutzer leicht wiederfindet/entfernt.
+PATH_BLOCK_MARKER="# midea-ieco-managed (PATH)"
+
+# Zieldatei fuer die PATH-Ergaenzung nach der Login-Shell des aktuellen Nutzers.
+# Bewusst die INTERAKTIVE rc-Datei (bash: ~/.bashrc, zsh: ~/.zshrc), denn genau
+# dort erwartet der Nutzer den Befehl im Terminal; sonst ~/.profile als
+# POSIX-Fallback. Ausgelagert, damit die Auswahl ohne Seiteneffekt testbar ist.
+_path_rc_file() {
+    case "$(basename "${SHELL:-}")" in
+        zsh)  printf '%s\n' "$HOME/.zshrc" ;;
+        bash) printf '%s\n' "$HOME/.bashrc" ;;
+        *)    printf '%s\n' "$HOME/.profile" ;;
+    esac
+}
+
+# Haengt einen idempotenten, selbst-schuetzenden PATH-Block an die Startdatei $1.
+# Der geschriebene 'case'-Guard verhindert PATH-Dubletten, falls die Datei
+# mehrfach gesourct wird. $BIN_DIR wird als Literal eingesetzt - der Aufrufer
+# (ensure_bin_on_path) stellt sicher, dass es nur unkritische Zeichen enthaelt,
+# sodass hier keine heikle Quotierung noetig ist. Ausgelagert, damit der Effekt
+# ohne TTY/Prompt testbar ist.
+_write_path_block() {
+    local rc="$1"
+    {
+        echo ""
+        echo "$PATH_BLOCK_MARKER"
+        echo "case \":\$PATH:\" in *\":$BIN_DIR:\"*) ;; *) export PATH=\"$BIN_DIR:\$PATH\" ;; esac"
+    } >> "$rc"
+}
+
+# Sorgt moeglichst sauber und ohne Ueberraschungen dafuer, dass BIN_DIR im PATH
+# landet. Reihenfolge der Faelle:
+#   1. BIN_DIR schon im aktuellen PATH        -> nichts zu tun.
+#   2. BIN_DIR mit heiklen Zeichen            -> keine Startdatei editieren, nur Hinweis.
+#   3. Block bereits eingetragen (Marker)     -> nur erklaeren, wie er aktiv wird.
+#   4. Kein TTY (nicht-interaktiv, z.B. Cron) -> nur Hinweis, keine ungefragte Aenderung.
+#   5. Sonst                                  -> EINMAL nachfragen [J/n] und bei Ja anhaengen.
+ensure_bin_on_path() {
+    case ":$PATH:" in *":$BIN_DIR:"*) return 0 ;; esac
+
+    if [[ ! "$BIN_DIR" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+        warn "$BIN_DIR ist nicht im PATH. Manuell ergaenzen: export PATH=\"$BIN_DIR:\$PATH\""
+        return 0
+    fi
+
+    local rc; rc="$(_path_rc_file)"
+
+    if [[ -f "$rc" ]] && grep -qF "$PATH_BLOCK_MARKER" "$rc"; then
+        info "$BIN_DIR ist in $rc bereits eingetragen - in einer NEUEN Shell aktiv (oder jetzt: source $rc)."
+        return 0
+    fi
+
+    if [ ! -t 0 ]; then
+        warn "$BIN_DIR ist nicht im PATH. In $rc ergaenzen mit: export PATH=\"$BIN_DIR:\$PATH\""
+        return 0
+    fi
+
+    local ans
+    echo ""
+    if ! read -r -p "  $BIN_DIR ist nicht im PATH. Zu $rc hinzufuegen? [J/n]: " ans; then
+        echo ""
+        info "Eingabe abgebrochen. Manuell ergaenzen (in $rc): export PATH=\"$BIN_DIR:\$PATH\""
+        return 0
+    fi
+    if [[ "$ans" =~ ^[nN]$ ]]; then
+        info "Uebersprungen. Manuell ergaenzen (in $rc): export PATH=\"$BIN_DIR:\$PATH\""
+        return 0
+    fi
+
+    if _write_path_block "$rc"; then
+        ok "$BIN_DIR zu $rc hinzugefuegt."
+        info "In der AKTUELLEN Shell sofort aktiv mit:  source $rc"
+    else
+        warn "Konnte $rc nicht schreiben. Manuell ergaenzen: export PATH=\"$BIN_DIR:\$PATH\""
+    fi
+}
+
 # Erzeugt beide Wrapper: 'midea-ieco' (Steuerung) und 'midea-ieco-update'
 # (Aktualisierung). $INSTALL_DIR wird EINMAL per printf %q shell-sicher
 # vorgequotet (ein Pfad mit " oder $(...) wuerde sonst die Quotierung der
@@ -567,10 +645,7 @@ install_all_wrappers() {
     install_bin_wrapper "midea-ieco-update" \
         "exec bash ${q}/install.sh --update \"\$@\""
 
-    case ":$PATH:" in
-        *":$BIN_DIR:"*) ;;
-        *) warn "$BIN_DIR ist nicht im PATH. Fuege ggf. hinzu mit: export PATH=\"$BIN_DIR:\$PATH\"" ;;
-    esac
+    ensure_bin_on_path
 }
 
 # "Bereits eingerichtet" = eine devices.json existiert (wird nur beim Onboarding

@@ -15,7 +15,10 @@
 #  SC2030/SC2031: PATH wird ABSICHTLICH nur innerhalb von Subshells veraendert,
 #          damit Stub-Kommandos (git/pip/python3) nicht in spaetere Abschnitte
 #          durchsickern - die "Modifikation geht verloren"-Info ist hier gewollt.
-# shellcheck disable=SC2034,SC2030,SC2031
+#  SC1090: Der PATH-Test sourct bewusst eine zur Laufzeit ERZEUGTE rc-Datei
+#          (variabler Pfad), um die Wirkung des generierten Blocks zu pruefen -
+#          ShellCheck kann so ein dynamisches Ziel prinzipiell nicht verfolgen.
+# shellcheck disable=SC2034,SC2030,SC2031,SC1090
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -620,8 +623,11 @@ EOF
 chmod +x "$SBIN/git" "$SBIN/python3" "$SBIN/pip"
 
 UPD_OUT="$WORK/upd_out.txt"; UPD_RC=0
+# stdin von /dev/null: install_all_wrappers ruft ensure_bin_on_path; ohne TTY
+# nimmt das den Hinweis-Zweig (kein Prompt), sonst wuerde ein interaktiver
+# Testlauf hier auf die PATH-Rueckfrage warten.
 ( PATH="$SBIN:$PATH" MIDEA_IECO_BIN_DIR="$UPDBIN" \
-  bash "$UPD/install.sh" --update ) > "$UPD_OUT" 2>&1 || UPD_RC=$?
+  bash "$UPD/install.sh" --update < /dev/null ) > "$UPD_OUT" 2>&1 || UPD_RC=$?
 
 rc=0; [ "$UPD_RC" -eq 0 ] || rc=1
 assert "$rc" "install.sh --update: Exit 0 (RC $UPD_RC)"
@@ -694,6 +700,55 @@ else
     rm -f "$_probe" 2>/dev/null || true
     echo "  [SKIP] Leak-Check: mktemp beachtet \$TMPDIR hier nicht (BSD/macOS); im Linux-CI scharf."
 fi
+
+# ---------------------------------------------------------------------------
+echo "== PATH-Aufnahme: _path_rc_file / _write_path_block / ensure_bin_on_path =="
+# ---------------------------------------------------------------------------
+eval "$(extract_func _path_rc_file "$INSTALL")"
+eval "$(extract_func _write_path_block "$INSTALL")"
+eval "$(extract_func ensure_bin_on_path "$INSTALL")"
+eval "$(grep '^PATH_BLOCK_MARKER=' "$INSTALL")"
+
+# (a) Zieldatei nach Login-Shell.
+HOME="/h"; SHELL="/usr/bin/zsh"
+rc=0; [ "$(_path_rc_file)" = "/h/.zshrc" ] || rc=1;   assert "$rc" "_path_rc_file: zsh -> ~/.zshrc"
+SHELL="/bin/bash"
+rc=0; [ "$(_path_rc_file)" = "/h/.bashrc" ] || rc=1;  assert "$rc" "_path_rc_file: bash -> ~/.bashrc"
+SHELL="/usr/bin/dash"
+rc=0; [ "$(_path_rc_file)" = "/h/.profile" ] || rc=1; assert "$rc" "_path_rc_file: sonst -> ~/.profile"
+
+# (b) _write_path_block: nimmt BIN_DIR auf, dupliziert bei doppeltem Sourcen nicht.
+BIN_DIR="/opt/local/bin"
+RCF="$WORK/rc_write"; : > "$RCF"
+_write_path_block "$RCF"
+rc=0; grep -qF "$PATH_BLOCK_MARKER" "$RCF" || rc=1
+assert "$rc" "_write_path_block: Marker geschrieben"
+got="$(PATH="/usr/bin:/bin"; . "$RCF"; . "$RCF"; printf '%s' "$PATH")"
+rc=0; case ":$got:" in *":/opt/local/bin:"*) : ;; *) rc=1 ;; esac
+assert "$rc" "_write_path_block: BIN_DIR nach Sourcen im PATH"
+occ="$(printf '%s' ":$got:" | grep -o ':/opt/local/bin:' | wc -l | tr -d ' ')"
+rc=0; [ "$occ" -eq 1 ] || rc=1
+assert "$rc" "_write_path_block: kein PATH-Duplikat bei doppeltem Sourcen (n=$occ)"
+
+# (c) ensure_bin_on_path: BIN_DIR bereits im PATH -> keine rc-Datei angefasst.
+HOME="$WORK/h_inpath"; mkdir -p "$HOME"; SHELL="/bin/bash"
+( PATH="/opt/local/bin:/usr/bin:/bin"; ensure_bin_on_path < /dev/null ) >/dev/null 2>&1
+rc=0; [ ! -e "$HOME/.bashrc" ] || rc=1
+assert "$rc" "ensure_bin_on_path: BIN_DIR schon im PATH -> keine rc-Aenderung"
+
+# (d) ensure_bin_on_path: nicht im PATH, KEIN TTY -> keine ungefragte rc-Aenderung.
+HOME="$WORK/h_notty"; mkdir -p "$HOME"; SHELL="/bin/bash"
+( PATH="/usr/bin:/bin"; BIN_DIR="/opt/local/bin"; ensure_bin_on_path < /dev/null ) >/dev/null 2>&1
+rc=0; [ ! -e "$HOME/.bashrc" ] || rc=1
+assert "$rc" "ensure_bin_on_path: ohne TTY keine ungefragte rc-Aenderung"
+
+# (e) ensure_bin_on_path: Marker bereits vorhanden -> kein zweiter Eintrag.
+HOME="$WORK/h_marked"; mkdir -p "$HOME"; SHELL="/bin/bash"
+printf '%s\n' "$PATH_BLOCK_MARKER" > "$HOME/.bashrc"
+( PATH="/usr/bin:/bin"; BIN_DIR="/opt/local/bin"; ensure_bin_on_path < /dev/null ) >/dev/null 2>&1
+n="$(grep -cF "$PATH_BLOCK_MARKER" "$HOME/.bashrc")"
+rc=0; [ "$n" -eq 1 ] || rc=1
+assert "$rc" "ensure_bin_on_path: vorhandener Marker -> kein Duplikat (n=$n)"
 
 echo ""
 echo "RESULT(test_install.sh): $pass passed, $fail failed"

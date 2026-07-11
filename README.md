@@ -57,7 +57,7 @@ The installer will:
 3. Ask for your Midea Cloud credentials and run device discovery
 4. Let you enter device names, IPs, and IDs interactively to build `devices.json`
 5. Retrieve token/key pairs and store them securely (`chmod 600`)
-6. Create the `midea-ieco` and `midea-ieco-update` wrapper commands and offer an optional test run and cron job setup
+6. Create the `midea-ieco` and `midea-ieco-update` wrapper commands, offer to add the bin directory to your `PATH`, and offer an optional test run and cron job setup
 
 ### Manual installation (alternative)
 
