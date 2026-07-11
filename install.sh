@@ -423,7 +423,7 @@ fi
 # 7. Midea-Cloud-Zugangsdaten abfragen
 # =============================================================================
 echo ""
-echo -e "${YELLOW}--- Midea-Zugangsdaten ---${NC}"
+echo -e "${YELLOW}--- Midea-APP-Zugangsdaten ---${NC}"
 read -r -p "  E-Mail-Adresse : " MIDEA_USER
 # IFS= verhindert, dass fuehrende/abschliessende Leerzeichen im Passwort
 # abgeschnitten werden (-r schuetzt zusaetzlich Backslashes).

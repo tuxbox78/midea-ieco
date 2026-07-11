@@ -69,12 +69,21 @@ async def close_device(device: AC) -> None:
             pass
 
 
-async def connect_and_refresh(dev_conf: dict, retries: int = CONNECT_RETRIES) -> AC:
-    """Verbindet, authentifiziert und liest NUR den Live-Status.
-    Ruft absichtlich KEIN get_capabilities() auf - das ist ein
-    zusaetzlicher Netzwerk-Roundtrip, der nur benoetigt wird, wenn wir
-    tatsaechlich vorhaben, eine capability-gebundene Property (ieco) zu
-    setzen. Fuer eine reine Status-/Power-Abfrage ist er unnoetig."""
+async def connect_and_refresh(dev_conf: dict, retries: int = CONNECT_RETRIES,
+                              with_capabilities: bool = False) -> AC:
+    """Verbindet, authentifiziert und liest den Live-Status.
+
+    Standardmaessig OHNE get_capabilities() - fuer eine reine Status-/Power-
+    Abfrage (z.B. den --only-if-on-Schnellpfad) ist dieser zusaetzliche
+    Netzwerk-Roundtrip unnoetig.
+
+    Mit with_capabilities=True wird get_capabilities() VOR refresh() aufgerufen.
+    Das ist zwingend, sobald der WAHRE ieco-Zustand gelesen werden soll: msmart-
+    ng's refresh() pollt nur Properties aus _supported_properties, und die werden
+    erst durch get_capabilities() befuellt. Ohne diesen Aufruf pollt refresh()
+    die IECO-Property NICHT, und device.ieco liefert immer den Default False -
+    selbst wenn iECO am Geraet aktiv ist (genau das liess die Verifikation frueher
+    faelschlich fehlschlagen)."""
     name = dev_conf["name"]
     last_exc = None
     for attempt in range(1, retries + 1):
@@ -85,6 +94,8 @@ async def connect_and_refresh(dev_conf: dict, retries: int = CONNECT_RETRIES) ->
         )
         try:
             await device.authenticate(dev_conf["token"], dev_conf["key"])
+            if with_capabilities:
+                await device.get_capabilities()
             await device.refresh()
             return device
         except Exception as exc:
@@ -112,37 +123,41 @@ async def ensure_ieco(dev_conf: dict, only_if_on: bool) -> bool:
             return False
 
         is_on = device.power_state
-        print(f"[{name}] Status vor Aktion: power={is_on}, "
-              f"mode={device.operational_mode}, ieco={device.ieco}, eco={device.eco}")
 
         # Fruehzeitiger Ausstieg VOR jeder teuren Capability-Abfrage:
-        # Wenn das Geraet aus ist und wir es per --only-if-on nicht
-        # einschalten duerfen, ist hier bereits alles gesagt - kein
-        # get_capabilities(), kein apply(), keine weitere Netzwerklast.
+        # Ist das Geraet aus und duerfen wir es per --only-if-on nicht
+        # einschalten, ist alles gesagt. power_state kommt aus refresh() und ist
+        # ohne get_capabilities() korrekt; der ieco-Zustand spielt hier keine
+        # Rolle - also kein get_capabilities(), kein apply(), keine Netzwerklast.
         if only_if_on and not is_on:
             print(f"[{name}] --only-if-on aktiv und Geraet ist aus. "
                   f"Keine Aktion, keine weiteren Abfragen.")
             return True
 
-        if is_on and device.ieco:
-            print(f"[{name}] Bereits im gewuenschten Zustand (an, iECO aktiv). "
-                  f"Keine weiteren Abfragen notwendig.")
-            return True
-
-        # Ab hier wird tatsaechlich etwas geaendert (Einschalten und/oder
-        # iECO setzen) - erst jetzt lohnt sich der zusaetzliche
-        # get_capabilities()-Roundtrip, der laut msmart-ng-Dokumentation
-        # vor dem Setzen capability-gebundener Properties nötig ist.
+        # Ab hier brauchen wir den ECHTEN ieco-Zustand (fuer die Statusanzeige,
+        # den 'schon aktiv'-Kurzschluss und spaeter die Verifikation). refresh()
+        # pollt die IECO-Property aber nur nach get_capabilities() (das
+        # _supported_properties befuellt) - sonst liest device.ieco immer den
+        # Default False. Also Capabilities abfragen und danach erneut refreshen.
         try:
             await device.get_capabilities()
+            await device.refresh()
         except Exception as exc:
-            print(f"[{name}] FEHLER bei get_capabilities(): "
+            print(f"[{name}] FEHLER bei get_capabilities()/refresh(): "
                   f"{type(exc).__name__}: {exc}")
             return False
+
+        print(f"[{name}] Status vor Aktion: power={is_on}, "
+              f"mode={device.operational_mode}, ieco={device.ieco}, eco={device.eco}")
 
         if not device.supports_ieco:
             print(f"[{name}] FEHLER: Geraet meldet keine iECO-Faehigkeit.")
             return False
+
+        if is_on and device.ieco:
+            print(f"[{name}] Bereits im gewuenschten Zustand (an, iECO aktiv). "
+                  f"Keine weiteren Abfragen notwendig.")
+            return True
 
         was_off = not is_on
         if was_off:
@@ -194,7 +209,10 @@ async def ensure_ieco(dev_conf: dict, only_if_on: bool) -> bool:
         await asyncio.sleep(2.0)
         await close_device(device)
         try:
-            device = await connect_and_refresh(dev_conf)
+            # with_capabilities=True ist hier zwingend: sonst pollt refresh() die
+            # IECO-Property nicht und device.ieco laese faelschlich False - die
+            # Ursache der frueher zu Unrecht als Fehlschlag gewerteten Verifikation.
+            device = await connect_and_refresh(dev_conf, with_capabilities=True)
         except RuntimeError as exc:
             print(f"[{name}] FEHLER bei Verifikation: {exc}")
             return False

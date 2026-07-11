@@ -37,6 +37,17 @@ First public release.
   (where it is briefly visible in `ps`).
 
 ### Fixed
+- `midea_ieco_ensure.py` no longer reports a successful run as failed. After
+  `apply()` it re-read `device.ieco` on a freshly connected object that had not
+  called `get_capabilities()` — but `msmart-ng`'s `refresh()` only polls
+  properties in `_supported_properties`, which `get_capabilities()` populates. So
+  IECO was never polled and `device.ieco` returned its default `False`, even
+  though iECO was actually active on the unit, producing a bogus "iECO is still
+  disabled" failure. The verification (and the initial status read) now query
+  capabilities before refreshing, so `device.ieco` reflects the real state; this
+  also makes the "already in iECO, nothing to do" short-circuit work, so cron
+  runs stop needlessly re-applying iECO.
+- `install.sh` credentials prompt heading now reads "Midea-APP-Zugangsdaten".
 - `install.sh` device discovery no longer reports "no devices found" when
   devices were in fact found. It now uses `midealocal.discover.discover()` (a
   local UDP broadcast, no cloud login required) and prints each device's **IP

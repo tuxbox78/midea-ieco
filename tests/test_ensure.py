@@ -72,11 +72,15 @@ class FakeDevice:
         self._caps_raises = caps_raises
         self.apply_calls = 0
         self.caps_calls = 0
+        self.refresh_calls = 0
 
     async def get_capabilities(self):
         self.caps_calls += 1
         if self._caps_raises is not None:
             raise self._caps_raises
+
+    async def refresh(self):
+        self.refresh_calls += 1
 
     async def apply(self):
         self.apply_calls += 1
@@ -89,14 +93,19 @@ class FakeDevice:
 
 def _scripted_connect(items):
     """Async-Ersatz fuer connect_and_refresh: gibt der Reihe nach die
-    uebergebenen FakeDevices zurueck; ist ein Eintrag eine Exception, wird sie
-    geworfen (simuliert einen fehlgeschlagenen Reconnect)."""
+    uebergebenen Fake-Geraete zurueck; ist ein Eintrag eine Exception, wird sie
+    geworfen (simuliert einen fehlgeschlagenen Reconnect). Bildet
+    with_capabilities nach wie das echte connect_and_refresh: bei True erst
+    get_capabilities(), dann refresh() auf dem Geraet."""
     seq = list(items)
 
-    async def _connect(dev_conf, retries=mie.CONNECT_RETRIES):
+    async def _connect(dev_conf, retries=mie.CONNECT_RETRIES, with_capabilities=False):
         item = seq.pop(0)
         if isinstance(item, BaseException):
             raise item
+        if with_capabilities:
+            await item.get_capabilities()
+            await item.refresh()
         return item
 
     return _connect
@@ -184,6 +193,79 @@ class EmptyAllTests(unittest.TestCase):
                 asyncio.run(mie.main())
         self.assertEqual(cm.exception.code, 0)
         self.assertNotIn("Keine Geraete", out.getvalue())
+
+
+class CapabilityGatedDevice:
+    """Modelliert das reale msmart-ng-Verhalten: device.ieco liefert den WAHREN
+    Wert erst, nachdem get_capabilities() (fuellt _supported_properties) UND
+    danach refresh() (pollt dann IECO) liefen - vorher immer den Default False.
+    Genau das liess die Verifikation frueher faelschlich fehlschlagen."""
+
+    def __init__(self, *, power_state=True, true_ieco=True, supports_ieco=True):
+        self.online = True
+        self.power_state = power_state
+        self.operational_mode = 1
+        self.eco = False
+        self.supports_ieco = supports_ieco
+        self._true_ieco = true_ieco
+        self._caps = False
+        self._refreshed_after_caps = False
+        self.apply_calls = 0
+
+    @property
+    def ieco(self):
+        return self._true_ieco if (self._caps and self._refreshed_after_caps) else False
+
+    @ieco.setter
+    def ieco(self, value):
+        self._true_ieco = value
+
+    async def get_capabilities(self):
+        self._caps = True
+        self._refreshed_after_caps = False
+
+    async def refresh(self):
+        if self._caps:
+            self._refreshed_after_caps = True
+
+    async def apply(self):
+        self.apply_calls += 1
+
+    async def close(self):
+        pass
+
+
+class IecoVerificationCapabilityTests(unittest.TestCase):
+    """Der wahre ieco-Zustand ist nur nach get_capabilities()+refresh() sichtbar.
+    Verifikation UND Initial-Read muessen deshalb Capabilities abfragen - sonst
+    laese device.ieco False und der Lauf wuerde faelschlich als Fehlschlag
+    gewertet (der gemeldete Bug)."""
+
+    def _run(self, items, only_if_on=False):
+        connect = _scripted_connect(items)
+        with ExitStack() as es:
+            es.enter_context(mock.patch.object(mie, "connect_and_refresh", connect))
+            es.enter_context(mock.patch.object(mie.asyncio, "sleep", _anoop))
+            es.enter_context(redirect_stdout(io.StringIO()))
+            return asyncio.run(mie.ensure_ieco(
+                {"name": "X", "ip": "1", "id": "1"}, only_if_on=only_if_on))
+
+    def test_verification_reads_true_ieco_via_capabilities(self):
+        # Geraet aus -> einschalten + iECO setzen. Das Verifikationsgeraet meldet
+        # iECO nur, wenn die Verifikation Capabilities+refresh gemacht hat. Der
+        # Erfolg beweist with_capabilities=True bei der Verifikation - OHNE den
+        # Fix laese ieco False und assertTrue wuerde scheitern.
+        d_action = CapabilityGatedDevice(power_state=False, true_ieco=False)
+        d_verify = CapabilityGatedDevice(power_state=True, true_ieco=True)
+        self.assertTrue(self._run([d_action, d_verify]))
+
+    def test_already_on_and_ieco_short_circuits(self):
+        # Geraet an und bereits in iECO: der 'schon aktiv'-Kurzschluss greift nur,
+        # weil auch der Initial-Read jetzt Capabilities+refresh macht (sonst laese
+        # ieco False und es wuerde unnoetig apply() aufgerufen).
+        d = CapabilityGatedDevice(power_state=True, true_ieco=True)
+        self.assertTrue(self._run([d]))
+        self.assertEqual(d.apply_calls, 0)
 
 
 if __name__ == "__main__":
