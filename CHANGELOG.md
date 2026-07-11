@@ -18,6 +18,14 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   login shell (`~/.bashrc` / `~/.zshrc` / `~/.profile`). Only with your
   confirmation and a TTY; for non-interactive runs or paths with unusual
   characters it prints a manual hint instead of editing anything.
+- `midea-ieco` with no argument (or `midea-ieco list`) now prints an instant,
+  offline overview: what the tool does, the config path, the configured devices
+  (name and IP only — never token or key), and the common commands. It never
+  contacts a device. Previously a bare invocation exited with an argparse usage
+  error.
+- `midea-ieco-refresh-tokens` wrapper command, installed next to `midea-ieco`
+  and `midea-ieco-update`, as a friendly equivalent of
+  `venv/bin/python3 midea_refresh_tokens.py`.
 
 ### Changed
 - Re-running `install.sh` on an already-configured installation no longer
@@ -25,6 +33,9 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   now refreshes code, dependencies, and wrappers, then exits. Use
   `install.sh --reconfigure` to deliberately redo device setup — the existing
   `devices.json` is backed up to `devices.json.bak` (git-ignored) first.
+- `list` is now a reserved target word (like `all`): the installer rejects a
+  device named `list`, and the overview flags a device already named
+  `all`/`list` from an earlier install as unreachable from the command line.
 
 ## [0.1.0] - 2026-07-10
 

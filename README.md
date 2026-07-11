@@ -66,7 +66,7 @@ The installer will:
 3. Ask for your Midea Cloud credentials and run device discovery
 4. Let you enter device names, IPs, and IDs interactively to build `devices.json`
 5. Retrieve token/key pairs and store them securely (`chmod 600`)
-6. Create the `midea-ieco` and `midea-ieco-update` wrapper commands, offer to add the bin directory to your `PATH`, and offer an optional test run and cron job setup
+6. Create the `midea-ieco`, `midea-ieco-update`, and `midea-ieco-refresh-tokens` wrapper commands, offer to add the bin directory to your `PATH`, and offer an optional test run and cron job setup
 
 ### Manual installation (alternative)
 
@@ -205,6 +205,17 @@ Under the hood it re-runs the installer in a dedicated update mode (`install.sh 
 
 ## Daily use
 
+### See what's configured
+
+Run `midea-ieco` with no argument, or with `list`, for an instant offline overview — what the tool does, where its config lives, which devices are configured (name and IP only, **never** token or key), and the most common commands:
+
+```bash
+midea-ieco
+midea-ieco list
+```
+
+It never contacts a device, so it responds immediately even when nothing is reachable. Without the bin directory on your `PATH`, use `venv/bin/python3 midea_ieco_ensure.py list`.
+
 ### Ensure iECO is enabled (powers on if necessary)
 
 ```bash
@@ -229,9 +240,11 @@ With `--only-if-on`, the script never turns on a unit. A unit that is off is lef
 If a device reports `Connection reset`, a timeout, or a credential problem:
 
 ```bash
-python3 midea_refresh_tokens.py --name LivingRoom
-python3 midea_refresh_tokens.py --all
+midea-ieco-refresh-tokens --name LivingRoom
+midea-ieco-refresh-tokens --all
 ```
+
+This wrapper command is installed next to `midea-ieco`; without the bin directory on your `PATH`, the equivalent is `venv/bin/python3 midea_refresh_tokens.py --all`.
 
 In practice, credentials often remain valid for a long time. Refresh them when an app session changes fundamentally (e.g. after changing your Midea account password) or when a device is reconnected to the network.
 

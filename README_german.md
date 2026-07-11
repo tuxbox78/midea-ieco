@@ -66,7 +66,7 @@ Der Installer erledigt automatisch:
 3. Abfrage deiner Midea-Cloud-Zugangsdaten und Ausführung der Geräteerkennung
 4. Interaktive Eingabe von Gerätenamen, IPs und IDs zum Aufbau von `devices.json`
 5. Abruf der Token-/Key-Paare und sichere Speicherung (`chmod 600`)
-6. Anlegen der Wrapper-Befehle `midea-ieco` und `midea-ieco-update`, Angebot zur Aufnahme des Bin-Verzeichnisses in den `PATH` sowie optionaler Testlauf und optionale Cron-Job-Einrichtung
+6. Anlegen der Wrapper-Befehle `midea-ieco`, `midea-ieco-update` und `midea-ieco-refresh-tokens`, Angebot zur Aufnahme des Bin-Verzeichnisses in den `PATH` sowie optionaler Testlauf und optionale Cron-Job-Einrichtung
 
 ### Manuelle Installation (Alternative)
 
@@ -206,6 +206,17 @@ Intern startet er den Installer in einem eigenen Update-Modus (`install.sh --upd
 
 ## Tägliche Nutzung
 
+### Anzeigen, was konfiguriert ist
+
+`midea-ieco` ohne Argument – oder mit `list` – zeigt sofort eine netzwerkfreie Übersicht: was das Werkzeug tut, wo die Konfiguration liegt, welche Geräte konfiguriert sind (nur Name und IP, **niemals** Token oder Key) und die wichtigsten Befehle:
+
+```bash
+midea-ieco
+midea-ieco list
+```
+
+Es wird dabei kein Gerät kontaktiert, die Ausgabe erscheint also sofort – auch wenn gerade nichts erreichbar ist. Ist das Bin-Verzeichnis nicht im `PATH`, nutze `venv/bin/python3 midea_ieco_ensure.py list`.
+
 ### iECO sicherstellen (schaltet Gerät bei Bedarf ein)
 
 ```bash
@@ -230,9 +241,11 @@ Mit `--only-if-on` schaltet das Skript keine Anlage ein. Eine ausgeschaltete Anl
 Falls ein Gerät `Connection reset`, einen Timeout oder ein Zugangsdatenproblem meldet:
 
 ```bash
-python3 midea_refresh_tokens.py --name Wohnzimmer
-python3 midea_refresh_tokens.py --all
+midea-ieco-refresh-tokens --name Wohnzimmer
+midea-ieco-refresh-tokens --all
 ```
+
+Dieser Wrapper-Befehl wird neben `midea-ieco` installiert; ohne Bin-Verzeichnis im `PATH` lautet das Äquivalent `venv/bin/python3 midea_refresh_tokens.py --all`.
 
 In der Praxis bleiben Zugangsdaten oft lange gültig. Auffrischen ist sinnvoll, wenn sich die App-Session grundlegend ändert (z. B. nach einer Passwortänderung beim Midea-Konto) oder wenn ein Gerät neu mit dem Netzwerk verbunden wurde.
 
