@@ -9,6 +9,7 @@ oder direkt: python3 tests/test_ensure.py
 import asyncio
 import io
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -356,6 +357,27 @@ class OverviewTests(unittest.TestCase):
                                   "id": 1, "token": "t", "key": "k"}]})
         code, _ = self._run(["Nichtvorhanden"])
         self.assertEqual(code, 1)
+
+
+class OverviewWithoutMsmartTests(unittest.TestCase):
+    """Der Lazy-Import macht die Uebersicht unabhaengig von msmart: `list` muss
+    auch dann mit Exit 0 laufen, wenn msmart NICHT installiert ist - frueher
+    scheiterte schon der Top-Level-Import. Nur pruefbar, wenn msmart im aktiven
+    Interpreter fehlt; sonst uebersprungen (analog MsmartMissingProbeTests in
+    test_refresh_tokens.py)."""
+
+    def test_list_runs_without_msmart(self):
+        probe = subprocess.run([sys.executable, "-c", "import msmart"],
+                               capture_output=True)
+        if probe.returncode == 0:
+            self.skipTest("msmart installiert - der msmart-freie Pfad ist nicht pruefbar")
+        # Der echte Skriptlauf importiert msmart NICHT (Lazy-Import erst beim
+        # Geraetezugriff), die Uebersicht muss also sauber mit Exit 0 erscheinen.
+        result = subprocess.run(
+            [sys.executable, str(REPO_DIR / "midea_ieco_ensure.py"), "list"],
+            capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Beispiele:", result.stdout)
 
 
 if __name__ == "__main__":

@@ -16,14 +16,21 @@ Nutzung:
     python3 midea_ieco_ensure.py <device_name|all> --only-if-on
 """
 
+from __future__ import annotations
+
 import argparse
 import asyncio
 import json
 import sys
 import logging
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from msmart.device.AC.device import AirConditioner as AC
+if TYPE_CHECKING:
+    # Nur fuer Typpruefer: der echte Import passiert lazy in
+    # connect_and_refresh, damit das Modul - und damit die netzwerkfreie
+    # Uebersicht `list` - auch ohne installiertes msmart importierbar bleibt.
+    from msmart.device.AC.device import AirConditioner as AC
 
 logging.basicConfig(level=logging.WARNING)
 
@@ -165,6 +172,11 @@ async def connect_and_refresh(dev_conf: dict, retries: int = CONNECT_RETRIES,
     die IECO-Property NICHT, und device.ieco liefert immer den Default False -
     selbst wenn iECO am Geraet aktiv ist (genau das liess die Verifikation frueher
     faelschlich fehlschlagen)."""
+    # Lazy-Import (spiegelt midea_refresh_tokens.verify_credentials): erst der
+    # tatsaechliche Geraetezugriff braucht msmart. So bleibt das Modul - und
+    # damit die netzwerkfreie Uebersicht `list` - auch ohne installiertes
+    # msmart importier- und nutzbar.
+    from msmart.device.AC.device import AirConditioner as AC
     name = dev_conf["name"]
     last_exc = None
     for attempt in range(1, retries + 1):
