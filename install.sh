@@ -2,7 +2,16 @@
 # SPDX-FileCopyrightText: 2026 Frank Seidel <frank@f-seidel.de>
 # SPDX-License-Identifier: MIT
 # =============================================================================
-# install.sh – midea-ieco Setup-Skript
+# install.sh – midea-ieco Setup- und Update-Skript
+#
+# Zwei Betriebsmodi (Auswahl ueber Argumente, siehe print_usage):
+#   (ohne)         Erstinstallation bzw. interaktive Einrichtung (Onboarding).
+#   --update       NUR aktualisieren: Code + Abhaengigkeiten + Wrapper erneuern,
+#                  OHNE Onboarding. devices.json/credentials.json/Cron bleiben
+#                  unangetastet. Wird vom erzeugten Befehl 'midea-ieco-update'
+#                  aufgerufen.
+#   --reconfigure  Onboarding erneut durchlaufen, auch wenn schon konfiguriert
+#                  (vorhandene devices.json wird vorher nach .bak gesichert).
 # =============================================================================
 set -euo pipefail
 
@@ -20,19 +29,81 @@ error() { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
 
 # Zentrales Aufraeumen: wird bei JEDEM Skriptende ausgefuehrt (Erfolg, Fehler,
 # Abbruch per Strg+C) - verhindert verwaiste Temp-Dateien/Verzeichnisse.
+# WICHTIG: 'exec' ersetzt den Prozess und VERWIRFT diesen Trap - Temp-Dateien,
+# die eine per exec verlassene Phase anlegt, muessen daher entweder vor dem exec
+# selbst entfernt oder ueber eine Umgebungsvariable an die letzte (nicht mehr
+# exec'ende) Phase durchgereicht werden. Siehe run_update und
+# download_and_overlay_zip.
 CLEANUP_PATHS=()
 cleanup() {
     for p in "${CLEANUP_PATHS[@]:-}"; do
         [[ -n "$p" && -e "$p" ]] && rm -rf "$p"
     done
+    # WICHTIG: immer 0 zurueckgeben. Ein EXIT-Trap, dessen letztes Kommando != 0
+    # endet, ueberschreibt sonst den eigentlichen Exit-Code des Skripts (z.B. das
+    # 'exit 0' am Ende der Update-apply-Phase). Der Fall tritt auf, sobald der
+    # LETZTE CLEANUP_PATHS-Eintrag nicht mehr existiert (etwa ein bereits von
+    # install_bin_wrapper selbst entferntes Temp-File) - dann liefert die
+    # '[[ ... ]] && rm'-Kurzschluss-Kette 1.
+    return 0
 }
 trap cleanup EXIT
 
-echo ""
-echo -e "${BLUE}=================================================${NC}"
-echo -e "${BLUE}   midea-ieco Installationsskript               ${NC}"
-echo -e "${BLUE}=================================================${NC}"
-echo ""
+# Kurze Hilfe. Bewusst vor dem Argument-Parsing definiert, damit '--help'
+# ausgewertet werden kann, ohne dass irgendein weiterer Schritt lief.
+print_usage() {
+    cat <<'USAGE'
+midea-ieco install.sh
+
+  (ohne Option)   Erstinstallation bzw. interaktive Einrichtung.
+  --update        Nur aktualisieren: Code + Abhaengigkeiten + Wrapper erneuern.
+                  Ruehrt devices.json / credentials.json / Cron NICHT an.
+                  (Entspricht dem erzeugten Befehl 'midea-ieco-update'.)
+  --reconfigure   Einrichtung erneut durchlaufen, auch wenn schon konfiguriert.
+                  Sichert eine vorhandene devices.json vorher nach .bak.
+  -h, --help      Diese Hilfe anzeigen.
+
+Verzeichnisse ueber Umgebungsvariablen ueberschreibbar:
+  MIDEA_IECO_DIR       Installationsverzeichnis (Default /opt/local/midea-ieco)
+  MIDEA_IECO_BIN_DIR   Wrapper-Verzeichnis      (Default /opt/local/bin)
+USAGE
+}
+
+# =============================================================================
+# Argument-Parsing: bestimmt Betriebsmodus. Unbekannte Optionen werden klar
+# abgelehnt (statt still ignoriert), damit ein Tippfehler nicht unbemerkt das
+# Onboarding statt eines Updates startet.
+# =============================================================================
+MODE="install"
+RECONFIGURE=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --update)      MODE="update" ;;
+        --reconfigure) RECONFIGURE=1 ;;
+        -h|--help)     print_usage; exit 0 ;;
+        *)             error "Unbekannte Option: '$1'. '--help' zeigt die Optionen." ;;
+    esac
+    shift
+done
+
+# Interne Phasen-Variable des Update-Modus (leer bei jedem NORMALEN Aufruf).
+# Nur bei den self-re-exec'ten Update-Phasen gesetzt (relaunch -> fetch ->
+# apply). Wird hier einmal gelesen, um Banner/Info-Zeilen bei den Re-Execs nicht
+# dreifach zu wiederholen.
+UPDATE_PHASE="${MIDEA_IECO_UPDATE_PHASE:-}"
+
+# Banner nur bei der ERSTEN (nicht re-exec'ten) Ausfuehrung zeigen.
+if [[ -z "$UPDATE_PHASE" ]]; then
+    echo ""
+    echo -e "${BLUE}=================================================${NC}"
+    if [[ "$MODE" == "update" ]]; then
+        echo -e "${BLUE}   midea-ieco Update                            ${NC}"
+    else
+        echo -e "${BLUE}   midea-ieco Installationsskript               ${NC}"
+    fi
+    echo -e "${BLUE}=================================================${NC}"
+    echo ""
+fi
 
 # =============================================================================
 # 0. Installationsverzeichnisse bestimmen
@@ -43,15 +114,26 @@ else
     SCRIPT_DIR=""
 fi
 
-if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/midea_ieco_ensure.py" ]]; then
+# Reihenfolge der Aufloesung:
+#   1. MIDEA_IECO_RESOLVED_DIR (nur intern gesetzt) - haelt das Zielverzeichnis
+#      ueber die 'exec'-Grenzen der Update-Phasen hinweg stabil. Ohne das wuerde
+#      die aus einer TEMP-Kopie laufende fetch-Phase (BASH_SOURCE zeigt auf /tmp)
+#      das Installationsverzeichnis falsch bestimmen.
+#   2. Skriptverzeichnis, falls es die Projektdateien enthaelt (lokaler Aufruf).
+#   3. MIDEA_IECO_DIR bzw. der Default (curl|bash-Erstinstallation).
+if [[ -n "${MIDEA_IECO_RESOLVED_DIR:-}" ]]; then
+    INSTALL_DIR="$MIDEA_IECO_RESOLVED_DIR"
+elif [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/midea_ieco_ensure.py" ]]; then
     INSTALL_DIR="$SCRIPT_DIR"
 else
     INSTALL_DIR="${MIDEA_IECO_DIR:-$DEFAULT_INSTALL_DIR}"
 fi
 BIN_DIR="${MIDEA_IECO_BIN_DIR:-$DEFAULT_BIN_DIR}"
 
-info "Installationsverzeichnis: $INSTALL_DIR"
-info "Wrapper-Skript wird abgelegt in: $BIN_DIR"
+if [[ -z "$UPDATE_PHASE" ]]; then
+    info "Installationsverzeichnis: $INSTALL_DIR"
+    info "Wrapper-Verzeichnis: $BIN_DIR"
+fi
 
 # =============================================================================
 # 1. Plattform und Paketmanager erkennen
@@ -80,7 +162,7 @@ elif [[ "$PLATFORM" == "macos" ]]; then
     fi
 fi
 
-info "Erkannte Plattform: $PLATFORM (Paketmanager: $PKG_MGR)"
+[[ -z "$UPDATE_PHASE" ]] && info "Erkannte Plattform: $PLATFORM (Paketmanager: $PKG_MGR)"
 
 install_pkg() {
     local pkg="$1"
@@ -187,45 +269,50 @@ parse_discovered() {  # $1 = mehrzeilige "IP<TAB>ID"-Liste
 }
 
 # =============================================================================
-# 2. Grundwerkzeuge: python3, git/curl, unzip
+# Grundwerkzeuge: python3 (>=3.11), venv, git/curl. Als Funktion, damit sowohl
+# der Installations- als auch der Update-Pfad exakt dieselbe Pruefung nutzen
+# (DRY). Setzt PY_MAJOR/PY_MINOR bewusst global (kein 'local'), wie im urspr.
+# Inline-Code. Bricht bei zu altem Python bzw. fehlendem venv klar ab.
 # =============================================================================
-if ! command -v python3 &>/dev/null; then
-    warn "python3 nicht gefunden. Versuche automatische Installation..."
-    case "$PKG_MGR" in
-        pacman) install_pkg python ;;
-        *)      install_pkg python3 ;;
-    esac || error "python3 konnte nicht automatisch installiert werden."
-fi
+ensure_base_tools() {
+    if ! command -v python3 &>/dev/null; then
+        warn "python3 nicht gefunden. Versuche automatische Installation..."
+        case "$PKG_MGR" in
+            pacman) install_pkg python ;;
+            *)      install_pkg python3 ;;
+        esac || error "python3 konnte nicht automatisch installiert werden."
+    fi
 
-PY_MAJOR=$(python3 -c "import sys; print(sys.version_info.major)")
-PY_MINOR=$(python3 -c "import sys; print(sys.version_info.minor)")
-if [[ "$PY_MAJOR" -lt 3 ]] || { [[ "$PY_MAJOR" -eq 3 ]] && [[ "$PY_MINOR" -lt 11 ]]; }; then
-    error "Python 3.11+ erforderlich (gefunden: $PY_MAJOR.$PY_MINOR).
+    PY_MAJOR=$(python3 -c "import sys; print(sys.version_info.major)")
+    PY_MINOR=$(python3 -c "import sys; print(sys.version_info.minor)")
+    if [[ "$PY_MAJOR" -lt 3 ]] || { [[ "$PY_MAJOR" -eq 3 ]] && [[ "$PY_MINOR" -lt 11 ]]; }; then
+        error "Python 3.11+ erforderlich (gefunden: $PY_MAJOR.$PY_MINOR).
   Grund: die gepinnte midea-local 6.6.1 setzt Python 3.11 voraus (aktuelle
   Raspberry Pi OS 'Bookworm' liefert 3.11)."
-fi
-ok "Python $PY_MAJOR.$PY_MINOR gefunden."
+    fi
+    ok "Python $PY_MAJOR.$PY_MINOR gefunden."
 
-if ! python3 -m venv --help &>/dev/null; then
-    warn "venv-Modul fehlt. Versuche Installation..."
-    case "$PKG_MGR" in
-        # '|| true', damit ein fehlgeschlagener Installationsversuch unter
-        # 'set -e' NICHT hier abbricht - die verbindliche Pruefung (mit
-        # handlungsleitender Meldung) folgt unmittelbar danach.
-        apt) install_pkg "python3-venv" || install_pkg "python${PY_MAJOR}.${PY_MINOR}-venv" || true ;;
-        *)   true ;;
-    esac
-fi
-python3 -m venv --help &>/dev/null || error "venv-Modul fehlt weiterhin. Bitte manuell installieren."
-ok "venv-Modul verfuegbar."
+    if ! python3 -m venv --help &>/dev/null; then
+        warn "venv-Modul fehlt. Versuche Installation..."
+        case "$PKG_MGR" in
+            # '|| true', damit ein fehlgeschlagener Installationsversuch unter
+            # 'set -e' NICHT hier abbricht - die verbindliche Pruefung (mit
+            # handlungsleitender Meldung) folgt unmittelbar danach.
+            apt) install_pkg "python3-venv" || install_pkg "python${PY_MAJOR}.${PY_MINOR}-venv" || true ;;
+            *)   true ;;
+        esac
+    fi
+    python3 -m venv --help &>/dev/null || error "venv-Modul fehlt weiterhin. Bitte manuell installieren."
+    ok "venv-Modul verfuegbar."
 
-if ! command -v git &>/dev/null && ! command -v curl &>/dev/null; then
-    warn "Weder git noch curl gefunden. Versuche curl zu installieren..."
-    install_pkg curl || error "curl konnte nicht installiert werden."
-fi
+    if ! command -v git &>/dev/null && ! command -v curl &>/dev/null; then
+        warn "Weder git noch curl gefunden. Versuche curl zu installieren..."
+        install_pkg curl || error "curl konnte nicht installiert werden."
+    fi
+}
 
 # =============================================================================
-# 3. Installationsverzeichnis anlegen
+# Installationsverzeichnis anlegen
 # =============================================================================
 # WICHTIG: Ein bereits BESTEHENDES Verzeichnis wird NIEMALS automatisch per
 # chown uebernommen - es koennte fremde/root-verwaltete Software enthalten
@@ -264,13 +351,8 @@ ensure_install_dir() {
     sudo chown "$(id -u):$(id -g)" "$dir"
 }
 
-ensure_install_dir "$INSTALL_DIR"
-# BIN_DIR wird NICHT hier vorbereitet - es wird in Schritt 12 bei Bedarf
-# angelegt und der Wrapper per 'install'/sudo hineingelegt, ohne dessen
-# Besitzverhaeltnisse zu aendern.
-
 # =============================================================================
-# 4. Projekt-Dateien besorgen
+# Projekt-Dateien besorgen / aktualisieren
 # =============================================================================
 # Ermittelt das EINE Wurzelverzeichnis eines entpackten GitHub-Archiv-ZIPs
 # (Format <repo>-<branch>/...). Bricht mit klarer Fehlermeldung ab, statt eine
@@ -298,108 +380,360 @@ resolve_extracted_root_dir() {
     esac
 }
 
-if command -v git &>/dev/null && [[ -d "$INSTALL_DIR/.git" ]]; then
-    # Bestehender Git-Clone: auf den neuesten Stand bringen, damit Updates (z.B.
-    # an requirements.txt) auch bei einer RE-Installation ankommen - ohne das
-    # behielte eine vorhandene Installation dauerhaft ihre alten Dateien (genau
-    # das liess z.B. einen fehlenden typing_extensions-Pin nie ankommen). Nur
-    # Fast-Forward; die Zugangs-/Geraetedateien sind git-ignoriert und bleiben
-    # unangetastet. Schlaegt der Pull fehl (lokale Aenderungen, kein Netz), wird
-    # mit den vorhandenen Dateien weitergemacht statt abzubrechen - die
-    # Import-Pruefung weiter unten faengt echte Abhaengigkeitsluecken ohnehin ab.
-    info "Aktualisiere vorhandene Installation (git pull)..."
-    if git -C "$INSTALL_DIR" pull --ff-only --quiet; then
-        ok "Projekt-Dateien aktualisiert."
+# Laedt das aktuelle GitHub-Archiv und legt seinen Inhalt ueber $INSTALL_DIR.
+# Genutzt fuer die ZIP-Erstinstallation UND fuer das ZIP-Update (ohne Git).
+# 'cp -R extracted/. INSTALL_DIR/' ueberlagert NUR die im Archiv enthaltenen
+# (getrackten) Dateien; devices.json/credentials.json/venv/logs sind git-ignoriert
+# und daher nicht im Archiv - sie bleiben strukturell unangetastet.
+# tmp_dir wird explizit am Ende entfernt (nicht nur ueber den EXIT-Trap): der
+# Update-fetch-Pfad verlaesst das Skript anschliessend per 'exec', wodurch der
+# Trap NICHT mehr feuert. CLEANUP_PATHS bleibt als Sicherung fuer den Fehlerpfad.
+download_and_overlay_zip() {
+    command -v curl &>/dev/null || error "curl wird fuer den ZIP-Download benoetigt, ist aber nicht verfuegbar."
+    command -v unzip &>/dev/null || install_pkg unzip \
+        || error "unzip wird fuer den ZIP-Download benoetigt, konnte aber nicht installiert werden (Paketmanager: $PKG_MGR). Bitte git oder unzip manuell installieren."
+    local tmp_dir tmp_zip extracted_root
+    tmp_dir="$(mktemp -d)"
+    CLEANUP_PATHS+=("$tmp_dir")
+    tmp_zip="$tmp_dir/midea-ieco.zip"
+    curl -fsSL "$REPO_ZIP_URL" -o "$tmp_zip"
+    unzip -q "$tmp_zip" -d "$tmp_dir/extract"
+    extracted_root="$(resolve_extracted_root_dir "$tmp_dir/extract")"
+    cp -R "$extracted_root"/. "$INSTALL_DIR"/
+    rm -rf "$tmp_dir"
+}
+
+# Holt die Projektdateien nach $INSTALL_DIR. $1 = 'install' | 'update'.
+#   - Git-Clone vorhanden        -> git pull --ff-only (beide Modi).
+#   - kein Git-Clone + 'update'  -> ZIP-Overlay (schliesst die Update-Luecke fuer
+#                                   ZIP-Installationen).
+#   - kein Git-Clone + Erstlauf  -> git clone bzw. ZIP-Download.
+#   - sonst                      -> bereits vorhanden, nichts zu tun.
+# Ein fehlgeschlagener Pull (lokale Aenderungen an getrackten Dateien, kein Netz,
+# non-fast-forward) bricht NICHT ab, meldet aber KLAR, dass NICHT aktualisiert
+# wurde - kein stiller No-Op.
+fetch_project_files() {
+    local mode="$1"
+    if command -v git &>/dev/null && [[ -d "$INSTALL_DIR/.git" ]]; then
+        info "Aktualisiere vorhandene Installation (git pull)..."
+        # Lokale Aenderungen an getrackten Dateien (z.B. manuell editierte
+        # install.sh) wuerden --ff-only scheitern lassen. Vorher pruefen und
+        # verstaendlich melden, statt den Nutzer mit einer git-Fehlermeldung
+        # allein zu lassen. 'git diff --quiet' -> rc 1 bei Aenderungen; unter
+        # 'set -e' sicher im 'if !'-Kontext.
+        if ! git -C "$INSTALL_DIR" diff --quiet 2>/dev/null; then
+            warn "Lokale Aenderungen an getrackten Dateien erkannt - git pull uebersprungen."
+            warn "  Tipp: Pfade ueber MIDEA_IECO_DIR/MIDEA_IECO_BIN_DIR setzen statt install.sh zu editieren,"
+            warn "  oder Aenderungen mit 'git -C $INSTALL_DIR stash' zuruecklegen und Update wiederholen."
+        elif git -C "$INSTALL_DIR" pull --ff-only --quiet; then
+            ok "Projekt-Dateien aktualisiert."
+        else
+            warn "git pull nicht moeglich (kein Netz oder non-fast-forward) - NICHT aktualisiert, nutze vorhandene Dateien weiter."
+        fi
+    elif [[ "$mode" == "update" ]]; then
+        info "Aktualisiere vorhandene Installation (ZIP-Download)..."
+        download_and_overlay_zip
+        ok "Projekt-Dateien aktualisiert (ZIP)."
+    elif [[ ! -f "$INSTALL_DIR/midea_ieco_ensure.py" ]]; then
+        info "Lade Projekt-Dateien nach $INSTALL_DIR ..."
+        if command -v git &>/dev/null; then
+            git clone --quiet "$REPO_URL" "$INSTALL_DIR"
+        elif command -v curl &>/dev/null; then
+            download_and_overlay_zip
+        else
+            error "Weder git noch curl verfuegbar. Bitte Repository manuell herunterladen."
+        fi
+        ok "Projekt-Dateien bereitgestellt in $INSTALL_DIR."
     else
-        warn "git pull nicht moeglich (lokale Aenderungen o. Netzproblem) - nutze vorhandene Dateien weiter."
+        ok "Projekt-Dateien bereits vorhanden in $INSTALL_DIR."
     fi
-elif [[ ! -f "$INSTALL_DIR/midea_ieco_ensure.py" ]]; then
-    info "Lade Projekt-Dateien nach $INSTALL_DIR ..."
-    if command -v git &>/dev/null; then
-        git clone --quiet "$REPO_URL" "$INSTALL_DIR"
-    elif command -v curl &>/dev/null; then
-        command -v unzip &>/dev/null || install_pkg unzip \
-            || error "unzip wird fuer den ZIP-Download benoetigt, konnte aber nicht installiert werden (Paketmanager: $PKG_MGR). Bitte git oder unzip manuell installieren."
-        TMP_DIR="$(mktemp -d)"
-        CLEANUP_PATHS+=("$TMP_DIR")
-        TMP_ZIP="$TMP_DIR/midea-ieco.zip"
-        curl -fsSL "$REPO_ZIP_URL" -o "$TMP_ZIP"
-        unzip -q "$TMP_ZIP" -d "$TMP_DIR/extract"
-        EXTRACTED_ROOT="$(resolve_extracted_root_dir "$TMP_DIR/extract")"
-        cp -R "$EXTRACTED_ROOT"/. "$INSTALL_DIR"/
+}
+
+# =============================================================================
+# Virtuelle Umgebung + Abhaengigkeiten. Als Funktion, damit Installations- und
+# Update-Pfad denselben Ablauf teilen (DRY). Erwartet cwd == $INSTALL_DIR.
+# Fehlt die venv (z.B. beschaedigte Installation), wird sie neu angelegt statt
+# kryptisch zu scheitern.
+# =============================================================================
+setup_venv_and_deps() {
+    if [[ -d "venv" ]]; then
+        info "venv existiert bereits - ueberspringe Erstellung."
     else
-        error "Weder git noch curl verfuegbar. Bitte Repository manuell herunterladen."
+        info "Erstelle virtuelle Umgebung..."
+        python3 -m venv venv
+        ok "venv erstellt."
     fi
-    ok "Projekt-Dateien bereitgestellt in $INSTALL_DIR."
-else
-    ok "Projekt-Dateien bereits vorhanden in $INSTALL_DIR."
+
+    # shellcheck disable=SC1091
+    source venv/bin/activate
+    pip install --quiet --upgrade pip
+    # Bevorzugt die gepinnten Versionen aus requirements.txt (reproduzierbar und
+    # gegen Breaking Changes in msmart-ng/midea-local abgesichert). Fehlt die Datei
+    # - etwa bei einem unvollstaendigen Download -, wird ungepinnt nachinstalliert.
+    if [[ -f requirements.txt ]]; then
+        pip install --quiet -r requirements.txt
+    else
+        warn "requirements.txt nicht gefunden - installiere msmart-ng/midea-local ungepinnt."
+        # typing_extensions explizit mitnehmen: midea-local 6.6.1 importiert es,
+        # deklariert es aber NICHT als Dependency (s. requirements.txt-Kommentar).
+        pip install --quiet msmart-ng midea-local typing_extensions
+    fi
+    ok "Abhaengigkeiten installiert (msmart-ng, midea-local)."
+
+    # Sofortige Funktionspruefung der Kern-Abhaengigkeiten. midea-local 6.6.1
+    # importiert 'typing_extensions', deklariert es aber nicht - fehlt es, taucht
+    # der Fehler sonst erst spaeter als roher Traceback auf. Schlaegt die Pruefung
+    # fehl, wird die bekannte Luecke AUTOMATISCH geschlossen und erneut geprueft -
+    # der Installer heilt sich also selbst, statt den Nutzer abzuweisen.
+    if ! check_core_imports; then
+        warn "Kern-Abhaengigkeiten nicht importierbar - installiere fehlende Pakete nach..."
+        pip install --quiet typing_extensions || true
+        if ! check_core_imports; then
+            error "Kern-Abhaengigkeiten weiterhin nicht importierbar - automatische Reparatur fehlgeschlagen.
+  Bitte manuell pruefen (Netzwerk?) und erneut starten:
+    \"$INSTALL_DIR/venv/bin/pip\" install -r \"$INSTALL_DIR/requirements.txt\""
+        fi
+        ok "Fehlende Kern-Abhaengigkeit(en) automatisch nachinstalliert."
+    else
+        ok "Kern-Abhaengigkeiten importierbar (midealocal, msmart)."
+    fi
+
+    # Version rein informativ anzeigen - diese Zeilen duerfen den Installer unter
+    # KEINEN Umstaenden abbrechen. Zwei Fallstricke unter 'set -e -o pipefail':
+    #  1) KEIN 'exit' im awk. Ein frueher Pipe-Schluss (awk beendet sich nach dem
+    #     ersten Treffer) toetet den noch schreibenden 'pip show'-Prozess per
+    #     SIGPIPE; die Pipeline endet dann != 0 (real beobachtet: pip 120/141) und
+    #     'set -e' bricht die GESAMTE Installation lautlos ab. Ohne 'exit' liest awk
+    #     die Ausgabe vollstaendig, der Producer laeuft sauber zu Ende. Es gibt je
+    #     Paket genau eine 'Version:'-Zeile, das Ergebnis bleibt also eindeutig.
+    #  2) '|| true' als Guard. Liefert 'pip show' selbst einen Fehler (z.B. Paket
+    #     nicht gefunden), soll die Zuweisung NICHT unter 'set -e' abbrechen -
+    #     stattdessen greift der ${VAR:-unbekannt}-Fallback unten.
+    MSMART_VER=$(pip show msmart-ng 2>/dev/null | awk '/^Version:/{print $2}') || true
+    MIDEALOCAL_VER=$(pip show midea-local 2>/dev/null | awk '/^Version:/{print $2}') || true
+    info "  msmart-ng    : ${MSMART_VER:-unbekannt}"
+    info "  midea-local  : ${MIDEALOCAL_VER:-unbekannt}"
+}
+
+# =============================================================================
+# Wrapper-Erzeugung in BIN_DIR
+# =============================================================================
+# Legt EINEN ausfuehrbaren Wrapper $1 im BIN_DIR ab; $2 ist die Kommandozeile
+# NACH dem Shebang (bereits fertig gequotet vom Aufrufer). Schreibt zuerst in
+# eine Temp-Datei und installiert sie dann - so laesst sich bei nicht
+# beschreibbarem (root-eigenem) BIN_DIR gezielt EINE Datei per sudo ablegen,
+# ohne die Besitzverhaeltnisse des Verzeichnisses zu aendern. Ausgelagert, damit
+# Steuerungs- UND Update-Wrapper exakt denselben, getesteten Weg nutzen (DRY).
+install_bin_wrapper() {
+    local name="$1" body="$2"
+    local target="$BIN_DIR/$name"
+    local tmp; tmp="$(mktemp)"
+    CLEANUP_PATHS+=("$tmp")
+    cat > "$tmp" <<EOF
+#!/usr/bin/env bash
+# Automatisch von install.sh erzeugter Wrapper.
+$body
+EOF
+    if [[ -w "$BIN_DIR" ]]; then
+        install -m 0755 "$tmp" "$target" 2>/dev/null \
+            || { cp "$tmp" "$target" && chmod 0755 "$target"; }
+    else
+        info "Benoetige sudo, um den Wrapper nach $BIN_DIR zu schreiben..."
+        sudo install -m 0755 "$tmp" "$target" 2>/dev/null \
+            || { sudo cp "$tmp" "$target" && sudo chmod 0755 "$target"; }
+    fi
+    rm -f "$tmp"
+    ok "Wrapper-Skript angelegt: $target"
+}
+
+# Erzeugt beide Wrapper: 'midea-ieco' (Steuerung) und 'midea-ieco-update'
+# (Aktualisierung). $INSTALL_DIR wird EINMAL per printf %q shell-sicher
+# vorgequotet (ein Pfad mit " oder $(...) wuerde sonst die Quotierung der
+# erzeugten Wrapper aufbrechen bzw. beim Ausfuehren erneut als Shell-Syntax
+# interpretiert). %q liefert bereits eine selbst-quotende Form.
+install_all_wrappers() {
+    # BIN_DIR bei Bedarf anlegen - OHNE chown. Root-eigene bin-Verzeichnisse
+    # (z.B. /opt/local/bin) sind der Normalfall; wir legen Dateien hinein, statt
+    # das Verzeichnis zu uebernehmen.
+    if [[ ! -d "$BIN_DIR" ]]; then
+        mkdir -p "$BIN_DIR" 2>/dev/null || { info "Benoetige sudo, um $BIN_DIR anzulegen..."; sudo mkdir -p "$BIN_DIR"; }
+    fi
+    local q; q="$(printf '%q' "$INSTALL_DIR")"
+    # Steuerungs-Wrapper: ruft direkt den venv-Python (kein Exec-Bit noetig).
+    install_bin_wrapper "midea-ieco" \
+        "exec ${q}/venv/bin/python3 ${q}/midea_ieco_ensure.py \"\$@\""
+    # Update-Wrapper: ruft install.sh im Update-Modus. Bewusst 'bash <pfad>'
+    # statt Direktaufruf - so unabhaengig vom Exec-Bit der install.sh.
+    install_bin_wrapper "midea-ieco-update" \
+        "exec bash ${q}/install.sh --update \"\$@\""
+
+    case ":$PATH:" in
+        *":$BIN_DIR:"*) ;;
+        *) warn "$BIN_DIR ist nicht im PATH. Fuege ggf. hinzu mit: export PATH=\"$BIN_DIR:\$PATH\"" ;;
+    esac
+}
+
+# "Bereits eingerichtet" = eine devices.json existiert (wird nur beim Onboarding
+# oder von midea_refresh_tokens.py erzeugt). Grundlage fuer den konfig-sicheren
+# Re-Run: ein blosser Installer-Neustart soll die vorhandene Geraetekonfiguration
+# nicht ueberschreiben. Die Vorlage devices.example.json zaehlt NICHT.
+is_already_configured() {
+    [[ -f "$INSTALL_DIR/devices.json" ]]
+}
+
+# Liefert eine kurze Versionsreferenz fuer die Update-Meldung: bevorzugt den
+# git-Kurz-Hash, sonst die oberste "## [x.y.z]"-Version aus CHANGELOG.md
+# (ZIP-Installation ohne Git), sonst "unbekannt". Rein informativ - gibt IMMER
+# rc 0 und IMMER genau einen Wert aus, damit die Anzeige nie ein Update abbricht.
+# Das awk nutzt bewusst KEINE gawk-only 3-arg-match-Funktion (BSD/macOS-portabel).
+read_version_ref() {
+    local ref=""
+    if command -v git &>/dev/null && [[ -d "$INSTALL_DIR/.git" ]]; then
+        ref="$(git -C "$INSTALL_DIR" rev-parse --short HEAD 2>/dev/null)" || ref=""
+    fi
+    if [[ -z "$ref" && -f "$INSTALL_DIR/CHANGELOG.md" ]]; then
+        ref="$(awk '/^## \[[0-9]/{ gsub(/^## \[|\].*/, ""); print; exit }' "$INSTALL_DIR/CHANGELOG.md" 2>/dev/null)" || ref=""
+    fi
+    printf '%s' "${ref:-unbekannt}"
+}
+
+# =============================================================================
+# Update-Modus: drei self-re-exec'te Phasen.
+#
+# WARUM drei Phasen? git pull bzw. der ZIP-'cp' ueberschreiben install.sh
+# in-place, waehrend bash sie noch zeilenweise liest - das kann das LAUFENDE
+# Skript beschaedigen. Deshalb wird der laufende Prozess vor dem Ueberschreiben
+# vom Zieldateipfad entkoppelt:
+#   relaunch (aus $INSTALL_DIR/install.sh): kopiert sich nach /tmp und startet
+#            die naechste Phase aus dieser TEMP-Kopie.
+#   fetch    (aus der Temp-Kopie): holt/aktualisiert den Code in $INSTALL_DIR
+#            (darf install.sh dort jetzt gefahrlos ueberschreiben) und startet
+#            die letzte Phase aus der FRISCHEN $INSTALL_DIR/install.sh.
+#   apply    (aus der frischen install.sh): Abhaengigkeiten + Wrapper erneuern,
+#            Version melden, fertig. Kein weiterer exec.
+#
+# Der Phasen-Zaehler MIDEA_IECO_UPDATE_PHASE ist zugleich der Schleifen-Guard:
+# 'apply' re-exec't nie. MIDEA_IECO_RESOLVED_DIR haelt das Zielverzeichnis stabil
+# (siehe Abschnitt 0). MIDEA_IECO_UPDATE_TMP reicht die /tmp-Kopie bis zur
+# apply-Phase durch, die sie - als einzige nicht mehr exec'ende Phase - ueber den
+# EXIT-Trap sicher entfernt (ein exec verwirft den Trap, siehe cleanup()).
+# =============================================================================
+run_update() {
+    case "$UPDATE_PHASE" in
+        "")
+            # Update setzt eine echte, auf Platte liegende Installation voraus
+            # (nicht curl|bash). Klarer Abbruch statt kryptischem Folgefehler.
+            [[ -n "$SCRIPT_DIR" && -f "$INSTALL_DIR/install.sh" ]] \
+                || error "Update benoetigt eine installierte Kopie. install.sh nicht gefunden unter $INSTALL_DIR."
+            local tmp; tmp="$(mktemp)"
+            cp "$INSTALL_DIR/install.sh" "$tmp"
+            exec env MIDEA_IECO_UPDATE_PHASE=fetch \
+                     MIDEA_IECO_RESOLVED_DIR="$INSTALL_DIR" \
+                     MIDEA_IECO_UPDATE_TMP="$tmp" \
+                     bash "$tmp" --update
+            ;;
+        fetch)
+            # Die relaunch-Temp-Kopie (via env uebergeben) SCHON HIER fuer das
+            # Aufraeumen registrieren, nicht erst in der apply-Phase: bricht diese
+            # fetch-Phase VOR dem 'exec' ab (z.B. ZIP-Update ohne Netz -> curl
+            # scheitert unter 'set -e'), entfernt der EXIT-Trap die Kopie, statt
+            # sie bei jedem Fehlversuch leaken zu lassen. Beim erfolgreichen 'exec'
+            # wird der Trap ohnehin verworfen -> die Kopie bleibt fuer die apply-
+            # Phase erhalten (die sie dann selbst raeumt).
+            [[ -n "${MIDEA_IECO_UPDATE_TMP:-}" ]] && CLEANUP_PATHS+=("${MIDEA_IECO_UPDATE_TMP}")
+            ensure_base_tools
+            local prev_ref; prev_ref="$(read_version_ref)"
+            fetch_project_files update
+            exec env MIDEA_IECO_UPDATE_PHASE=apply \
+                     MIDEA_IECO_RESOLVED_DIR="$INSTALL_DIR" \
+                     MIDEA_IECO_UPDATE_TMP="${MIDEA_IECO_UPDATE_TMP:-}" \
+                     MIDEA_IECO_PREV_REF="$prev_ref" \
+                     bash "$INSTALL_DIR/install.sh" --update
+            ;;
+        apply)
+            # Temp-Kopie aus der relaunch-Phase am Ende sicher entfernen: diese
+            # Phase exec't nicht mehr, ihr EXIT-Trap feuert also.
+            [[ -n "${MIDEA_IECO_UPDATE_TMP:-}" ]] && CLEANUP_PATHS+=("${MIDEA_IECO_UPDATE_TMP}")
+            cd "$INSTALL_DIR"
+            setup_venv_and_deps
+            install_all_wrappers
+            deactivate 2>/dev/null || true
+            local new_ref; new_ref="$(read_version_ref)"
+            local prev_ref="${MIDEA_IECO_PREV_REF:-unbekannt}"
+            echo ""
+            echo -e "${GREEN}=================================================${NC}"
+            echo -e "${GREEN}   Update abgeschlossen!                        ${NC}"
+            echo -e "${GREEN}=================================================${NC}"
+            if [[ "$prev_ref" == "$new_ref" ]]; then
+                info "Version: $new_ref (war bereits aktuell)"
+            else
+                info "Version: $prev_ref -> $new_ref"
+            fi
+            info "Aenderungen siehe CHANGELOG.md"
+            echo ""
+            exit 0
+            ;;
+        *)
+            error "Unbekannte interne Update-Phase: '$UPDATE_PHASE'."
+            ;;
+    esac
+}
+
+# =============================================================================
+# Betriebsmodus-Weiche: Der Update-Modus laeuft vollstaendig in run_update und
+# verlaesst das Skript per exec bzw. exit - der darunterstehende
+# Installations-/Onboarding-Fluss wird dann nie erreicht.
+# =============================================================================
+if [[ "$MODE" == "update" ]]; then
+    run_update
 fi
+
+# =============================================================================
+# ===  Ab hier: Installations-/Onboarding-Fluss (nur MODE=install)          ===
+# =============================================================================
+
+# 2. Grundwerkzeuge
+ensure_base_tools
+
+# 3. Installationsverzeichnis anlegen
+ensure_install_dir "$INSTALL_DIR"
+# BIN_DIR wird NICHT hier vorbereitet - es wird beim Wrapper-Schritt bei Bedarf
+# angelegt und der Wrapper per 'install'/sudo hineingelegt, ohne dessen
+# Besitzverhaeltnisse zu aendern.
+
+# 4. Projekt-Dateien besorgen
+fetch_project_files install
 
 cd "$INSTALL_DIR"
 
-# =============================================================================
 # 5. Virtuelle Umgebung + Abhaengigkeiten
+setup_venv_and_deps
+
 # =============================================================================
-if [[ -d "venv" ]]; then
-    info "venv existiert bereits - ueberspringe Erstellung."
-else
-    info "Erstelle virtuelle Umgebung..."
-    python3 -m venv venv
-    ok "venv erstellt."
+# 5b. Konfig-sicherer Re-Run
+# =============================================================================
+# Bereits eingerichtet + kein --reconfigure -> NUR Wrapper erneuern und beenden,
+# statt das interaktive Onboarding zu wiederholen und dabei die vorhandene
+# devices.json zu ueberschreiben. So ist ein blosser Installer-Neustart
+# (z.B. erneutes curl|bash) datensicher; zum reinen Aktualisieren dient ohnehin
+# 'midea-ieco-update'.
+if [[ "$RECONFIGURE" -eq 0 ]] && is_already_configured; then
+    install_all_wrappers
+    deactivate 2>/dev/null || true
+    echo ""
+    info "Bereits eingerichtet - Onboarding uebersprungen (devices.json unangetastet)."
+    info "  Aktualisieren:        midea-ieco-update"
+    info "  Neu einrichten:       install.sh --reconfigure"
+    exit 0
 fi
 
-# shellcheck disable=SC1091
-source venv/bin/activate
-pip install --quiet --upgrade pip
-# Bevorzugt die gepinnten Versionen aus requirements.txt (reproduzierbar und
-# gegen Breaking Changes in msmart-ng/midea-local abgesichert). Fehlt die Datei
-# - etwa bei einem unvollstaendigen Download -, wird ungepinnt nachinstalliert.
-if [[ -f requirements.txt ]]; then
-    pip install --quiet -r requirements.txt
-else
-    warn "requirements.txt nicht gefunden - installiere msmart-ng/midea-local ungepinnt."
-    # typing_extensions explizit mitnehmen: midea-local 6.6.1 importiert es,
-    # deklariert es aber NICHT als Dependency (s. requirements.txt-Kommentar).
-    pip install --quiet msmart-ng midea-local typing_extensions
+# --reconfigure auf bestehender Installation: vorhandene devices.json sichern,
+# bevor das Onboarding sie neu schreibt (Undo-Moeglichkeit). Die .bak-Datei ist
+# git-ignoriert, da sie echte Token/Key-Werte enthaelt.
+if [[ "$RECONFIGURE" -eq 1 && -f devices.json ]]; then
+    cp -p devices.json devices.json.bak
+    ok "Vorhandene devices.json nach devices.json.bak gesichert."
 fi
-ok "Abhaengigkeiten installiert (msmart-ng, midea-local)."
-
-# Sofortige Funktionspruefung der Kern-Abhaengigkeiten, BEVOR nach Zugangsdaten
-# gefragt wird. midea-local 6.6.1 importiert 'typing_extensions', deklariert es
-# aber nicht - fehlt es, taucht der Fehler sonst erst spaeter als roher Traceback
-# mitten in der Geraetesuche auf, nachdem der Nutzer schon sein Passwort
-# eingegeben hat. Schlaegt die Pruefung fehl, wird die bekannte Luecke
-# AUTOMATISCH geschlossen (typing_extensions nachinstallieren) und erneut
-# geprueft - der Installer heilt sich also selbst, statt den Nutzer abzuweisen.
-if ! check_core_imports; then
-    warn "Kern-Abhaengigkeiten nicht importierbar - installiere fehlende Pakete nach..."
-    pip install --quiet typing_extensions || true
-    if ! check_core_imports; then
-        error "Kern-Abhaengigkeiten weiterhin nicht importierbar - automatische Reparatur fehlgeschlagen.
-  Bitte manuell pruefen (Netzwerk?) und erneut starten:
-    \"$INSTALL_DIR/venv/bin/pip\" install -r \"$INSTALL_DIR/requirements.txt\""
-    fi
-    ok "Fehlende Kern-Abhaengigkeit(en) automatisch nachinstalliert."
-else
-    ok "Kern-Abhaengigkeiten importierbar (midealocal, msmart)."
-fi
-
-# Version rein informativ anzeigen - diese Zeilen duerfen den Installer unter
-# KEINEN Umstaenden abbrechen. Zwei Fallstricke unter 'set -e -o pipefail':
-#  1) KEIN 'exit' im awk. Ein frueher Pipe-Schluss (awk beendet sich nach dem
-#     ersten Treffer) toetet den noch schreibenden 'pip show'-Prozess per
-#     SIGPIPE; die Pipeline endet dann != 0 (real beobachtet: pip 120/141) und
-#     'set -e' bricht die GESAMTE Installation lautlos ab - genau nach dem
-#     Abhaengigkeiten-OK, noch vor der ersten Rueckfrage. Ohne 'exit' liest awk
-#     die Ausgabe vollstaendig, der Producer laeuft sauber zu Ende. Es gibt je
-#     Paket genau eine 'Version:'-Zeile, das Ergebnis bleibt also eindeutig.
-#  2) '|| true' als Guard. Liefert 'pip show' selbst einen Fehler (z.B. Paket
-#     nicht gefunden), soll die Zuweisung NICHT unter 'set -e' abbrechen -
-#     stattdessen greift der ${VAR:-unbekannt}-Fallback unten.
-MSMART_VER=$(pip show msmart-ng 2>/dev/null | awk '/^Version:/{print $2}') || true
-MIDEALOCAL_VER=$(pip show midea-local 2>/dev/null | awk '/^Version:/{print $2}') || true
-info "  msmart-ng    : ${MSMART_VER:-unbekannt}"
-info "  midea-local  : ${MIDEALOCAL_VER:-unbekannt}"
 
 # =============================================================================
 # 6. Hinweis: Feste IP-Adressen im Router
@@ -610,49 +944,7 @@ fi
 # 12. Wrapper in BIN_DIR anlegen
 # =============================================================================
 chmod +x midea_ieco_ensure.py midea_refresh_tokens.py 2>/dev/null || true
-
-# BIN_DIR bei Bedarf anlegen - OHNE chown. Root-eigene bin-Verzeichnisse (z.B.
-# /opt/local/bin) sind der Normalfall; wir legen EINE Datei hinein, statt das
-# Verzeichnis zu uebernehmen.
-if [[ ! -d "$BIN_DIR" ]]; then
-    mkdir -p "$BIN_DIR" 2>/dev/null || { info "Benoetige sudo, um $BIN_DIR anzulegen..."; sudo mkdir -p "$BIN_DIR"; }
-fi
-
-WRAPPER_PATH="$BIN_DIR/midea-ieco"
-# Wrapper zunaechst in eine temporaere Datei schreiben, dann installieren - so
-# laesst sich bei nicht beschreibbarem (root-eigenem) BIN_DIR gezielt EINE Datei
-# per sudo ablegen, ohne die Besitzverhaeltnisse des Verzeichnisses zu aendern.
-WRAPPER_TMP="$(mktemp)"
-CLEANUP_PATHS+=("$WRAPPER_TMP")
-# $INSTALL_DIR shell-sicher vorquoten (printf %q), statt es hier nur manuell in
-# "..." einzuschliessen: ein Pfad mit " oder $(...) wuerde sonst die Quotierung
-# der ERZEUGTEN Wrapper-Datei aufbrechen bzw. beim spaeteren Ausfuehren des
-# Wrappers erneut als Shell-Syntax interpretiert. %q liefert bereits eine
-# selbst-quotende Form - direkt an die Pfadsuffixe angehaengt ergibt das
-# weiterhin EIN zusammenhaengendes Wort (keine zusaetzlichen "..." noetig;
-# die wuerden bei einer Single-Quote-Ausgabeform von %q sogar Literal-
-# Apostrophe in den Pfad einbauen).
-INSTALL_DIR_Q="$(printf '%q' "$INSTALL_DIR")"
-cat > "$WRAPPER_TMP" <<EOF
-#!/usr/bin/env bash
-# Automatisch von install.sh erzeugter Wrapper.
-exec ${INSTALL_DIR_Q}/venv/bin/python3 ${INSTALL_DIR_Q}/midea_ieco_ensure.py "\$@"
-EOF
-
-if [[ -w "$BIN_DIR" ]]; then
-    install -m 0755 "$WRAPPER_TMP" "$WRAPPER_PATH" 2>/dev/null \
-        || { cp "$WRAPPER_TMP" "$WRAPPER_PATH" && chmod 0755 "$WRAPPER_PATH"; }
-else
-    info "Benoetige sudo, um den Wrapper nach $BIN_DIR zu schreiben..."
-    sudo install -m 0755 "$WRAPPER_TMP" "$WRAPPER_PATH" 2>/dev/null \
-        || { sudo cp "$WRAPPER_TMP" "$WRAPPER_PATH" && sudo chmod 0755 "$WRAPPER_PATH"; }
-fi
-ok "Wrapper-Skript angelegt: $WRAPPER_PATH"
-
-case ":$PATH:" in
-    *":$BIN_DIR:"*) ;;
-    *) warn "$BIN_DIR ist nicht im PATH. Fuege ggf. hinzu mit: export PATH=\"$BIN_DIR:\$PATH\"" ;;
-esac
+install_all_wrappers
 
 # =============================================================================
 # 13. Schnelltest
@@ -721,6 +1013,7 @@ echo -e "${GREEN}=================================================${NC}"
 echo ""
 echo "  Verzeichnis:        $INSTALL_DIR"
 echo "  Wrapper-Befehl:     midea-ieco <Geraetename>   (falls $BIN_DIR im PATH ist)"
+echo "  Aktualisieren:      midea-ieco-update"
 echo "  Direkter Aufruf:    cd $INSTALL_DIR && venv/bin/python3 midea_ieco_ensure.py <Geraetename>"
 echo "  Alle Geraete:       venv/bin/python3 midea_ieco_ensure.py all"
 echo "  Token auffrischen:  venv/bin/python3 midea_refresh_tokens.py --all"

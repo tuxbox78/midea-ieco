@@ -2,6 +2,9 @@
 # (Exact filenames, so the tracked *.example.json templates are NOT ignored.)
 credentials.json
 devices.json
+# Backup written by `install.sh --reconfigure` before it overwrites devices.json.
+# Holds the same real token/key values, so it must never be committed either.
+devices.json.bak
 # Short-lived credential file handed to the midealocal CLI; normally removed
 # right after use, ignored so a killed run can never leave it tracked.
 midea-local.json

@@ -57,7 +57,7 @@ Der Installer erledigt automatisch:
 3. Abfrage deiner Midea-Cloud-Zugangsdaten und Ausführung der Geräteerkennung
 4. Interaktive Eingabe von Gerätenamen, IPs und IDs zum Aufbau von `devices.json`
 5. Abruf der Token-/Key-Paare und sichere Speicherung (`chmod 600`)
-6. Anlegen eines `midea-ieco`-Wrapper-Befehls sowie optionaler Testlauf und optionale Cron-Job-Einrichtung
+6. Anlegen der Wrapper-Befehle `midea-ieco` und `midea-ieco-update` sowie optionaler Testlauf und optionale Cron-Job-Einrichtung
 
 ### Manuelle Installation (Alternative)
 
@@ -178,6 +178,22 @@ Ein neues Gerät lässt sich auch direkt über Name und IP-Adresse hinzufügen:
 ```bash
 python3 midea_refresh_tokens.py --name Kueche --host 192.168.0.190
 ```
+
+## Aktualisieren
+
+Um eine bestehende Installation auf den neuesten Stand zu bringen:
+
+```bash
+midea-ieco-update
+```
+
+Das erneuert **den Code, die gepinnten Abhängigkeiten und die Wrapper-Befehle** und rührt `devices.json`, `credentials.json` sowie Cron-Jobs **nicht** an. Es funktioniert unabhängig davon, ob der Installer per `git` oder per ZIP-Download eingerichtet hat. Der Befehl wird bei der Installation automatisch angelegt, direkt neben `midea-ieco` im Bin-Verzeichnis (liegt also im `PATH`, sofern dieses Verzeichnis darin ist).
+
+Intern startet er den Installer in einem eigenen Update-Modus (`install.sh --update`): keine Einrichtungsfragen, keine Neukonfiguration. Er lädt die neuen Dateien zuerst und startet dann die frisch geladene Skriptkopie neu, sodass die laufende Update-Ausführung nie die Datei ist, die gerade überschrieben wird. Anschließend zeigt er die Versionsänderung an und verweist auf [`CHANGELOG.md`](CHANGELOG.md).
+
+**Ein erneuter Installer-Lauf ist ebenfalls sicher.** Startest du `install.sh` auf einem bereits eingerichteten System erneut, erkennt es die vorhandene `devices.json`, überspringt das Onboarding, frischt Code/Abhängigkeiten/Wrapper auf und beendet sich — deine Gerätekonfiguration wird nicht überschrieben. Zum bewussten Neu-Einrichten dient `install.sh --reconfigure` (die vorhandene `devices.json` wird vorher nach `devices.json.bak` gesichert).
+
+> **Hinweis:** Wer auf `git`-basierte Updates setzt, sollte `install.sh` (oder andere versionierte Dateien) nicht direkt editieren — lokale Änderungen lassen den Fast-Forward-`git pull` aussetzen; der Updater meldet das und macht mit den vorhandenen Dateien weiter. Nutze stattdessen die Umgebungsvariablen `MIDEA_IECO_DIR` / `MIDEA_IECO_BIN_DIR`.
 
 ## Tägliche Nutzung
 
@@ -344,7 +360,7 @@ Die App bietet keine bedingte Logik wie „iECO nur aktivieren, wenn die Anlage 
 
 | Datei | Zweck |
 |---|---|
-| `install.sh` | Einmal-Installer: richtet venv, Abhängigkeiten, `devices.json`, `credentials.json`, Tokens und Cron-Job ein |
+| `install.sh` | Einmal-Installer (zugleich `--update`-Motor hinter `midea-ieco-update`): richtet venv, Abhängigkeiten, `devices.json`, `credentials.json`, Tokens, die Wrapper-Befehle und Cron-Job ein |
 | `midea_ieco_ensure.py` | Prüft und setzt den Einschaltzustand und iECO für ein oder alle konfigurierten Geräte |
 | `midea_refresh_tokens.py` | Holt frische Token-/Key-Paare von der Midea Cloud und aktualisiert `devices.json` |
 | `midea_ieco_ensure.sh` | Wrapper für SSH/Kurzbefehle: startet `midea_ieco_ensure.py` mit dem venv-Python und reicht alle Argumente weiter |

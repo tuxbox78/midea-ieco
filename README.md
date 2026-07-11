@@ -57,7 +57,7 @@ The installer will:
 3. Ask for your Midea Cloud credentials and run device discovery
 4. Let you enter device names, IPs, and IDs interactively to build `devices.json`
 5. Retrieve token/key pairs and store them securely (`chmod 600`)
-6. Create a `midea-ieco` wrapper command and offer an optional test run and cron job setup
+6. Create the `midea-ieco` and `midea-ieco-update` wrapper commands and offer an optional test run and cron job setup
 
 ### Manual installation (alternative)
 
@@ -177,6 +177,22 @@ You can also add a new device directly by name and IP address:
 ```bash
 python3 midea_refresh_tokens.py --name Kitchen --host 192.168.0.190
 ```
+
+## Updating
+
+To update an existing installation to the latest version:
+
+```bash
+midea-ieco-update
+```
+
+This refreshes the **code, the pinned dependencies, and the wrapper commands**, and does **not** touch your `devices.json`, `credentials.json`, or cron jobs. It works whether the installer set things up via `git` or a ZIP download. The command is created automatically during installation, next to `midea-ieco` in the bin directory (so it is on your `PATH` if that directory is).
+
+Under the hood it re-runs the installer in a dedicated update mode (`install.sh --update`): no onboarding questions, no reconfiguration. It fetches the new files first and then re-executes the freshly fetched script, so the running updater is never the file being overwritten. Afterwards it prints the version change and points to [`CHANGELOG.md`](CHANGELOG.md).
+
+**Re-running the installer is safe, too.** If you run `install.sh` again on a configured system, it detects the existing `devices.json`, skips onboarding, refreshes code/dependencies/wrappers, and exits — it will not overwrite your device configuration. To deliberately redo device setup, run `install.sh --reconfigure` (your existing `devices.json` is backed up to `devices.json.bak` first).
+
+> **Note:** If you rely on `git`-based updates, don't edit `install.sh` (or other tracked files) in place — local modifications make the fast-forward `git pull` skip, and the updater will tell you and continue with the existing files. Use the `MIDEA_IECO_DIR` / `MIDEA_IECO_BIN_DIR` environment variables instead of editing the script.
 
 ## Daily use
 
@@ -343,7 +359,7 @@ The app does not provide conditional logic such as "enable iECO only if the unit
 
 | File | Purpose |
 |---|---|
-| `install.sh` | One-shot installer: sets up venv, dependencies, `devices.json`, `credentials.json`, tokens, and cron job |
+| `install.sh` | One-shot installer (also the `--update` engine behind `midea-ieco-update`): sets up venv, dependencies, `devices.json`, `credentials.json`, tokens, the wrapper commands, and cron job |
 | `midea_ieco_ensure.py` | Checks and sets power status and iECO for one or all configured devices |
 | `midea_refresh_tokens.py` | Retrieves fresh token/key pairs from Midea Cloud and updates `devices.json` |
 | `midea_ieco_ensure.sh` | Wrapper for SSH/Shortcuts: runs `midea_ieco_ensure.py` with the venv Python and forwards all arguments |

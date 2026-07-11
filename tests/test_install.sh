@@ -5,6 +5,17 @@
 # install.sh extrahiert und mit gestubbten Hilfsfunktionen gesourct, damit die
 # Logik ohne einen echten (interaktiven, sudo-behafteten) Installer-Lauf
 # pruefbar ist. Der Installer selbst wird NIE ausgefuehrt.
+#
+# Dateiweite, bewusst begruendete shellcheck-Ausnahmen (VOR dem ersten Kommando,
+# damit sie fuer die ganze Datei gelten):
+#  SC2034: Variablen wie INSTALL_DIR/BIN_DIR/CLEANUP_PATHS werden von den per
+#          'eval "$(extract_func ...)"' eingezogenen install.sh-Funktionen ueber
+#          globalen Scope genutzt - fuer shellcheck (der nur die Testdatei sieht)
+#          unsichtbar, daher scheinbar "unused".
+#  SC2030/SC2031: PATH wird ABSICHTLICH nur innerhalb von Subshells veraendert,
+#          damit Stub-Kommandos (git/pip/python3) nicht in spaetere Abschnitte
+#          durchsickern - die "Modifikation geht verloren"-Info ist hier gewollt.
+# shellcheck disable=SC2034,SC2030,SC2031
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -40,9 +51,15 @@ extract_func() {  # $1=name $2=file
 # Stubs fuer Hilfsfunktionen, die extrahierte Funktionen evtl. aufrufen.
 info() { :; }
 warn() { :; }
+ok()   { :; }
 # Wie in install.sh bricht error() ab (exit) - Funktionen, die error() rufen
 # koennen, werden daher in einer Subshell getestet.
 error() { echo "ERROR: $*" >&2; exit 1; }
+
+# Manche extrahierten Funktionen (install_bin_wrapper, download_and_overlay_zip)
+# haengen Temp-Pfade an CLEANUP_PATHS an - hier vordefinieren, damit das unter
+# 'set -u' nicht scheitert.
+CLEANUP_PATHS=()
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -203,7 +220,9 @@ echo "== MSMART_VER/MIDEALOCAL_VER: pipefail- UND SIGPIPE-sicher (#17 + Regressi
 extract_between() {  # $1=start-regex $2=end-regex(inclusive) $3=file
     awk -v s="$1" -v e="$2" '$0 ~ s{f=1} f{print} f && $0 ~ e{exit}' "$3"
 }
-VERSRC="$(extract_between '^MSMART_VER=' '^MIDEALOCAL_VER=' "$INSTALL")"
+# '^[[:space:]]*' toleriert die Einrueckung: die Versions-Zeilen stehen jetzt
+# eingerueckt in der Funktion setup_venv_and_deps (frueher auf Spalte 0).
+VERSRC="$(extract_between '^[[:space:]]*MSMART_VER=' '^[[:space:]]*MIDEALOCAL_VER=' "$INSTALL")"
 
 PIPBIN="$WORK/pipbin"; mkdir -p "$PIPBIN"
 
@@ -300,15 +319,17 @@ rc=0; { [ ! -s "$WORK/ieco.log" ] && [ ! -s "$WORK/refresh.log" ]; } || rc=1
 assert "$rc" "truncate -s 0 mit zwei Operanden leert beide Dateien"
 
 # ---------------------------------------------------------------------------
-echo "== Wrapper-Heredoc shell-sicher gequotet (#15) =="
+echo "== install_bin_wrapper: shell-sicher gequotet, beide Wrapper (#15 + Update) =="
 # ---------------------------------------------------------------------------
-# Scharfer Testpfad: Anfuehrungszeichen, \$(...)-Command-Substitution-Syntax,
-# Leerzeichen - genau die Zeichenklassen, die die alte manuelle "..."-
-# Umschliessung gebrochen bzw. bei Ausfuehrung des generierten Wrappers erneut
-# als Shell-Syntax interpretiert haette.
+# Testet die ECHTE Funktion install_bin_wrapper (statt das Muster nachzubauen).
+# Scharfer Testpfad: Anfuehrungszeichen, $(...)-Command-Substitution-Syntax,
+# Leerzeichen - genau die Zeichenklassen, die eine manuelle "..."-Umschliessung
+# gebrochen bzw. bei Ausfuehrung des Wrappers erneut als Shell-Syntax
+# interpretiert haette.
+eval "$(extract_func install_bin_wrapper "$INSTALL")"
+
 MARKER="$WORK/pwned_marker"
 TRICKY_DIR="$WORK/harn\"ess\$(touch $MARKER)dir"
-mkdir -p "$TRICKY_DIR"
 mkdir -p "$TRICKY_DIR/venv/bin"
 cat > "$TRICKY_DIR/venv/bin/python3" <<'STUB'
 #!/usr/bin/env bash
@@ -316,30 +337,37 @@ echo "ARGV0=$0"
 STUB
 chmod +x "$TRICKY_DIR/venv/bin/python3"
 : > "$TRICKY_DIR/midea_ieco_ensure.py"
+: > "$TRICKY_DIR/install.sh"
 
-WRAPPER_OUT="$WORK/generated_wrapper"
-( INSTALL_DIR="$TRICKY_DIR"
-  INSTALL_DIR_Q="$(printf '%q' "$INSTALL_DIR")"
-  cat > "$WRAPPER_OUT" <<EOF
-#!/usr/bin/env bash
-# Automatisch von install.sh erzeugter Wrapper.
-exec ${INSTALL_DIR_Q}/venv/bin/python3 ${INSTALL_DIR_Q}/midea_ieco_ensure.py "\$@"
-EOF
-)
-chmod +x "$WRAPPER_OUT"
+WBIN="$WORK/wbin"; mkdir -p "$WBIN"
+BIN_DIR="$WBIN"
+Q="$(printf '%q' "$TRICKY_DIR")"
 
-rc=0; bash -n "$WRAPPER_OUT" 2>/dev/null || rc=1
-assert "$rc" "generierter Wrapper ist syntaktisch valide (bash -n)"
+# Steuerungs-Wrapper (wie install_all_wrappers ihn baut).
+install_bin_wrapper "midea-ieco" "exec ${Q}/venv/bin/python3 ${Q}/midea_ieco_ensure.py \"\$@\"" >/dev/null 2>&1
+
+rc=0; bash -n "$WBIN/midea-ieco" 2>/dev/null || rc=1
+assert "$rc" "install_bin_wrapper: erzeugter Wrapper syntaktisch valide (bash -n)"
 
 rc=0; [ -e "$MARKER" ] && rc=1
-assert "$rc" "kein Command-Substitution-Ausbruch beim Generieren (kein Marker-File)"
+assert "$rc" "install_bin_wrapper: kein Command-Substitution-Ausbruch beim Erzeugen"
 
-got_argv0="$("$WRAPPER_OUT" 2>/dev/null | sed -n 's/^ARGV0=//p')"
+got_argv0="$("$WBIN/midea-ieco" 2>/dev/null | sed -n 's/^ARGV0=//p')"
 rc=0; [ "$got_argv0" = "$TRICKY_DIR/venv/bin/python3" ] || rc=1
-assert "$rc" "Wrapper ruft bei Ausfuehrung exakt den urspruenglichen Pfad auf"
+assert "$rc" "install_bin_wrapper: ruft bei Ausfuehrung exakt den urspruenglichen Pfad auf"
 
 rc=0; [ -e "$MARKER" ] && rc=1
-assert "$rc" "kein Command-Substitution-Ausbruch beim Ausfuehren (kein Marker-File)"
+assert "$rc" "install_bin_wrapper: kein Ausbruch beim Ausfuehren (kein Marker-File)"
+
+# Update-Wrapper: 'bash <pfad>/install.sh --update "$@"' - muss den Modus und
+# alle Argumente pfad-sicher weiterreichen.
+install_bin_wrapper "midea-ieco-update" "exec bash ${Q}/install.sh --update \"\$@\"" >/dev/null 2>&1
+rc=0; bash -n "$WBIN/midea-ieco-update" 2>/dev/null || rc=1
+assert "$rc" "install_bin_wrapper: Update-Wrapper syntaktisch valide (bash -n)"
+rc=0; grep -q -- '--update' "$WBIN/midea-ieco-update" || rc=1
+assert "$rc" "install_bin_wrapper: Update-Wrapper reicht --update weiter"
+rc=0; grep -qF '"$@"' "$WBIN/midea-ieco-update" || rc=1
+assert "$rc" "install_bin_wrapper: Update-Wrapper reicht alle Argumente weiter (\$@)"
 
 # ---------------------------------------------------------------------------
 echo "== resolve_extracted_root_dir: ZIP-Fallback-Extraktion (L3) =="
@@ -462,6 +490,210 @@ assert "$rc" "parse_discovered: zwei Zeilen -> zwei korrekte IP/ID-Paare"
 parse_discovered "$(printf '192.168.0.7\t789\n\t')"
 rc=0; { [ "${#DISC_IPS[@]}" -eq 1 ] && [ "${DISC_IPS[0]}" = "192.168.0.7" ] && [ "${DISC_IDS[0]}" = "789" ]; } || rc=1
 assert "$rc" "parse_discovered: unvollstaendige Zeile wird uebersprungen"
+
+# ---------------------------------------------------------------------------
+echo "== read_version_ref: git-Hash / CHANGELOG-Fallback / unbekannt =="
+# ---------------------------------------------------------------------------
+eval "$(extract_func read_version_ref "$INSTALL")"
+
+# (a) Git-Clone vorhanden -> Kurz-Hash bevorzugt (Stub-git in PATH + .git-Dir).
+RVR="$WORK/rvr"; mkdir -p "$RVR/.git"
+GBIN="$WORK/gbin"; mkdir -p "$GBIN"
+cat > "$GBIN/git" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in *"rev-parse"*) echo "deadbee"; exit 0 ;; *) exit 0 ;; esac
+EOF
+chmod +x "$GBIN/git"
+INSTALL_DIR="$RVR"
+rc=0; [ "$(PATH="$GBIN:$PATH" read_version_ref)" = "deadbee" ] || rc=1
+assert "$rc" "read_version_ref: git-Kurz-Hash bevorzugt"
+
+# (b) Kein Git-Clone -> oberste CHANGELOG-RELEASE-Version (nicht 'Unreleased').
+RVR2="$WORK/rvr2"; mkdir -p "$RVR2"
+printf '# Changelog\n\n## [Unreleased]\n\n## [1.2.3] - 2026-01-01\n' > "$RVR2/CHANGELOG.md"
+INSTALL_DIR="$RVR2"
+rc=0; [ "$(read_version_ref)" = "1.2.3" ] || rc=1
+assert "$rc" "read_version_ref: ohne git -> CHANGELOG-Release-Version (ueberspringt 'Unreleased')"
+
+# (c) Weder git noch CHANGELOG -> 'unbekannt' (nie leer, nie Abbruch).
+RVR3="$WORK/rvr3"; mkdir -p "$RVR3"
+INSTALL_DIR="$RVR3"
+rc=0; [ "$(read_version_ref)" = "unbekannt" ] || rc=1
+assert "$rc" "read_version_ref: ohne git und ohne CHANGELOG -> 'unbekannt'"
+
+# ---------------------------------------------------------------------------
+echo "== is_already_configured: devices.json-Praesenz (konfig-sicherer Re-Run) =="
+# ---------------------------------------------------------------------------
+eval "$(extract_func is_already_configured "$INSTALL")"
+IAC="$WORK/iac"; mkdir -p "$IAC"
+INSTALL_DIR="$IAC"
+rc=0; is_already_configured && rc=1
+assert "$rc" "is_already_configured: ohne devices.json -> falsch (Onboarding laeuft)"
+: > "$IAC/devices.json"
+rc=0; is_already_configured || rc=1
+assert "$rc" "is_already_configured: mit devices.json -> wahr (Onboarding wird uebersprungen)"
+
+# ---------------------------------------------------------------------------
+echo "== fetch_project_files: git-pull / dirty-skip / ZIP-Update (Luecke A) =="
+# ---------------------------------------------------------------------------
+eval "$(extract_func fetch_project_files "$INSTALL")"
+# Netz vermeiden: download_and_overlay_zip stubben (protokolliert nur).
+FPF_LOG="$WORK/fpf.log"
+download_and_overlay_zip() { echo "OVERLAY" >> "$FPF_LOG"; }
+GIT2LOG="$WORK/git2.log"
+GBIN2="$WORK/gbin2"; mkdir -p "$GBIN2"
+cat > "$GBIN2/git" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >> "$GIT2LOG"
+case "\$*" in
+  *"diff --quiet"*)   exit \${FAKE_GIT_DIFF_RC:-0} ;;
+  *"pull --ff-only"*) exit \${FAKE_GIT_PULL_RC:-0} ;;
+  *) exit 0 ;;
+esac
+EOF
+chmod +x "$GBIN2/git"
+
+# (a) Git-Clone, sauber -> git pull --ff-only wird aufgerufen.
+FPF="$WORK/fpf_git"; mkdir -p "$FPF/.git"
+INSTALL_DIR="$FPF"; : > "$GIT2LOG"; : > "$FPF_LOG"
+rc=0; ( PATH="$GBIN2:$PATH"; fetch_project_files update ) || rc=1
+rc2=0; { [ "$rc" -eq 0 ] && grep -q 'pull --ff-only' "$GIT2LOG"; } || rc2=1
+assert "$rc2" "fetch_project_files: Git-Clone sauber -> git pull --ff-only"
+
+# (b) Git-Clone mit lokalen Aenderungen (diff rc 1) -> KEIN pull (kein Datenverlust).
+: > "$GIT2LOG"
+rc=0; ( PATH="$GBIN2:$PATH"; export FAKE_GIT_DIFF_RC=1; fetch_project_files update ) || rc=1
+rc2=0; { [ "$rc" -eq 0 ] && ! grep -q 'pull --ff-only' "$GIT2LOG"; } || rc2=1
+assert "$rc2" "fetch_project_files: lokale Aenderungen -> pull uebersprungen, klar gemeldet"
+
+# (c) Kein Git-Clone + Modus 'update' -> ZIP-Overlay (schliesst die ZIP-Update-Luecke).
+FPFZ="$WORK/fpf_zip"; mkdir -p "$FPFZ"
+INSTALL_DIR="$FPFZ"; : > "$FPF_LOG"
+rc=0; ( PATH="$GBIN2:$PATH"; fetch_project_files update ) || rc=1
+rc2=0; { [ "$rc" -eq 0 ] && grep -q 'OVERLAY' "$FPF_LOG"; } || rc2=1
+assert "$rc2" "fetch_project_files: kein .git + update -> ZIP-Overlay statt No-Op"
+
+# ---------------------------------------------------------------------------
+echo "== install.sh --update: End-to-End (Phasen, kein Onboarding, beide Wrapper) =="
+# ---------------------------------------------------------------------------
+# Vollstaendig gestubbte Umgebung: kein Netz, keine echte venv, keine Hardware.
+# Beweist, dass der Update-Modus die drei Re-Exec-Phasen durchlaeuft, das
+# Onboarding NIE erreicht (also devices.json nicht ueberschreibt) und beide
+# Wrapper erneuert.
+UPD="$WORK/upd_install"; mkdir -p "$UPD/.git" "$UPD/venv/bin"
+cp "$INSTALL" "$UPD/install.sh"
+: > "$UPD/midea_ieco_ensure.py"
+: > "$UPD/midea_refresh_tokens.py"
+printf 'msmart-ng==1\n' > "$UPD/requirements.txt"
+printf '# Changelog\n\n## [9.9.9] - 2026-01-01\n' > "$UPD/CHANGELOG.md"
+printf 'deactivate() { :; }\n' > "$UPD/venv/bin/activate"   # minimales Fake-venv
+# Echte (secret-haltige) devices.json vorlegen: der Update-Lauf MUSS sie
+# unveraendert lassen (Ziel b). Wird unten per Pruefsumme direkt verifiziert.
+printf '{"devices":[{"name":"Wohnzimmer","token":"geheim","key":"geheim"}]}\n' > "$UPD/devices.json"
+DJ_SUM_BEFORE="$(cksum < "$UPD/devices.json")"
+UPDBIN="$WORK/upd_bin"; mkdir -p "$UPDBIN"
+
+SBIN="$WORK/upd_stub"; mkdir -p "$SBIN"
+cat > "$SBIN/git" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *"diff --quiet"*)   exit 0 ;;
+  *"pull --ff-only"*) exit 0 ;;
+  *"rev-parse"*)      echo "newhash"; exit 0 ;;
+  *) exit 0 ;;
+esac
+EOF
+cat > "$SBIN/python3" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *"version_info.major"*) echo 3 ;;
+  *"version_info.minor"*) echo 12 ;;
+  *"-m venv --help"*)     exit 0 ;;
+  *"import midealocal.cli"*) exit 0 ;;
+  *) exit 0 ;;
+esac
+EOF
+cat > "$SBIN/pip" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in *"show"*) echo "Version: 9.9.9" ;; *) exit 0 ;; esac
+EOF
+chmod +x "$SBIN/git" "$SBIN/python3" "$SBIN/pip"
+
+UPD_OUT="$WORK/upd_out.txt"; UPD_RC=0
+( PATH="$SBIN:$PATH" MIDEA_IECO_BIN_DIR="$UPDBIN" \
+  bash "$UPD/install.sh" --update ) > "$UPD_OUT" 2>&1 || UPD_RC=$?
+
+rc=0; [ "$UPD_RC" -eq 0 ] || rc=1
+assert "$rc" "install.sh --update: Exit 0 (RC $UPD_RC)"
+rc=0; grep -q "Update abgeschlossen" "$UPD_OUT" || rc=1
+assert "$rc" "install.sh --update: meldet 'Update abgeschlossen'"
+rc=0; grep -qE "Anzahl der Klimaanlagen|Weiter mit der Einrichtung" "$UPD_OUT" && rc=1
+assert "$rc" "install.sh --update: KEIN Onboarding erreicht (devices.json unangetastet)"
+rc=0; { [ -f "$UPDBIN/midea-ieco" ] && [ -f "$UPDBIN/midea-ieco-update" ]; } || rc=1
+assert "$rc" "install.sh --update: beide Wrapper (midea-ieco + midea-ieco-update) erzeugt"
+rc=0; grep -q "9.9.9" "$UPD_OUT" || rc=1
+assert "$rc" "install.sh --update: Versionsanzeige nutzt git-Ref/CHANGELOG"
+# Ziel b, direkt statt indirekt belegt: devices.json ist byte-identisch geblieben.
+rc=0; [ "$(cksum < "$UPD/devices.json")" = "$DJ_SUM_BEFORE" ] || rc=1
+assert "$rc" "install.sh --update: devices.json byte-identisch erhalten (kein Overwrite)"
+
+# ---------------------------------------------------------------------------
+echo "== install.sh --update: kein Temp-Leak, wenn die fetch-Phase abbricht =="
+# ---------------------------------------------------------------------------
+# Regressionstest fuer den Fix: die relaunch-Temp-Kopie wird bereits in der
+# fetch-Phase fuer den EXIT-Trap registriert. Szenario: ZIP-Installation (kein
+# .git) + curl schlaegt fehl -> die fetch-Phase bricht VOR dem 'exec' zur
+# apply-Phase ab. Ein dediziertes, leeres TMPDIR macht den Leak (die ~48-KB-
+# install.sh-Kopie) sichtbar: nach dem Fehllauf muss es leer sein.
+LUPD="$WORK/leak_install"; mkdir -p "$LUPD/venv/bin"   # bewusst KEIN .git
+cp "$INSTALL" "$LUPD/install.sh"
+: > "$LUPD/midea_ieco_ensure.py"; : > "$LUPD/midea_refresh_tokens.py"
+printf 'msmart-ng==1\n' > "$LUPD/requirements.txt"
+printf '# Changelog\n\n## [9.9.9] - 2026\n' > "$LUPD/CHANGELOG.md"
+printf 'deactivate() { :; }\n' > "$LUPD/venv/bin/activate"
+
+LSBIN="$WORK/leak_stub"; mkdir -p "$LSBIN"
+cat > "$LSBIN/git" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+cat > "$LSBIN/python3" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in *major*) echo 3;; *minor*) echo 12;; *"venv --help"*) exit 0;; *) exit 0;; esac
+EOF
+# curl scheitert -> download_and_overlay_zip bricht unter 'set -e' ab.
+cat > "$LSBIN/curl" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+chmod +x "$LSBIN/git" "$LSBIN/python3" "$LSBIN/curl"
+
+LEAKTMP="$WORK/leak_tmp"; mkdir -p "$LEAKTMP"
+LEAK_RC=0
+( PATH="$LSBIN:$PATH" TMPDIR="$LEAKTMP" MIDEA_IECO_BIN_DIR="$WORK/leak_bin" \
+  bash "$LUPD/install.sh" --update ) >/dev/null 2>&1 || LEAK_RC=$?
+
+rc=0; [ "$LEAK_RC" -ne 0 ] || rc=1
+assert "$rc" "fetch-Abbruch (curl-Fehler) beendet den Update-Lauf mit != 0 (RC $LEAK_RC)"
+
+# Der eigentliche Leak-Check ist nur dort scharf, wo wir das mktemp-Ziel via
+# TMPDIR steuern koennen: GNU mktemp (Linux/CI) beachtet $TMPDIR, BSD mktemp
+# (macOS) NICHT (nur mit -t). Wo mktemp $TMPDIR ignoriert, landen die Temp-Files
+# im System-Temp und ein leeres $LEAKTMP wuerde "kein Leak" nur VORTAEUSCHEN -
+# dann ehrlich ueberspringen statt vakuos gruen. (Der Fix ist per Mutations-Check
+# auf beiden mktemp-Varianten belegt; CI faehrt diesen Check scharf.)
+_probe="$(TMPDIR="$LEAKTMP" mktemp 2>/dev/null || true)"
+if [ -n "$_probe" ] && [ "${_probe#"$LEAKTMP"/}" != "$_probe" ]; then
+    rm -f "$_probe"
+    shopt -s nullglob dotglob
+    leak_left=("$LEAKTMP"/*)
+    shopt -u nullglob dotglob
+    rc=0; [ "${#leak_left[@]}" -eq 0 ] || rc=1
+    assert "$rc" "kein Temp-Leak nach fetch-Abbruch (TMPDIR leer, ${#leak_left[@]} Rest)"
+else
+    rm -f "$_probe" 2>/dev/null || true
+    echo "  [SKIP] Leak-Check: mktemp beachtet \$TMPDIR hier nicht (BSD/macOS); im Linux-CI scharf."
+fi
 
 echo ""
 echo "RESULT(test_install.sh): $pass passed, $fail failed"

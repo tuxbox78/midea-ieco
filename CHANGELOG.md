@@ -6,6 +6,21 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- `midea-ieco-update` command (and an `install.sh --update` mode) to update an
+  existing installation in place: refreshes the code, the pinned dependencies,
+  and the wrapper commands **without** touching `devices.json`,
+  `credentials.json`, or cron jobs. Works for both git- and ZIP-based installs.
+  The updater fetches first and then re-execs the freshly fetched script, so the
+  running updater is never the file being overwritten.
+
+### Changed
+- Re-running `install.sh` on an already-configured installation no longer
+  repeats the interactive onboarding (which would overwrite `devices.json`); it
+  now refreshes code, dependencies, and wrappers, then exits. Use
+  `install.sh --reconfigure` to deliberately redo device setup — the existing
+  `devices.json` is backed up to `devices.json.bak` (git-ignored) first.
+
 ## [0.1.0] - 2026-07-10
 
 First public release.
