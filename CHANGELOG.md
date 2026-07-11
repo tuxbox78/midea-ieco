@@ -35,11 +35,15 @@ First public release.
   temporary directory, so two concurrent runs can no longer race over a shared
   `midea-local.json` and fall back to passing the password on the command line
   (where it is briefly visible in `ps`).
-- `install.sh` registers the short-lived `midea-local.json` for cleanup on any
-  exit, so interrupting device discovery (Ctrl+C) never leaves the 0600
-  credential file behind.
 
 ### Fixed
+- `install.sh` device discovery no longer reports "no devices found" when
+  devices were in fact found. It now uses `midealocal.discover.discover()` (a
+  local UDP broadcast, no cloud login required) and prints each device's **IP
+  address and device ID** — the two values needed for `devices.json`. The old
+  code parsed the INFO log of `midealocal.cli discover`, which prints only
+  device state (temperature, mode) and no IP/ID, so its IP-address regex always
+  missed and warned even when devices were found.
 - Corrected the supported Python floor to **3.11** (previously documented as
   3.10, which never actually worked). `midea-local` is now pinned to **6.6.1** —
   the newest release still supporting Python 3.11 (6.7.0+ require 3.12; no

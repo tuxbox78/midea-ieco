@@ -412,6 +412,42 @@ rc=0
 ( PATH="$PYBAD:$PATH"; check_core_imports ) && rc=1
 assert "$rc" "check_core_imports: schlaegt fehl (!=0), wenn ein Import fehlt"
 
+# ---------------------------------------------------------------------------
+echo "== Geraete-Discovery-Snippet (IP+ID statt IP-Regex-Fehlalarm) =="
+# ---------------------------------------------------------------------------
+# Der alte Weg parste das INFO-Log von 'midealocal.cli discover' (nur Geraete-
+# ZUSTAND, keine IP/ID) und meldete faelschlich "keine Geraete". Neu: das inline
+# Python-Snippet ruft midealocal.discover.discover() und gibt "IP\tID" je Geraet
+# aus (Exit 0/1/2). Hier gegen ein gestubbtes midealocal geprueft (deterministisch,
+# ohne echtes Netzwerk).
+DISCSRC="$(extract_py_block 'DISCOVERED=.*PYEOF' "$INSTALL")"
+
+# Legt ein Fake-'midealocal'-Paket an, dessen discover() den Body $2 ausfuehrt.
+_mk_fake_ml() {  # $1=zielverzeichnis  $2=funktionskoerper (mit Einrueckung)
+    mkdir -p "$1/midealocal"
+    : > "$1/midealocal/__init__.py"
+    { echo "def discover(*a, **k):"; printf '%s\n' "$2"; } > "$1/midealocal/discover.py"
+}
+
+# (a) zwei Geraete -> beide IPs+IDs erscheinen, Exit 0.
+FML="$WORK/ml_two"
+_mk_fake_ml "$FML" '    return {1: {"ip_address": "192.168.0.186", "device_id": 153931629346858}, 2: {"ip_address": "192.168.0.185", "device_id": 152832117825892}}'
+out=$(PYTHONPATH="$FML" python3 -c "$DISCSRC"); drc=$?
+rc=0; { [ "$drc" -eq 0 ] && echo "$out" | grep -q '153931629346858' && echo "$out" | grep -q '152832117825892' && echo "$out" | grep -q '192.168.0.186'; } || rc=1
+assert "$rc" "Discovery: zwei Geraete -> IP+ID je Geraet, Exit 0"
+
+# (b) kein Geraet -> Exit 1, leere Ausgabe (kein Fehlalarm-Trigger).
+FML0="$WORK/ml_zero"; _mk_fake_ml "$FML0" '    return {}'
+out=$(PYTHONPATH="$FML0" python3 -c "$DISCSRC"); drc=$?
+rc=0; { [ "$drc" -eq 1 ] && [ -z "$out" ]; } || rc=1
+assert "$rc" "Discovery: kein Geraet -> Exit 1, leere Ausgabe"
+
+# (c) discover() wirft -> Exit 2 (Snippet bricht sauber ab, kein Traceback).
+FMLE="$WORK/ml_err"; _mk_fake_ml "$FMLE" '    raise RuntimeError("boom")'
+out=$(PYTHONPATH="$FMLE" python3 -c "$DISCSRC" 2>/dev/null); drc=$?
+rc=0; [ "$drc" -eq 2 ] || rc=1
+assert "$rc" "Discovery: Fehler in discover() -> Exit 2 (kein Traceback-Abbruch)"
+
 echo ""
 echo "RESULT(test_install.sh): $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

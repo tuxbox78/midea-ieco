@@ -433,22 +433,41 @@ ok "Zugangsdaten in credentials.json gespeichert (chmod 600)."
 echo ""
 info "Suche Midea-Geraete im lokalen Netzwerk (kann etwas dauern)..."
 echo ""
-# Passwort NICHT per argv an discover uebergeben: kurz eine midea-local.json
-# (0600) schreiben, die die CLI aus dem aktuellen Verzeichnis liest, danach
-# sofort wieder entfernen. Zusaetzlich fuer den EXIT-Trap vormerken (absoluter
-# Pfad, da cwd hier bereits $INSTALL_DIR ist): so raeumt auch ein Abbruch per
-# Strg+C zwischen Schreiben und 'rm' die 0600-Datei zuverlaessig weg, statt
-# Zugangsdaten im Installationsverzeichnis liegen zu lassen.
-CLEANUP_PATHS+=("$INSTALL_DIR/midea-local.json")
-write_credentials_file midea-local.json || error "midea-local.json konnte nicht geschrieben werden."
-DISCOVER_OUTPUT=$(python3 -m midealocal.cli discover 2>&1) || true
-rm -f midea-local.json
-echo "$DISCOVER_OUTPUT"
-echo ""
+# midealocal.discover.discover() macht einen lokalen UDP-Broadcast und liefert
+# IP-Adresse + Geraete-ID je Geraet OHNE Cloud-Zugang - genau die zwei Werte,
+# die unten fuer devices.json gebraucht werden. Bewusst NICHT das INFO-Log von
+# 'python -m midealocal.cli discover' geparst: dessen Ausgabe zeigt nur den
+# Geraete-ZUSTAND (Temperatur, Modus, ...) und KEINE IP/ID, weshalb die alte
+# IP-Regex faelschlich "keine Geraete" meldete, obwohl welche gefunden wurden.
+# Ausgabe je gefundenem Geraet: "<IP>\t<Geraete-ID>". Exit 0 = >=1 Geraet,
+# 1 = keins, 2 = Fehler (z.B. discover nicht importierbar) - unter 'set -e'
+# ueber '|| DISCOVER_RC=$?' abgefangen, damit ein leeres Ergebnis nicht abbricht.
+DISCOVER_RC=0
+DISCOVERED=$(python3 - <<'PYEOF' 2>/dev/null
+import sys
+try:
+    from midealocal.discover import discover
+    devices = discover() or {}
+except Exception:
+    sys.exit(2)
+rows = [f"{d.get('ip_address')}\t{d.get('device_id')}"
+        for d in devices.values() if d.get("ip_address") and d.get("device_id")]
+print("\n".join(rows))
+sys.exit(0 if rows else 1)
+PYEOF
+) || DISCOVER_RC=$?
 
-if ! echo "$DISCOVER_OUTPUT" | grep -qE '([0-9]{1,3}\.){3}[0-9]{1,3}'; then
-    warn "Keine Geraete automatisch erkannt."
-    warn "Bitte IP-Adressen und Geraete-IDs manuell aus der Ausgabe oben entnehmen."
+if [[ "$DISCOVER_RC" -eq 0 && -n "$DISCOVERED" ]]; then
+    ok "Gefundene Geraete - diese IP und Geraete-ID gleich unten eintragen:"
+    printf "    %-15s  %s\n" "IP-ADRESSE" "GERAETE-ID"
+    printf "    %-15s  %s\n" "---------------" "----------"
+    while IFS=$'\t' read -r disc_ip disc_id; do
+        printf "    %-15s  %s\n" "$disc_ip" "$disc_id"
+    done <<< "$DISCOVERED"
+    echo ""
+else
+    warn "Keine Geraete automatisch erkannt (Netzwerk-/Client-Isolation? Geraet aus?)."
+    warn "IP und Geraete-ID koennen auch manuell eingetragen werden - siehe README, 'Netzwerk-Fehlerbehebung'."
 fi
 
 # =============================================================================

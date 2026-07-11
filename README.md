@@ -374,7 +374,7 @@ python3 -c "import inspect; from msmart.device.AC.device import AirConditioner a
 
 - `devices.json` and `credentials.json` hold sensitive values (device token/key and your cloud password): keep both at `chmod 600`. Both are **git-ignored**, so your real values are never tracked — only the `*.example.json` templates are. (An early commit did track a `devices.json`, but it contained only non-functional dummy placeholders; no real credentials exist anywhere in the git history.)
 - Your Midea Cloud password lives in `credentials.json` (plain text), read by `midea_refresh_tokens.py`. It is never written into any tracked source file.
-- `midea-local.json` is a short-lived 0600 file used only for the duration of a cloud lookup, to hand your credentials to the `midealocal` CLI through a config file instead of the process command line (so the password is not visible in `ps`). `midea_refresh_tokens.py` writes it into a private per-call temporary directory and removes it immediately; `install.sh`'s one-time discovery writes it in the install directory and removes it on exit. The name is **git-ignored** as a safety net.
+- `midea-local.json` is a short-lived 0600 file used only for the duration of a cloud lookup, to hand your credentials to the `midealocal` CLI through a config file instead of the process command line (so the password is not visible in `ps`). `midea_refresh_tokens.py` writes it into a private per-call temporary directory and removes it immediately. The name is **git-ignored** as a safety net.
 - For Siri over SSH, use SSH-key authentication and do **not** expose SSH to the Internet using port forwarding. Use a VPN (e.g. Tailscale) for remote access instead.
 
 ## License and sharing
