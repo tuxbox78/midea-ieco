@@ -117,7 +117,19 @@ def print_overview() -> None:
     else:
         print(f"Konfigurierte Geraete ({len(devices)}):")
         for d in devices:
+            # Robust gegen eine von Hand kaputt editierte devices.json: ein
+            # Eintrag, der kein Objekt ist, darf die Uebersicht NICHT mit einem
+            # Traceback abbrechen (Ziel: funktioniert auch bei kaputter Datei).
+            if not isinstance(d, dict):
+                print(f"  - (uebersprungen: unerwarteter Eintrag vom Typ {type(d).__name__})")
+                continue
+            # name als String erzwingen: ein verschachteltes Objekt unter 'name'
+            # wuerde sonst die 'in RESERVED_TARGETS'-Pruefung (unhashbar) mit
+            # einem TypeError abbrechen - und beim Formatieren ungewollt Inhalt
+            # ausgeben. ip/port erscheinen nur in einem f-String (absturzsicher).
             name = d.get("name", "(ohne Namen)")
+            if not isinstance(name, str):
+                name = "(ungueltiger Name)"
             ip = d.get("ip", "?")
             port = d.get("port", 6444)
             print(f"  - {name}  ->  {ip}:{port}")

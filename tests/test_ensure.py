@@ -358,6 +358,26 @@ class OverviewTests(unittest.TestCase):
         code, _ = self._run(["Nichtvorhanden"])
         self.assertEqual(code, 1)
 
+    def test_malformed_device_entries_are_graceful(self):
+        # Von Hand kaputt editierte devices.json mit Nicht-Objekt-Eintraegen
+        # darf die Uebersicht NICHT mit einem Traceback abbrechen (Ziel:
+        # funktioniert auch bei kaputter Datei). Der gueltige Eintrag bleibt da.
+        self._write({"devices": ["oops", 123, None,
+                                 {"name": "Wohnzimmer", "ip": "1.2.3.4", "port": 6444}]})
+        code, out = self._run(["list"])
+        self.assertEqual(code, 0)
+        self.assertIn("Wohnzimmer", out)
+        self.assertIn("uebersprungen", out)
+
+    def test_nonstring_name_does_not_crash_or_leak(self):
+        # Ein Objekt unter 'name' ist unhashbar -> die reservierte-Wort-Pruefung
+        # wuerde ohne Guard mit TypeError abbrechen. Mit Guard: Exit 0, und der
+        # verschachtelte Inhalt wird nicht ausgegeben.
+        self._write({"devices": [{"name": {"token": "SECRETNAME"}, "ip": "1.2.3.4"}]})
+        code, out = self._run(["list"])
+        self.assertEqual(code, 0)
+        self.assertNotIn("SECRETNAME", out)
+
 
 class OverviewWithoutMsmartTests(unittest.TestCase):
     """Der Lazy-Import macht die Uebersicht unabhaengig von msmart: `list` muss

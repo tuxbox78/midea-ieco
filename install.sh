@@ -932,8 +932,9 @@ ensure_bin_on_path() {
     fi
 }
 
-# Erzeugt beide Wrapper: 'midea-ieco' (Steuerung) und 'midea-ieco-update'
-# (Aktualisierung). $INSTALL_DIR wird EINMAL per printf %q shell-sicher
+# Erzeugt alle drei Wrapper: 'midea-ieco' (Steuerung), 'midea-ieco-update'
+# (Aktualisierung) und 'midea-ieco-refresh-tokens' (Token-Refresh).
+# $INSTALL_DIR wird EINMAL per printf %q shell-sicher
 # vorgequotet (ein Pfad mit " oder $(...) wuerde sonst die Quotierung der
 # erzeugten Wrapper aufbrechen bzw. beim Ausfuehren erneut als Shell-Syntax
 # interpretiert). %q liefert bereits eine selbst-quotende Form.

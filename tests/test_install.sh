@@ -667,8 +667,8 @@ rc=0; grep -q "Update abgeschlossen" "$UPD_OUT" || rc=1
 assert "$rc" "install.sh --update: meldet 'Update abgeschlossen'"
 rc=0; grep -qE "Anzahl der Klimaanlagen|Weiter mit der Einrichtung" "$UPD_OUT" && rc=1
 assert "$rc" "install.sh --update: KEIN Onboarding erreicht (devices.json unangetastet)"
-rc=0; { [ -f "$UPDBIN/midea-ieco" ] && [ -f "$UPDBIN/midea-ieco-update" ]; } || rc=1
-assert "$rc" "install.sh --update: beide Wrapper (midea-ieco + midea-ieco-update) erzeugt"
+rc=0; { [ -f "$UPDBIN/midea-ieco" ] && [ -f "$UPDBIN/midea-ieco-update" ] && [ -f "$UPDBIN/midea-ieco-refresh-tokens" ]; } || rc=1
+assert "$rc" "install.sh --update: alle drei Wrapper erzeugt (inkl. midea-ieco-refresh-tokens)"
 rc=0; grep -q "9.9.9" "$UPD_OUT" || rc=1
 assert "$rc" "install.sh --update: Versionsanzeige nutzt git-Ref/CHANGELOG"
 # Ziel b, direkt statt indirekt belegt: devices.json ist byte-identisch geblieben.

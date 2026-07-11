@@ -20,7 +20,7 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   characters it prints a manual hint instead of editing anything.
 - `midea-ieco` with no argument (or `midea-ieco list`) now prints an instant,
   offline overview: what the tool does, the config path, the configured devices
-  (name and IP only — never token or key), and the common commands. It never
+  (name, IP and port only — never token or key), and the common commands. It never
   contacts a device. Previously a bare invocation exited with an argparse usage
   error.
 - `midea-ieco-refresh-tokens` wrapper command, installed next to `midea-ieco`

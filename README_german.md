@@ -208,7 +208,7 @@ Intern startet er den Installer in einem eigenen Update-Modus (`install.sh --upd
 
 ### Anzeigen, was konfiguriert ist
 
-`midea-ieco` ohne Argument – oder mit `list` – zeigt sofort eine netzwerkfreie Übersicht: was das Werkzeug tut, wo die Konfiguration liegt, welche Geräte konfiguriert sind (nur Name und IP, **niemals** Token oder Key) und die wichtigsten Befehle:
+`midea-ieco` ohne Argument – oder mit `list` – zeigt sofort eine netzwerkfreie Übersicht: was das Werkzeug tut, wo die Konfiguration liegt, welche Geräte konfiguriert sind (nur Name, IP und Port, **niemals** Token oder Key) und die wichtigsten Befehle:
 
 ```bash
 midea-ieco

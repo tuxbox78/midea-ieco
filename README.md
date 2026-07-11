@@ -207,7 +207,7 @@ Under the hood it re-runs the installer in a dedicated update mode (`install.sh 
 
 ### See what's configured
 
-Run `midea-ieco` with no argument, or with `list`, for an instant offline overview — what the tool does, where its config lives, which devices are configured (name and IP only, **never** token or key), and the most common commands:
+Run `midea-ieco` with no argument, or with `list`, for an instant offline overview — what the tool does, where its config lives, which devices are configured (name, IP and port only, **never** token or key), and the most common commands:
 
 ```bash
 midea-ieco
