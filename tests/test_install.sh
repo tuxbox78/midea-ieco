@@ -59,6 +59,14 @@ ok()   { :; }
 # koennen, werden daher in einer Subshell getestet.
 error() { echo "ERROR: $*" >&2; exit 1; }
 
+# Mehrere extrahierte install.sh-Funktionen rufen inzwischen t() (i18n) auf.
+# Katalog + Sprachwahl daher frueh bereitstellen; Standard hier Deutsch, damit
+# die (deutschen) Erwartungswerte der Funktionstests unten unveraendert gelten.
+# Die dedizierte i18n-Sektion am Ende setzt LANG_CHOICE fuer ihre Faelle selbst.
+eval "$(extract_func resolve_lang "$INSTALL")"
+eval "$(extract_func t "$INSTALL")"
+LANG_CHOICE=de
+
 # Manche extrahierten Funktionen (install_bin_wrapper, download_and_overlay_zip)
 # haengen Temp-Pfade an CLEANUP_PATHS an - hier vordefinieren, damit das unter
 # 'set -u' nicht scheitert.
@@ -626,7 +634,7 @@ UPD_OUT="$WORK/upd_out.txt"; UPD_RC=0
 # stdin von /dev/null: install_all_wrappers ruft ensure_bin_on_path; ohne TTY
 # nimmt das den Hinweis-Zweig (kein Prompt), sonst wuerde ein interaktiver
 # Testlauf hier auf die PATH-Rueckfrage warten.
-( PATH="$SBIN:$PATH" MIDEA_IECO_BIN_DIR="$UPDBIN" \
+( PATH="$SBIN:$PATH" MIDEA_IECO_BIN_DIR="$UPDBIN" MIDEA_IECO_LANG=de \
   bash "$UPD/install.sh" --update < /dev/null ) > "$UPD_OUT" 2>&1 || UPD_RC=$?
 
 rc=0; [ "$UPD_RC" -eq 0 ] || rc=1
@@ -749,6 +757,86 @@ printf '%s\n' "$PATH_BLOCK_MARKER" > "$HOME/.bashrc"
 n="$(grep -cF "$PATH_BLOCK_MARKER" "$HOME/.bashrc")"
 rc=0; [ "$n" -eq 1 ] || rc=1
 assert "$rc" "ensure_bin_on_path: vorhandener Marker -> kein Duplikat (n=$n)"
+
+# ---------------------------------------------------------------------------
+echo "== i18n: resolve_lang Praezedenz (Flag > Env > Locale > en) =="
+# ---------------------------------------------------------------------------
+eval "$(extract_func resolve_lang "$INSTALL")"
+
+rc=0; [ "$( ( unset LANG_CHOICE_ARG MIDEA_IECO_LANG LC_ALL LC_MESSAGES LANG; resolve_lang ) )" = "en" ] || rc=1
+assert "$rc" "resolve_lang: ohne alles -> en (Default)"
+rc=0; [ "$( ( unset LANG_CHOICE_ARG MIDEA_IECO_LANG LC_ALL LC_MESSAGES; LANG=de_DE.UTF-8; resolve_lang ) )" = "de" ] || rc=1
+assert "$rc" "resolve_lang: LANG=de_DE.UTF-8 -> de"
+rc=0; [ "$( ( unset LANG_CHOICE_ARG MIDEA_IECO_LANG LC_ALL LC_MESSAGES; LANG=en_GB.UTF-8; resolve_lang ) )" = "en" ] || rc=1
+assert "$rc" "resolve_lang: LANG=en_GB.UTF-8 -> en"
+rc=0; [ "$( ( unset LANG_CHOICE_ARG LC_ALL LC_MESSAGES LANG; MIDEA_IECO_LANG=de; resolve_lang ) )" = "de" ] || rc=1
+assert "$rc" "resolve_lang: MIDEA_IECO_LANG=de -> de"
+rc=0; [ "$( ( unset LC_ALL LC_MESSAGES LANG; LANG_CHOICE_ARG=de; MIDEA_IECO_LANG=en; resolve_lang ) )" = "de" ] || rc=1
+assert "$rc" "resolve_lang: --lang (Flag) schlaegt Env"
+rc=0; [ "$( ( unset LANG_CHOICE_ARG LC_ALL LC_MESSAGES; MIDEA_IECO_LANG=en; LANG=de_DE.UTF-8; resolve_lang ) )" = "en" ] || rc=1
+assert "$rc" "resolve_lang: Env schlaegt Locale"
+
+# ---------------------------------------------------------------------------
+echo "== i18n: t()-Katalog vollstaendig + Interpolation =="
+# ---------------------------------------------------------------------------
+eval "$(extract_func t "$INSTALL")"
+
+# Jeder im Skript per $(t <key>) referenzierte Schluessel MUSS in EN und DE eine
+# nicht-leere Uebersetzung liefern - Schutz vor Drift und Tippfehlern.
+# grep-/sed-Muster sind bewusst literal ('$(t ' als Text, keine Expansion).
+# shellcheck disable=SC2016
+used_keys="$(grep -oE '\$\(t [a-z][a-z0-9_]*' "$INSTALL" | sed 's/^\$(t //' | sort -u)"
+rc=0
+while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    for lc in en de; do
+        LANG_CHOICE="$lc"
+        [ -n "$(t "$key" _a _b _c 2>/dev/null)" ] || { echo "    fehlt: '$key' ($lc)"; rc=1; }
+    done
+done <<< "$used_keys"
+assert "$rc" "t(): alle referenzierten Schluessel in EN und DE vorhanden"
+
+# printf-Interpolation + korrekte Sprache (dynamischer Wert nur als Argument).
+LANG_CHOICE=de
+rc=0; [ "$(t err_unknown_option '--foo')" = "Unbekannte Option: '--foo'. '--help' zeigt die Optionen." ] || rc=1
+assert "$rc" "t(): DE-Interpolation (err_unknown_option)"
+LANG_CHOICE=en
+rc=0; [ "$(t err_unknown_option '--foo')" = "Unknown option: '--foo'. '--help' shows the options." ] || rc=1
+assert "$rc" "t(): EN-Interpolation (err_unknown_option)"
+
+# Sprachumschaltung wirkt (mind. ein Schluessel unterscheidet sich EN vs DE).
+LANG_CHOICE=de; d_banner="$(t banner_install)"
+LANG_CHOICE=en; e_banner="$(t banner_install)"
+rc=0; [ "$d_banner" != "$e_banner" ] || rc=1
+assert "$rc" "t(): DE- und EN-Ausgabe unterscheiden sich (banner_install)"
+
+# Mehrzeiliger usage-Block traegt in beiden Sprachen die Kernoptionen.
+LANG_CHOICE=en
+rc=0; { t usage | grep -q -- '--update' && t usage | grep -q 'MIDEA_IECO_DIR'; } || rc=1
+assert "$rc" "t(): EN-usage enthaelt --update und MIDEA_IECO_DIR"
+LANG_CHOICE=de
+rc=0; t usage | grep -q -- '--reconfigure' || rc=1
+assert "$rc" "t(): DE-usage enthaelt --reconfigure"
+
+# Regressionsschutz (Fremd-Audit Finding 1): die aufgeloeste Sprache muss ueber
+# ALLE Update-Phasen getragen werden. Beide 'exec env ... --update'-Bloecke in
+# run_update muessen MIDEA_IECO_LANG mitgeben - sonst fallen fetch/apply auf die
+# Locale zurueck und ein per --lang gewaehlter Wert erzeugte gemischtsprachige
+# Ausgabe. resolve_lang gibt MIDEA_IECO_LANG Vorrang vor der Locale.
+RUN_UPDATE_SRC="$(extract_func run_update "$INSTALL")"
+n_lang=$(printf '%s\n' "$RUN_UPDATE_SRC" | grep -c 'MIDEA_IECO_LANG=')
+rc=0; [ "$n_lang" -eq 2 ] || rc=1
+assert "$rc" "run_update: MIDEA_IECO_LANG an beide Update-exec-Phasen weitergereicht (n=$n_lang)"
+
+# '--lang' darf ein folgendes Options-Token NICHT als Sprachwert verschlucken
+# (Fremd-Audit-Nit, in beiden Runden gemeldet). '--help' beendet vor jeder
+# Nebenwirkung mit Exit 0, daher als Subprozess sicher pruefbar.
+help_out="$(LANG=C bash "$INSTALL" --lang --help 2>&1)"; hrc=$?
+rc=0; { [ "$hrc" -eq 0 ] && printf '%s' "$help_out" | grep -q -- '--reconfigure'; } || rc=1
+assert "$rc" "--lang --help zeigt die Hilfe (verschluckt --help nicht)"
+help_out2="$(LANG=C bash "$INSTALL" --lang de --help 2>&1)"; hrc2=$?
+rc=0; { [ "$hrc2" -eq 0 ] && printf '%s' "$help_out2" | grep -q -- '--update'; } || rc=1
+assert "$rc" "--lang de --help zeigt die Hilfe (gueltiger Wert konsumiert, Option erkannt)"
 
 echo ""
 echo "RESULT(test_install.sh): $pass passed, $fail failed"

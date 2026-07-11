@@ -49,24 +49,333 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Kurze Hilfe. Bewusst vor dem Argument-Parsing definiert, damit '--help'
-# ausgewertet werden kann, ohne dass irgendein weiterer Schritt lief.
-print_usage() {
-    cat <<'USAGE'
-midea-ieco install.sh
+# =============================================================================
+# Sprachwahl (i18n). Englisch als Default, Deutsch automatisch bei de_*-Locale.
+# Praezedenz: --lang de|en  >  MIDEA_IECO_LANG  >  Locale (LC_ALL/LC_MESSAGES/
+# LANG)  >  'en'. Bewusst OHNE assoziative Arrays (declare -A), damit das Skript
+# auf der macOS-System-bash 3.2 lauffaehig bleibt (der curl|bash-Einzeiler).
+# =============================================================================
+resolve_lang() {
+    local raw="${LANG_CHOICE_ARG:-${MIDEA_IECO_LANG:-}}"
+    if [[ -z "$raw" ]]; then
+        raw="${LC_ALL:-${LC_MESSAGES:-${LANG:-}}}"
+    fi
+    case "$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')" in
+        de|de[_-]*|german|deutsch) printf 'de' ;;
+        *)                         printf 'en' ;;
+    esac
+}
 
-  (ohne Option)   Erstinstallation bzw. interaktive Einrichtung.
+# Uebersetzt einen Katalog-Schluessel in die aktive Sprache (LANG_CHOICE) und
+# gibt ihn per printf aus. WICHTIG: dynamische Werte NUR als Argumente ($@)
+# uebergeben, NIE in den Formatstring - sonst wuerden '%'/'\' aus Nutzerdaten
+# interpretiert. Jeder Arm haelt BEIDE Sprachen nebeneinander (per Test auf
+# Vollstaendigkeit geprueft, tests/test_install.sh). Neue Sprache: eine Variable,
+# ein Picker-Zweig, je Arm ein Wert. Konvention: literales '%' als '%%' schreiben.
+t() {
+    local key="$1"; shift
+    local en="" de="" fmt=""
+    # Katalog-Strings sind Daten: ein '$' (z.B. das literale $PATH in den PATH-
+    # Hinweisen) ist gewollter Text, keine Shell-Expansion. SC2016 daher fuer den
+    # gesamten Katalog-case bewusst aus.
+    # shellcheck disable=SC2016
+    case "$key" in
+        banner_install)  en='midea-ieco Installer';  de='midea-ieco Installationsskript' ;;
+        banner_update)   en='midea-ieco Update';      de='midea-ieco Update' ;;
+        err_unknown_option) en="Unknown option: '%s'. '--help' shows the options."
+                            de="Unbekannte Option: '%s'. '--help' zeigt die Optionen." ;;
+        label_install_dir) en='Install directory:';  de='Installationsverzeichnis:' ;;
+        label_bin_dir)     en='Wrapper directory:';  de='Wrapper-Verzeichnis:' ;;
+        platform_detected) en='Detected platform: %s (package manager: %s)'
+                           de='Erkannte Plattform: %s (Paketmanager: %s)' ;;
+        homebrew_missing)  en='Homebrew not found. Install it from: https://brew.sh'
+                           de='Homebrew nicht gefunden. Installation unter: https://brew.sh' ;;
+        ip_banner_title)   en='IMPORTANT: Fixed IP addresses recommended'
+                           de='WICHTIG: Feste IP-Adressen empfohlen' ;;
+        ip_hint)           en='  Ideally set up a DHCP reservation for each air conditioner in\n  your router. This is NOT required - the IP can also be adjusted\n  later in devices.json at any time.'
+                           de='  Richte im Router idealerweise eine DHCP-Reservierung fuer jede\n  Klimaanlage ein. Das ist KEINE Voraussetzung - die IP kann\n  jederzeit auch nachtraeglich in devices.json angepasst werden.' ;;
+        prompt_continue_setup) en='  Continue with setup? [Y/n]: '
+                               de='  Weiter mit der Einrichtung? [J/n]: ' ;;
+        deps_done_abort)   en='Dependency installation is complete.'
+                           de='Installation der Abhaengigkeiten ist abgeschlossen.' ;;
+        usage) en="midea-ieco install.sh
+
+  (no option)     First-time / interactive setup (onboarding).
+  --update        Update only: refresh code + dependencies + wrappers.
+                  Does NOT touch devices.json / credentials.json / cron.
+                  (Same as the generated command 'midea-ieco-update'.)
+  --reconfigure   Re-run setup even if already configured.
+                  Backs up an existing devices.json to .bak first.
+  --lang en|de    Force the interface language (default: auto by locale).
+  -h, --help      Show this help.
+
+Directories overridable via environment variables:
+  MIDEA_IECO_DIR       Install directory (default /opt/local/midea-ieco)
+  MIDEA_IECO_BIN_DIR   Wrapper directory (default /opt/local/bin)"
+               de="midea-ieco install.sh
+
+  (ohne Option)   Erstinstallation bzw. interaktive Einrichtung (Onboarding).
   --update        Nur aktualisieren: Code + Abhaengigkeiten + Wrapper erneuern.
                   Ruehrt devices.json / credentials.json / Cron NICHT an.
                   (Entspricht dem erzeugten Befehl 'midea-ieco-update'.)
   --reconfigure   Einrichtung erneut durchlaufen, auch wenn schon konfiguriert.
                   Sichert eine vorhandene devices.json vorher nach .bak.
+  --lang en|de    Sprache erzwingen (Default: automatisch nach Locale).
   -h, --help      Diese Hilfe anzeigen.
 
 Verzeichnisse ueber Umgebungsvariablen ueberschreibbar:
   MIDEA_IECO_DIR       Installationsverzeichnis (Default /opt/local/midea-ieco)
-  MIDEA_IECO_BIN_DIR   Wrapper-Verzeichnis      (Default /opt/local/bin)
-USAGE
+  MIDEA_IECO_BIN_DIR   Wrapper-Verzeichnis      (Default /opt/local/bin)" ;;
+
+        # ---- Grundwerkzeuge / Verzeichnis / Fetch ----
+        err_cron_newline)  en='Install path contains a newline - unsuitable for a cron entry.'
+                           de='Installationspfad enthaelt einen Zeilenumbruch - fuer einen Cron-Eintrag ungeeignet.' ;;
+        dev_name_empty)    en='Name must not be empty.'
+                           de='Name darf nicht leer sein.' ;;
+        dev_name_dash)     en="Name must not start with '-' (would be mistaken for an option)."
+                           de="Name darf nicht mit '-' beginnen (sonst als Option missdeutet)." ;;
+        dev_name_reserved) en="'all' is reserved (means 'all devices') - please choose another name."
+                           de="'all' ist reserviert (steht fuer 'alle Geraete') - bitte anders benennen." ;;
+        dev_name_ctrl)     en='Name must not contain control characters.'
+                           de='Name darf keine Steuerzeichen enthalten.' ;;
+        py_not_found)      en='python3 not found. Attempting automatic installation...'
+                           de='python3 nicht gefunden. Versuche automatische Installation...' ;;
+        py_install_failed) en='python3 could not be installed automatically.'
+                           de='python3 konnte nicht automatisch installiert werden.' ;;
+        py_too_old)        en='Python 3.11+ required (found: %s.%s).\n  Reason: the pinned midea-local 6.6.1 requires Python 3.11 (current\n  Raspberry Pi OS Bookworm ships 3.11).'
+                           de='Python 3.11+ erforderlich (gefunden: %s.%s).\n  Grund: die gepinnte midea-local 6.6.1 setzt Python 3.11 voraus (aktuelle\n  Raspberry Pi OS Bookworm liefert 3.11).' ;;
+        py_found)          en='Python %s.%s found.'
+                           de='Python %s.%s gefunden.' ;;
+        venv_missing_try)  en='venv module missing. Attempting installation...'
+                           de='venv-Modul fehlt. Versuche Installation...' ;;
+        venv_still_missing) en='venv module still missing. Please install it manually.'
+                            de='venv-Modul fehlt weiterhin. Bitte manuell installieren.' ;;
+        venv_ok)           en='venv module available.'
+                           de='venv-Modul verfuegbar.' ;;
+        git_curl_missing)  en='Neither git nor curl found. Attempting to install curl...'
+                           de='Weder git noch curl gefunden. Versuche curl zu installieren...' ;;
+        curl_install_failed) en='curl could not be installed.'
+                             de='curl konnte nicht installiert werden.' ;;
+        dir_hint_prev_install) en='This looks like a previous installation under a different user.'
+                               de='Das sieht nach einer frueheren Installation unter einem anderen Benutzer aus.' ;;
+        err_dir_not_writable) en='Install directory %s exists but is not writable.%s\n  Please choose one option:\n    - use another directory:      MIDEA_IECO_DIR=/your/path  (re-run the installer)\n    - fix the permissions:        sudo chown -R %s %s\n    - remove the directory if it is no longer needed.'
+                              de='Installationsverzeichnis %s existiert, ist aber nicht beschreibbar.%s\n  Bitte eine Option waehlen:\n    - anderes Verzeichnis nutzen:   MIDEA_IECO_DIR=/dein/pfad  (Installer erneut ausfuehren)\n    - Rechte selbst korrigieren:    sudo chown -R %s %s\n    - Verzeichnis entfernen, falls es nicht mehr benoetigt wird.' ;;
+        sudo_need_mkdir)   en='Need sudo to create %s ...'
+                           de='Benoetige sudo, um %s anzulegen...' ;;
+        sudo_need_wrapper) en='Need sudo to write the wrapper to %s ...'
+                           de='Benoetige sudo, um den Wrapper nach %s zu schreiben...' ;;
+        err_zip_no_root)   en='No root directory found in the downloaded archive (corrupt download or changed archive format).'
+                           de='Kein Wurzelverzeichnis im heruntergeladenen Archiv gefunden (Download beschaedigt oder Archivformat geaendert).' ;;
+        err_zip_multi_root) en='Unexpected archive structure: multiple root directories found (%s).'
+                            de='Unerwartete Archivstruktur: mehrere Wurzelverzeichnisse gefunden (%s).' ;;
+        err_zip_needs_curl) en='curl is required for the ZIP download but is not available.'
+                            de='curl wird fuer den ZIP-Download benoetigt, ist aber nicht verfuegbar.' ;;
+        err_zip_needs_unzip) en='unzip is required for the ZIP download but could not be installed (package manager: %s). Please install git or unzip manually.'
+                             de='unzip wird fuer den ZIP-Download benoetigt, konnte aber nicht installiert werden (Paketmanager: %s). Bitte git oder unzip manuell installieren.' ;;
+        fetch_git_pull)    en='Updating existing installation (git pull)...'
+                           de='Aktualisiere vorhandene Installation (git pull)...' ;;
+        fetch_local_changes) en='Local changes to tracked files detected - git pull skipped.'
+                             de='Lokale Aenderungen an getrackten Dateien erkannt - git pull uebersprungen.' ;;
+        fetch_tip_1)       en='  Tip: set paths via MIDEA_IECO_DIR/MIDEA_IECO_BIN_DIR instead of editing install.sh,'
+                           de='  Tipp: Pfade ueber MIDEA_IECO_DIR/MIDEA_IECO_BIN_DIR setzen statt install.sh zu editieren,' ;;
+        fetch_tip_2)       en="  or stash changes with 'git -C %s stash' and retry the update."
+                           de="  oder Aenderungen mit 'git -C %s stash' zuruecklegen und Update wiederholen." ;;
+        fetch_updated)     en='Project files updated.'
+                           de='Projekt-Dateien aktualisiert.' ;;
+        fetch_pull_failed) en='git pull not possible (no network or non-fast-forward) - NOT updated, continuing with existing files.'
+                           de='git pull nicht moeglich (kein Netz oder non-fast-forward) - NICHT aktualisiert, nutze vorhandene Dateien weiter.' ;;
+        fetch_zip_update)  en='Updating existing installation (ZIP download)...'
+                           de='Aktualisiere vorhandene Installation (ZIP-Download)...' ;;
+        fetch_updated_zip) en='Project files updated (ZIP).'
+                           de='Projekt-Dateien aktualisiert (ZIP).' ;;
+        fetch_downloading) en='Downloading project files to %s ...'
+                           de='Lade Projekt-Dateien nach %s ...' ;;
+        err_no_git_curl)   en='Neither git nor curl available. Please download the repository manually.'
+                           de='Weder git noch curl verfuegbar. Bitte Repository manuell herunterladen.' ;;
+        fetch_provided)    en='Project files provided in %s.'
+                           de='Projekt-Dateien bereitgestellt in %s.' ;;
+        fetch_present)     en='Project files already present in %s.'
+                           de='Projekt-Dateien bereits vorhanden in %s.' ;;
+
+        # ---- venv / Abhaengigkeiten / Wrapper / PATH ----
+        venv_exists)       en='venv already exists - skipping creation.'
+                           de='venv existiert bereits - ueberspringe Erstellung.' ;;
+        venv_creating)     en='Creating virtual environment...'
+                           de='Erstelle virtuelle Umgebung...' ;;
+        venv_created)      en='venv created.'
+                           de='venv erstellt.' ;;
+        req_missing)       en='requirements.txt not found - installing msmart-ng/midea-local unpinned.'
+                           de='requirements.txt nicht gefunden - installiere msmart-ng/midea-local ungepinnt.' ;;
+        deps_installed)    en='Dependencies installed (msmart-ng, midea-local).'
+                           de='Abhaengigkeiten installiert (msmart-ng, midea-local).' ;;
+        core_deps_retry)   en='Core dependencies not importable - installing missing packages...'
+                           de='Kern-Abhaengigkeiten nicht importierbar - installiere fehlende Pakete nach...' ;;
+        err_core_deps)     en='Core dependencies still not importable - automatic repair failed.\n  Please check manually (network?) and re-run:\n    "%s/venv/bin/pip" install -r "%s/requirements.txt"'
+                           de='Kern-Abhaengigkeiten weiterhin nicht importierbar - automatische Reparatur fehlgeschlagen.\n  Bitte manuell pruefen (Netzwerk?) und erneut starten:\n    "%s/venv/bin/pip" install -r "%s/requirements.txt"' ;;
+        core_deps_repaired) en='Missing core dependency/dependencies installed automatically.'
+                            de='Fehlende Kern-Abhaengigkeit(en) automatisch nachinstalliert.' ;;
+        core_deps_ok)      en='Core dependencies importable (midealocal, msmart).'
+                           de='Kern-Abhaengigkeiten importierbar (midealocal, msmart).' ;;
+        val_unknown)       en='unknown';  de='unbekannt' ;;
+        wrapper_created)   en='Wrapper script created: %s'
+                           de='Wrapper-Skript angelegt: %s' ;;
+        path_not_in_manual) en='%s is not in PATH. Add manually: export PATH="%s:$PATH"'
+                            de='%s ist nicht im PATH. Manuell ergaenzen: export PATH="%s:$PATH"' ;;
+        path_already_in_rc) en='%s is already set in %s - active in a NEW shell (or now: source %s).'
+                            de='%s ist in %s bereits eingetragen - in einer NEUEN Shell aktiv (oder jetzt: source %s).' ;;
+        path_add_to_rc_hint) en='%s is not in PATH. Add it to %s with: export PATH="%s:$PATH"'
+                             de='%s ist nicht im PATH. In %s ergaenzen mit: export PATH="%s:$PATH"' ;;
+        path_prompt_add)   en='  %s is not in PATH. Add it to %s? [Y/n]: '
+                           de='  %s ist nicht im PATH. Zu %s hinzufuegen? [J/n]: ' ;;
+        path_input_aborted) en='Input aborted. Add manually (to %s): export PATH="%s:$PATH"'
+                            de='Eingabe abgebrochen. Manuell ergaenzen (in %s): export PATH="%s:$PATH"' ;;
+        path_skipped)      en='Skipped. Add manually (to %s): export PATH="%s:$PATH"'
+                           de='Uebersprungen. Manuell ergaenzen (in %s): export PATH="%s:$PATH"' ;;
+        path_added)        en='%s added to %s.'
+                           de='%s zu %s hinzugefuegt.' ;;
+        path_active_now)   en='Active immediately in the CURRENT shell with:  source %s'
+                           de='In der AKTUELLEN Shell sofort aktiv mit:  source %s' ;;
+        path_write_failed) en='Could not write %s. Add manually: export PATH="%s:$PATH"'
+                           de='Konnte %s nicht schreiben. Manuell ergaenzen: export PATH="%s:$PATH"' ;;
+
+        # ---- Update-Modus ----
+        err_update_needs_install) en='Update requires an installed copy. install.sh not found in %s.'
+                                  de='Update benoetigt eine installierte Kopie. install.sh nicht gefunden unter %s.' ;;
+        banner_update_done) en='Update complete!';  de='Update abgeschlossen!' ;;
+        update_version_uptodate) en='Version: %s (already up to date)'
+                                 de='Version: %s (war bereits aktuell)' ;;
+        update_version_changed) en='Version: %s -> %s';  de='Version: %s -> %s' ;;
+        update_see_changelog) en='Changes: see CHANGELOG.md'
+                              de='Aenderungen siehe CHANGELOG.md' ;;
+        err_unknown_phase) en="Unknown internal update phase: '%s'."
+                           de="Unbekannte interne Update-Phase: '%s'." ;;
+
+        # ---- Onboarding ----
+        already_configured) en='Already set up - onboarding skipped (devices.json untouched).'
+                            de='Bereits eingerichtet - Onboarding uebersprungen (devices.json unangetastet).' ;;
+        already_cfg_update) en='  Update:               midea-ieco-update'
+                            de='  Aktualisieren:        midea-ieco-update' ;;
+        already_cfg_reconfigure) en='  Reconfigure:          install.sh --reconfigure'
+                                 de='  Neu einrichten:       install.sh --reconfigure' ;;
+        devices_backed_up) en='Existing devices.json backed up to devices.json.bak.'
+                           de='Vorhandene devices.json nach devices.json.bak gesichert.' ;;
+        hdr_credentials)   en='Midea app credentials';  de='Midea-APP-Zugangsdaten' ;;
+        prompt_email)      en='  E-mail address : ';  de='  E-Mail-Adresse : ' ;;
+        prompt_password)   en='  Password       : ';  de='  Passwort       : ' ;;
+        err_credentials_empty) en='E-mail and password must not be empty.'
+                               de='E-Mail und Passwort duerfen nicht leer sein.' ;;
+        err_credentials_write) en='credentials.json could not be written.'
+                               de='credentials.json konnte nicht geschrieben werden.' ;;
+        credentials_saved) en='Credentials saved to credentials.json (chmod 600).'
+                           de='Zugangsdaten in credentials.json gespeichert (chmod 600).' ;;
+        discover_searching) en='Searching for Midea devices on the local network (may take a moment)...'
+                            de='Suche Midea-Geraete im lokalen Netzwerk (kann etwas dauern)...' ;;
+        discover_found)    en='Devices found - enter this IP and device ID below:'
+                           de='Gefundene Geraete - diese IP und Geraete-ID gleich unten eintragen:' ;;
+        col_ip)            en='IP ADDRESS';  de='IP-ADRESSE' ;;
+        col_device_id)     en='DEVICE ID';   de='GERAETE-ID' ;;
+        discover_none)     en='No devices detected automatically (network/client isolation? device off?).'
+                           de='Keine Geraete automatisch erkannt (Netzwerk-/Client-Isolation? Geraet aus?).' ;;
+        discover_manual_hint) en="IP and device ID can also be entered manually - see the README, 'Network troubleshooting'."
+                              de="IP und Geraete-ID koennen auch manuell eingetragen werden - siehe README, 'Netzwerk-Fehlerbehebung'." ;;
+        hdr_device_config) en='Device configuration';  de='Geraetekonfiguration' ;;
+        prompt_use_discovered) en='  %s device(s) detected - adopt IP/ID automatically and only assign names? [Y/n]: '
+                               de='  %s Geraet(e) erkannt - IP/ID automatisch uebernehmen und nur Namen vergeben? [J/n]: ' ;;
+        dev_line_auto)     en='  Device %s of %s:  IP %s   ID %s'
+                           de='  Geraet %s von %s:  IP %s   ID %s' ;;
+        prompt_dev_name)   en='    Name (e.g. Living room): '
+                           de='    Name (z.B. Wohnzimmer): ' ;;
+        prompt_device_count) en='  Number of air conditioners: '
+                             de='  Anzahl der Klimaanlagen: ' ;;
+        err_invalid_count) en="Invalid number: '%s'."
+                           de="Ungueltige Anzahl: '%s'." ;;
+        dev_line_manual)   en='  Device %s of %s:'
+                           de='  Geraet %s von %s:' ;;
+        prompt_dev_ip)     en='    IP address              : '
+                           de='    IP-Adresse              : ' ;;
+        err_ip_format)     en='Invalid IP format. Example: 192.168.0.186'
+                           de='Ungueltiges IP-Format. Beispiel: 192.168.0.186' ;;
+        prompt_dev_id)     en='    Device ID (digits only) : '
+                           de='    Geraete-ID (nur Ziffern): ' ;;
+        err_dev_id_numeric) en="Device ID must be numeric (see 'id' from the discover output)."
+                            de="Geraete-ID muss numerisch sein (siehe 'id' aus der Discover-Ausgabe)." ;;
+        devices_written)   en='devices.json written (chmod 600).'
+                           de='devices.json geschrieben (chmod 600).' ;;
+        tokens_fetching)   en='Fetching token/key pairs for all devices...'
+                           de='Rufe Token/Key-Paare fuer alle Geraete ab...' ;;
+        tokens_fetched)    en='Token/key pairs fetched successfully.'
+                           de='Token/Key-Paare erfolgreich abgerufen.' ;;
+        tokens_failed)     en='Token fetch finished with errors. Retry later with:'
+                           de='Token-Abruf mit Fehlern beendet. Spaeter wiederholen mit:' ;;
+        tokens_retry_cmd)  en='  cd %s && venv/bin/python3 midea_refresh_tokens.py --all'
+                           de='  cd %s && venv/bin/python3 midea_refresh_tokens.py --all' ;;
+        prompt_test_run)   en='  Run a test for the first device? [y/N]: '
+                           de='  Testlauf fuer das erste Geraet durchfuehren? [j/N]: ' ;;
+        test_running)      en='Testing device: %s';  de='Teste Geraet: %s' ;;
+        test_ok)           en='Test run successful!';  de='Testlauf erfolgreich!' ;;
+        test_failed)       en="Test run failed. See the 'Network troubleshooting' section in README.md."
+                           de="Testlauf fehlgeschlagen. Siehe Abschnitt 'Netzwerk-Fehlerbehebung' in README_german.md." ;;
+        hdr_cron)          en='Optional cron job';  de='Optionaler Cron-Job' ;;
+        prompt_cron_add)   en='  Add these cron jobs now automatically? [y/N]: '
+                           de='  Diese Cron-Jobs jetzt automatisch eintragen? [j/N]: ' ;;
+        cron_already)      en='midea-ieco cron jobs are already installed. Skipping to avoid duplicates.'
+                           de='midea-ieco-Cron-Jobs sind bereits eingetragen. Ueberspringe, um Duplikate zu vermeiden.' ;;
+        cron_added)        en='Cron jobs installed for user %s.'
+                           de='Cron-Jobs eingetragen fuer Benutzer %s.' ;;
+        cron_no_crontab)   en="No 'crontab' command found. Cron jobs must be set up manually."
+                           de="Kein 'crontab'-Kommando gefunden. Cron-Jobs muessen manuell eingerichtet werden." ;;
+        banner_install_done) en='Installation complete!';  de='Installation abgeschlossen!' ;;
+        final_summary) en="  Directory:          %s
+  Wrapper command:    midea-ieco <device-name>   (if %s is in PATH)
+  Update:             midea-ieco-update
+  Direct call:        cd %s && venv/bin/python3 midea_ieco_ensure.py <device-name>
+  All devices:        venv/bin/python3 midea_ieco_ensure.py all
+  Refresh tokens:     venv/bin/python3 midea_refresh_tokens.py --all
+
+  Full guide: README.md / README_german.md"
+                       de="  Verzeichnis:        %s
+  Wrapper-Befehl:     midea-ieco <Geraetename>   (falls %s im PATH ist)
+  Aktualisieren:      midea-ieco-update
+  Direkter Aufruf:    cd %s && venv/bin/python3 midea_ieco_ensure.py <Geraetename>
+  Alle Geraete:       venv/bin/python3 midea_ieco_ensure.py all
+  Token auffrischen:  venv/bin/python3 midea_refresh_tokens.py --all
+
+  Detaillierte Anleitung: README_german.md / README.md" ;;
+    esac
+    if [[ "$LANG_CHOICE" == "de" ]]; then fmt="$de"; else fmt="$en"; fi
+    # Formatstring stammt aus dem eigenen Katalog (vertrauenswuerdig), dynamische
+    # Werte kommen ausschliesslich ueber "$@" - daher SC2059 hier bewusst aus.
+    # shellcheck disable=SC2059
+    printf "$fmt" "$@"
+}
+
+# Vorab-Scan NUR fuer die Sprachwahl, damit Banner/Usage/Fehlermeldungen unten
+# bereits in der richtigen Sprache erscheinen. Arbeitet auf einer Kopie und
+# aendert $@ NICHT - die eigentliche Optionsauswertung folgt weiter unten.
+LANG_CHOICE_ARG=""
+if [[ $# -gt 0 ]]; then
+    _pre_args=("$@")
+    for (( _pi=0; _pi<${#_pre_args[@]}; _pi++ )); do
+        case "${_pre_args[_pi]}" in
+            # Das Folge-Token nur dann als Sprachwert lesen, wenn es NICHT selbst
+            # eine Option ist (Sprachwerte sind stets 'en'/'de', nie '-'-praefigiert).
+            # Sonst verschluckte z.B. '--lang --help' die Hilfe als vermeintlichen
+            # Wert. Explizites if statt '[[ ]] &&': unter 'set -e' darf die
+            # case-Auswertung in der Schleife nicht mit Exit 1 enden.
+            --lang)   if [[ "${_pre_args[_pi+1]:-}" != -* ]]; then
+                          LANG_CHOICE_ARG="${_pre_args[_pi+1]:-}"
+                      fi ;;
+            --lang=*) LANG_CHOICE_ARG="${_pre_args[_pi]#--lang=}" ;;
+        esac
+    done
+    unset _pre_args _pi
+fi
+LANG_CHOICE="$(resolve_lang)"
+
+# Kurze Hilfe. Bewusst vor dem Argument-Parsing definiert, damit '--help'
+# ausgewertet werden kann, ohne dass irgendein weiterer Schritt lief.
+print_usage() {
+    printf '%s\n' "$(t usage)"
 }
 
 # =============================================================================
@@ -80,8 +389,12 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --update)      MODE="update" ;;
         --reconfigure) RECONFIGURE=1 ;;
+        # Wert im Vorab-Scan gelesen; hier nur konsumieren, wenn ein NICHT-Options-
+        # Token folgt - so bleibt '--lang --help' (o.ae.) als eigene Option erhalten.
+        --lang)        if [[ $# -ge 2 && "$2" != -* ]]; then shift; fi ;;
+        --lang=*)      : ;;
         -h|--help)     print_usage; exit 0 ;;
-        *)             error "Unbekannte Option: '$1'. '--help' zeigt die Optionen." ;;
+        *)             error "$(t err_unknown_option "$1")" ;;
     esac
     shift
 done
@@ -97,9 +410,9 @@ if [[ -z "$UPDATE_PHASE" ]]; then
     echo ""
     echo -e "${BLUE}=================================================${NC}"
     if [[ "$MODE" == "update" ]]; then
-        echo -e "${BLUE}   midea-ieco Update                            ${NC}"
+        echo -e "${BLUE}   $(t banner_update)${NC}"
     else
-        echo -e "${BLUE}   midea-ieco Installationsskript               ${NC}"
+        echo -e "${BLUE}   $(t banner_install)${NC}"
     fi
     echo -e "${BLUE}=================================================${NC}"
     echo ""
@@ -131,8 +444,8 @@ fi
 BIN_DIR="${MIDEA_IECO_BIN_DIR:-$DEFAULT_BIN_DIR}"
 
 if [[ -z "$UPDATE_PHASE" ]]; then
-    info "Installationsverzeichnis: $INSTALL_DIR"
-    info "Wrapper-Verzeichnis: $BIN_DIR"
+    info "$(t label_install_dir) $INSTALL_DIR"
+    info "$(t label_bin_dir) $BIN_DIR"
 fi
 
 # =============================================================================
@@ -158,11 +471,11 @@ elif [[ "$PLATFORM" == "macos" ]]; then
     if command -v brew &>/dev/null; then
         PKG_MGR="brew"
     else
-        warn "Homebrew nicht gefunden. Installation unter: https://brew.sh"
+        warn "$(t homebrew_missing)"
     fi
 fi
 
-[[ -z "$UPDATE_PHASE" ]] && info "Erkannte Plattform: $PLATFORM (Paketmanager: $PKG_MGR)"
+[[ -z "$UPDATE_PHASE" ]] && info "$(t platform_detected "$PLATFORM" "$PKG_MGR")"
 
 install_pkg() {
     local pkg="$1"
@@ -230,7 +543,7 @@ shell_quote_for_cron() {
     # error() bricht das Skript ab (exit) - ein Pfad mit Zeilenumbruch kommt
     # hier also nicht weiter.
     case "$s" in
-        *$'\n'*) error "Installationspfad enthaelt einen Zeilenumbruch - fuer einen Cron-Eintrag ungeeignet." ;;
+        *$'\n'*) error "$(t err_cron_newline)" ;;
     esac
     local q="'\\''"
     s=${s//\'/$q}          # jedes ' -> '\''
@@ -246,13 +559,13 @@ shell_quote_for_cron() {
 is_valid_device_name() {
     local name="$1"
     if [[ -z "$name" ]]; then
-        echo "Name darf nicht leer sein." >&2; return 1
+        printf '%s\n' "$(t dev_name_empty)" >&2; return 1
     elif [[ "$name" == -* ]]; then
-        echo "Name darf nicht mit '-' beginnen (sonst als Option missdeutet)." >&2; return 1
+        printf '%s\n' "$(t dev_name_dash)" >&2; return 1
     elif [[ "$name" == "all" ]]; then
-        echo "'all' ist reserviert (steht fuer 'alle Geraete') - bitte anders benennen." >&2; return 1
+        printf '%s\n' "$(t dev_name_reserved)" >&2; return 1
     elif [[ "$name" == *[[:cntrl:]]* ]]; then
-        echo "Name darf keine Steuerzeichen enthalten." >&2; return 1
+        printf '%s\n' "$(t dev_name_ctrl)" >&2; return 1
     fi
     return 0
 }
@@ -276,24 +589,22 @@ parse_discovered() {  # $1 = mehrzeilige "IP<TAB>ID"-Liste
 # =============================================================================
 ensure_base_tools() {
     if ! command -v python3 &>/dev/null; then
-        warn "python3 nicht gefunden. Versuche automatische Installation..."
+        warn "$(t py_not_found)"
         case "$PKG_MGR" in
             pacman) install_pkg python ;;
             *)      install_pkg python3 ;;
-        esac || error "python3 konnte nicht automatisch installiert werden."
+        esac || error "$(t py_install_failed)"
     fi
 
     PY_MAJOR=$(python3 -c "import sys; print(sys.version_info.major)")
     PY_MINOR=$(python3 -c "import sys; print(sys.version_info.minor)")
     if [[ "$PY_MAJOR" -lt 3 ]] || { [[ "$PY_MAJOR" -eq 3 ]] && [[ "$PY_MINOR" -lt 11 ]]; }; then
-        error "Python 3.11+ erforderlich (gefunden: $PY_MAJOR.$PY_MINOR).
-  Grund: die gepinnte midea-local 6.6.1 setzt Python 3.11 voraus (aktuelle
-  Raspberry Pi OS 'Bookworm' liefert 3.11)."
+        error "$(t py_too_old "$PY_MAJOR" "$PY_MINOR")"
     fi
-    ok "Python $PY_MAJOR.$PY_MINOR gefunden."
+    ok "$(t py_found "$PY_MAJOR" "$PY_MINOR")"
 
     if ! python3 -m venv --help &>/dev/null; then
-        warn "venv-Modul fehlt. Versuche Installation..."
+        warn "$(t venv_missing_try)"
         case "$PKG_MGR" in
             # '|| true', damit ein fehlgeschlagener Installationsversuch unter
             # 'set -e' NICHT hier abbricht - die verbindliche Pruefung (mit
@@ -302,12 +613,12 @@ ensure_base_tools() {
             *)   true ;;
         esac
     fi
-    python3 -m venv --help &>/dev/null || error "venv-Modul fehlt weiterhin. Bitte manuell installieren."
-    ok "venv-Modul verfuegbar."
+    python3 -m venv --help &>/dev/null || error "$(t venv_still_missing)"
+    ok "$(t venv_ok)"
 
     if ! command -v git &>/dev/null && ! command -v curl &>/dev/null; then
-        warn "Weder git noch curl gefunden. Versuche curl zu installieren..."
-        install_pkg curl || error "curl konnte nicht installiert werden."
+        warn "$(t git_curl_missing)"
+        install_pkg curl || error "$(t curl_install_failed)"
     fi
 }
 
@@ -327,18 +638,14 @@ ensure_install_dir() {
     fi
     if [[ -d "$dir" && ! -w "$dir" ]]; then
         local hint=""
-        [[ -f "$dir/midea_ieco_ensure.py" ]] && hint=" Das sieht nach einer frueheren Installation unter einem anderen Benutzer aus."
-        error "Installationsverzeichnis $dir existiert, ist aber nicht beschreibbar.$hint
-  Bitte eine Option waehlen:
-    - anderes Verzeichnis nutzen:   MIDEA_IECO_DIR=/dein/pfad  (Installer erneut ausfuehren)
-    - Rechte selbst korrigieren:    sudo chown -R $(id -un) $(printf '%q' "$dir")
-    - Verzeichnis entfernen, falls es nicht mehr benoetigt wird."
+        [[ -f "$dir/midea_ieco_ensure.py" ]] && hint=" $(t dir_hint_prev_install)"
+        error "$(t err_dir_not_writable "$dir" "$hint" "$(id -un)" "$(printf '%q' "$dir")")"
     fi
     # Verzeichnis existiert noch nicht: zuerst die Elternkette anlegen (bei
     # Bedarf per sudo, aber OHNE chown), dann das Blatt SELBST anlegen.
     local parent; parent="$(dirname "$dir")"
     if [[ ! -d "$parent" ]]; then
-        mkdir -p "$parent" 2>/dev/null || { info "Benoetige sudo, um $parent anzulegen..."; sudo mkdir -p "$parent"; }
+        mkdir -p "$parent" 2>/dev/null || { info "$(t sudo_need_mkdir "$parent")"; sudo mkdir -p "$parent"; }
     fi
     # 'mkdir' OHNE -p: ein zwischenzeitlich von Dritten angelegtes Verzeichnis
     # (TOCTOU) wird NICHT als Erfolg gewertet - dann scheitert auch das folgende
@@ -346,7 +653,7 @@ ensure_install_dir() {
     if mkdir "$dir" 2>/dev/null; then
         return 0
     fi
-    info "Benoetige sudo, um $dir anzulegen..."
+    info "$(t sudo_need_mkdir "$dir")"
     sudo mkdir "$dir"
     sudo chown "$(id -u):$(id -g)" "$dir"
 }
@@ -375,8 +682,8 @@ resolve_extracted_root_dir() {
     done
     case "${#subdirs[@]}" in
         1) printf '%s\n' "${subdirs[0]}"; return 0 ;;
-        0) error "Kein Wurzelverzeichnis im heruntergeladenen Archiv gefunden (Download beschaedigt oder Archivformat geaendert)." ;;
-        *) error "Unerwartete Archivstruktur: mehrere Wurzelverzeichnisse gefunden (${subdirs[*]})." ;;
+        0) error "$(t err_zip_no_root)" ;;
+        *) error "$(t err_zip_multi_root "${subdirs[*]}")" ;;
     esac
 }
 
@@ -389,9 +696,9 @@ resolve_extracted_root_dir() {
 # Update-fetch-Pfad verlaesst das Skript anschliessend per 'exec', wodurch der
 # Trap NICHT mehr feuert. CLEANUP_PATHS bleibt als Sicherung fuer den Fehlerpfad.
 download_and_overlay_zip() {
-    command -v curl &>/dev/null || error "curl wird fuer den ZIP-Download benoetigt, ist aber nicht verfuegbar."
+    command -v curl &>/dev/null || error "$(t err_zip_needs_curl)"
     command -v unzip &>/dev/null || install_pkg unzip \
-        || error "unzip wird fuer den ZIP-Download benoetigt, konnte aber nicht installiert werden (Paketmanager: $PKG_MGR). Bitte git oder unzip manuell installieren."
+        || error "$(t err_zip_needs_unzip "$PKG_MGR")"
     local tmp_dir tmp_zip extracted_root
     tmp_dir="$(mktemp -d)"
     CLEANUP_PATHS+=("$tmp_dir")
@@ -415,37 +722,37 @@ download_and_overlay_zip() {
 fetch_project_files() {
     local mode="$1"
     if command -v git &>/dev/null && [[ -d "$INSTALL_DIR/.git" ]]; then
-        info "Aktualisiere vorhandene Installation (git pull)..."
+        info "$(t fetch_git_pull)"
         # Lokale Aenderungen an getrackten Dateien (z.B. manuell editierte
         # install.sh) wuerden --ff-only scheitern lassen. Vorher pruefen und
         # verstaendlich melden, statt den Nutzer mit einer git-Fehlermeldung
         # allein zu lassen. 'git diff --quiet' -> rc 1 bei Aenderungen; unter
         # 'set -e' sicher im 'if !'-Kontext.
         if ! git -C "$INSTALL_DIR" diff --quiet 2>/dev/null; then
-            warn "Lokale Aenderungen an getrackten Dateien erkannt - git pull uebersprungen."
-            warn "  Tipp: Pfade ueber MIDEA_IECO_DIR/MIDEA_IECO_BIN_DIR setzen statt install.sh zu editieren,"
-            warn "  oder Aenderungen mit 'git -C $INSTALL_DIR stash' zuruecklegen und Update wiederholen."
+            warn "$(t fetch_local_changes)"
+            warn "$(t fetch_tip_1)"
+            warn "$(t fetch_tip_2 "$INSTALL_DIR")"
         elif git -C "$INSTALL_DIR" pull --ff-only --quiet; then
-            ok "Projekt-Dateien aktualisiert."
+            ok "$(t fetch_updated)"
         else
-            warn "git pull nicht moeglich (kein Netz oder non-fast-forward) - NICHT aktualisiert, nutze vorhandene Dateien weiter."
+            warn "$(t fetch_pull_failed)"
         fi
     elif [[ "$mode" == "update" ]]; then
-        info "Aktualisiere vorhandene Installation (ZIP-Download)..."
+        info "$(t fetch_zip_update)"
         download_and_overlay_zip
-        ok "Projekt-Dateien aktualisiert (ZIP)."
+        ok "$(t fetch_updated_zip)"
     elif [[ ! -f "$INSTALL_DIR/midea_ieco_ensure.py" ]]; then
-        info "Lade Projekt-Dateien nach $INSTALL_DIR ..."
+        info "$(t fetch_downloading "$INSTALL_DIR")"
         if command -v git &>/dev/null; then
             git clone --quiet "$REPO_URL" "$INSTALL_DIR"
         elif command -v curl &>/dev/null; then
             download_and_overlay_zip
         else
-            error "Weder git noch curl verfuegbar. Bitte Repository manuell herunterladen."
+            error "$(t err_no_git_curl)"
         fi
-        ok "Projekt-Dateien bereitgestellt in $INSTALL_DIR."
+        ok "$(t fetch_provided "$INSTALL_DIR")"
     else
-        ok "Projekt-Dateien bereits vorhanden in $INSTALL_DIR."
+        ok "$(t fetch_present "$INSTALL_DIR")"
     fi
 }
 
@@ -457,11 +764,11 @@ fetch_project_files() {
 # =============================================================================
 setup_venv_and_deps() {
     if [[ -d "venv" ]]; then
-        info "venv existiert bereits - ueberspringe Erstellung."
+        info "$(t venv_exists)"
     else
-        info "Erstelle virtuelle Umgebung..."
+        info "$(t venv_creating)"
         python3 -m venv venv
-        ok "venv erstellt."
+        ok "$(t venv_created)"
     fi
 
     # shellcheck disable=SC1091
@@ -473,12 +780,12 @@ setup_venv_and_deps() {
     if [[ -f requirements.txt ]]; then
         pip install --quiet -r requirements.txt
     else
-        warn "requirements.txt nicht gefunden - installiere msmart-ng/midea-local ungepinnt."
+        warn "$(t req_missing)"
         # typing_extensions explizit mitnehmen: midea-local 6.6.1 importiert es,
         # deklariert es aber NICHT als Dependency (s. requirements.txt-Kommentar).
         pip install --quiet msmart-ng midea-local typing_extensions
     fi
-    ok "Abhaengigkeiten installiert (msmart-ng, midea-local)."
+    ok "$(t deps_installed)"
 
     # Sofortige Funktionspruefung der Kern-Abhaengigkeiten. midea-local 6.6.1
     # importiert 'typing_extensions', deklariert es aber nicht - fehlt es, taucht
@@ -486,16 +793,14 @@ setup_venv_and_deps() {
     # fehl, wird die bekannte Luecke AUTOMATISCH geschlossen und erneut geprueft -
     # der Installer heilt sich also selbst, statt den Nutzer abzuweisen.
     if ! check_core_imports; then
-        warn "Kern-Abhaengigkeiten nicht importierbar - installiere fehlende Pakete nach..."
+        warn "$(t core_deps_retry)"
         pip install --quiet typing_extensions || true
         if ! check_core_imports; then
-            error "Kern-Abhaengigkeiten weiterhin nicht importierbar - automatische Reparatur fehlgeschlagen.
-  Bitte manuell pruefen (Netzwerk?) und erneut starten:
-    \"$INSTALL_DIR/venv/bin/pip\" install -r \"$INSTALL_DIR/requirements.txt\""
+            error "$(t err_core_deps "$INSTALL_DIR" "$INSTALL_DIR")"
         fi
-        ok "Fehlende Kern-Abhaengigkeit(en) automatisch nachinstalliert."
+        ok "$(t core_deps_repaired)"
     else
-        ok "Kern-Abhaengigkeiten importierbar (midealocal, msmart)."
+        ok "$(t core_deps_ok)"
     fi
 
     # Version rein informativ anzeigen - diese Zeilen duerfen den Installer unter
@@ -511,8 +816,8 @@ setup_venv_and_deps() {
     #     stattdessen greift der ${VAR:-unbekannt}-Fallback unten.
     MSMART_VER=$(pip show msmart-ng 2>/dev/null | awk '/^Version:/{print $2}') || true
     MIDEALOCAL_VER=$(pip show midea-local 2>/dev/null | awk '/^Version:/{print $2}') || true
-    info "  msmart-ng    : ${MSMART_VER:-unbekannt}"
-    info "  midea-local  : ${MIDEALOCAL_VER:-unbekannt}"
+    info "  msmart-ng    : ${MSMART_VER:-$(t val_unknown)}"
+    info "  midea-local  : ${MIDEALOCAL_VER:-$(t val_unknown)}"
 }
 
 # =============================================================================
@@ -531,19 +836,19 @@ install_bin_wrapper() {
     CLEANUP_PATHS+=("$tmp")
     cat > "$tmp" <<EOF
 #!/usr/bin/env bash
-# Automatisch von install.sh erzeugter Wrapper.
+# Wrapper generated automatically by install.sh.
 $body
 EOF
     if [[ -w "$BIN_DIR" ]]; then
         install -m 0755 "$tmp" "$target" 2>/dev/null \
             || { cp "$tmp" "$target" && chmod 0755 "$target"; }
     else
-        info "Benoetige sudo, um den Wrapper nach $BIN_DIR zu schreiben..."
+        info "$(t sudo_need_wrapper "$BIN_DIR")"
         sudo install -m 0755 "$tmp" "$target" 2>/dev/null \
             || { sudo cp "$tmp" "$target" && sudo chmod 0755 "$target"; }
     fi
     rm -f "$tmp"
-    ok "Wrapper-Skript angelegt: $target"
+    ok "$(t wrapper_created "$target")"
 }
 
 # Marker, an dem ein bereits eingetragener PATH-Block in einer Shell-Startdatei
@@ -588,39 +893,39 @@ ensure_bin_on_path() {
     case ":$PATH:" in *":$BIN_DIR:"*) return 0 ;; esac
 
     if [[ ! "$BIN_DIR" =~ ^[A-Za-z0-9._/-]+$ ]]; then
-        warn "$BIN_DIR ist nicht im PATH. Manuell ergaenzen: export PATH=\"$BIN_DIR:\$PATH\""
+        warn "$(t path_not_in_manual "$BIN_DIR" "$BIN_DIR")"
         return 0
     fi
 
     local rc; rc="$(_path_rc_file)"
 
     if [[ -f "$rc" ]] && grep -qF "$PATH_BLOCK_MARKER" "$rc"; then
-        info "$BIN_DIR ist in $rc bereits eingetragen - in einer NEUEN Shell aktiv (oder jetzt: source $rc)."
+        info "$(t path_already_in_rc "$BIN_DIR" "$rc" "$rc")"
         return 0
     fi
 
     if [ ! -t 0 ]; then
-        warn "$BIN_DIR ist nicht im PATH. In $rc ergaenzen mit: export PATH=\"$BIN_DIR:\$PATH\""
+        warn "$(t path_add_to_rc_hint "$BIN_DIR" "$rc" "$BIN_DIR")"
         return 0
     fi
 
     local ans
     echo ""
-    if ! read -r -p "  $BIN_DIR ist nicht im PATH. Zu $rc hinzufuegen? [J/n]: " ans; then
+    if ! read -r -p "$(t path_prompt_add "$BIN_DIR" "$rc")" ans; then
         echo ""
-        info "Eingabe abgebrochen. Manuell ergaenzen (in $rc): export PATH=\"$BIN_DIR:\$PATH\""
+        info "$(t path_input_aborted "$rc" "$BIN_DIR")"
         return 0
     fi
     if [[ "$ans" =~ ^[nN]$ ]]; then
-        info "Uebersprungen. Manuell ergaenzen (in $rc): export PATH=\"$BIN_DIR:\$PATH\""
+        info "$(t path_skipped "$rc" "$BIN_DIR")"
         return 0
     fi
 
     if _write_path_block "$rc"; then
-        ok "$BIN_DIR zu $rc hinzugefuegt."
-        info "In der AKTUELLEN Shell sofort aktiv mit:  source $rc"
+        ok "$(t path_added "$BIN_DIR" "$rc")"
+        info "$(t path_active_now "$rc")"
     else
-        warn "Konnte $rc nicht schreiben. Manuell ergaenzen: export PATH=\"$BIN_DIR:\$PATH\""
+        warn "$(t path_write_failed "$rc" "$BIN_DIR")"
     fi
 }
 
@@ -634,7 +939,7 @@ install_all_wrappers() {
     # (z.B. /opt/local/bin) sind der Normalfall; wir legen Dateien hinein, statt
     # das Verzeichnis zu uebernehmen.
     if [[ ! -d "$BIN_DIR" ]]; then
-        mkdir -p "$BIN_DIR" 2>/dev/null || { info "Benoetige sudo, um $BIN_DIR anzulegen..."; sudo mkdir -p "$BIN_DIR"; }
+        mkdir -p "$BIN_DIR" 2>/dev/null || { info "$(t sudo_need_mkdir "$BIN_DIR")"; sudo mkdir -p "$BIN_DIR"; }
     fi
     local q; q="$(printf '%q' "$INSTALL_DIR")"
     # Steuerungs-Wrapper: ruft direkt den venv-Python (kein Exec-Bit noetig).
@@ -669,7 +974,7 @@ read_version_ref() {
     if [[ -z "$ref" && -f "$INSTALL_DIR/CHANGELOG.md" ]]; then
         ref="$(awk '/^## \[[0-9]/{ gsub(/^## \[|\].*/, ""); print; exit }' "$INSTALL_DIR/CHANGELOG.md" 2>/dev/null)" || ref=""
     fi
-    printf '%s' "${ref:-unbekannt}"
+    printf '%s' "${ref:-$(t val_unknown)}"
 }
 
 # =============================================================================
@@ -699,12 +1004,17 @@ run_update() {
             # Update setzt eine echte, auf Platte liegende Installation voraus
             # (nicht curl|bash). Klarer Abbruch statt kryptischem Folgefehler.
             [[ -n "$SCRIPT_DIR" && -f "$INSTALL_DIR/install.sh" ]] \
-                || error "Update benoetigt eine installierte Kopie. install.sh nicht gefunden unter $INSTALL_DIR."
+                || error "$(t err_update_needs_install "$INSTALL_DIR")"
             local tmp; tmp="$(mktemp)"
             cp "$INSTALL_DIR/install.sh" "$tmp"
+            # Aufgeloeste Sprache ueber die exec-Grenze mitgeben: ein per --lang
+            # gewaehlter Wert steht sonst nur der relaunch-Phase zur Verfuegung,
+            # und fetch/apply fielen auf die Locale zurueck (gemischtsprachige
+            # Ausgabe). MIDEA_IECO_LANG hat in resolve_lang Vorrang vor der Locale.
             exec env MIDEA_IECO_UPDATE_PHASE=fetch \
                      MIDEA_IECO_RESOLVED_DIR="$INSTALL_DIR" \
                      MIDEA_IECO_UPDATE_TMP="$tmp" \
+                     MIDEA_IECO_LANG="$LANG_CHOICE" \
                      bash "$tmp" --update
             ;;
         fetch)
@@ -723,6 +1033,7 @@ run_update() {
                      MIDEA_IECO_RESOLVED_DIR="$INSTALL_DIR" \
                      MIDEA_IECO_UPDATE_TMP="${MIDEA_IECO_UPDATE_TMP:-}" \
                      MIDEA_IECO_PREV_REF="$prev_ref" \
+                     MIDEA_IECO_LANG="$LANG_CHOICE" \
                      bash "$INSTALL_DIR/install.sh" --update
             ;;
         apply)
@@ -734,22 +1045,22 @@ run_update() {
             install_all_wrappers
             deactivate 2>/dev/null || true
             local new_ref; new_ref="$(read_version_ref)"
-            local prev_ref="${MIDEA_IECO_PREV_REF:-unbekannt}"
+            local prev_ref="${MIDEA_IECO_PREV_REF:-$(t val_unknown)}"
             echo ""
             echo -e "${GREEN}=================================================${NC}"
-            echo -e "${GREEN}   Update abgeschlossen!                        ${NC}"
+            echo -e "${GREEN}   $(t banner_update_done)${NC}"
             echo -e "${GREEN}=================================================${NC}"
             if [[ "$prev_ref" == "$new_ref" ]]; then
-                info "Version: $new_ref (war bereits aktuell)"
+                info "$(t update_version_uptodate "$new_ref")"
             else
-                info "Version: $prev_ref -> $new_ref"
+                info "$(t update_version_changed "$prev_ref" "$new_ref")"
             fi
-            info "Aenderungen siehe CHANGELOG.md"
+            info "$(t update_see_changelog)"
             echo ""
             exit 0
             ;;
         *)
-            error "Unbekannte interne Update-Phase: '$UPDATE_PHASE'."
+            error "$(t err_unknown_phase "$UPDATE_PHASE")"
             ;;
     esac
 }
@@ -796,9 +1107,9 @@ if [[ "$RECONFIGURE" -eq 0 ]] && is_already_configured; then
     install_all_wrappers
     deactivate 2>/dev/null || true
     echo ""
-    info "Bereits eingerichtet - Onboarding uebersprungen (devices.json unangetastet)."
-    info "  Aktualisieren:        midea-ieco-update"
-    info "  Neu einrichten:       install.sh --reconfigure"
+    info "$(t already_configured)"
+    info "$(t already_cfg_update)"
+    info "$(t already_cfg_reconfigure)"
     exit 0
 fi
 
@@ -807,7 +1118,7 @@ fi
 # git-ignoriert, da sie echte Token/Key-Werte enthaelt.
 if [[ "$RECONFIGURE" -eq 1 && -f devices.json ]]; then
     cp -p devices.json devices.json.bak
-    ok "Vorhandene devices.json nach devices.json.bak gesichert."
+    ok "$(t devices_backed_up)"
 fi
 
 # =============================================================================
@@ -815,16 +1126,14 @@ fi
 # =============================================================================
 echo ""
 echo -e "${YELLOW}=================================================${NC}"
-echo -e "${YELLOW}   WICHTIG: Feste IP-Adressen empfohlen          ${NC}"
+echo -e "${YELLOW}   $(t ip_banner_title)${NC}"
 echo -e "${YELLOW}=================================================${NC}"
 echo ""
-echo "  Richte im Router idealerweise eine DHCP-Reservierung fuer jede"
-echo "  Klimaanlage ein. Das ist KEINE Voraussetzung - die IP kann"
-echo "  jederzeit auch nachtraeglich in devices.json angepasst werden."
+printf '%s\n' "$(t ip_hint)"
 echo ""
-read -r -p "  Weiter mit der Einrichtung? [J/n]: " CONTINUE_SETUP
+read -r -p "$(t prompt_continue_setup)" CONTINUE_SETUP
 if [[ "$CONTINUE_SETUP" =~ ^[nN]$ ]]; then
-    info "Installation der Abhaengigkeiten ist abgeschlossen."
+    info "$(t deps_done_abort)"
     exit 0
 fi
 
@@ -832,26 +1141,26 @@ fi
 # 7. Midea-Cloud-Zugangsdaten abfragen
 # =============================================================================
 echo ""
-echo -e "${YELLOW}--- Midea-APP-Zugangsdaten ---${NC}"
-read -r -p "  E-Mail-Adresse : " MIDEA_USER
+echo -e "${YELLOW}--- $(t hdr_credentials) ---${NC}"
+read -r -p "$(t prompt_email)" MIDEA_USER
 # IFS= verhindert, dass fuehrende/abschliessende Leerzeichen im Passwort
 # abgeschnitten werden (-r schuetzt zusaetzlich Backslashes).
-IFS= read -r -s -p "  Passwort       : " MIDEA_PASS
+IFS= read -r -s -p "$(t prompt_password)" MIDEA_PASS
 echo ""
 
-[[ -z "$MIDEA_USER" || -z "$MIDEA_PASS" ]] && error "E-Mail und Passwort duerfen nicht leer sein."
+[[ -z "$MIDEA_USER" || -z "$MIDEA_PASS" ]] && error "$(t err_credentials_empty)"
 
 # Zugangsdaten sofort sicher ablegen (0600), noch VOR der Geraetesuche - so
 # kann der Discover-Schritt sie ueber eine Config-Datei lesen, statt sie auf
 # der Kommandozeile zu uebergeben (sonst waere das Passwort via ps sichtbar).
-write_credentials_file credentials.json || error "credentials.json konnte nicht geschrieben werden."
-ok "Zugangsdaten in credentials.json gespeichert (chmod 600)."
+write_credentials_file credentials.json || error "$(t err_credentials_write)"
+ok "$(t credentials_saved)"
 
 # =============================================================================
 # 8. Geraete im Netzwerk suchen
 # =============================================================================
 echo ""
-info "Suche Midea-Geraete im lokalen Netzwerk (kann etwas dauern)..."
+info "$(t discover_searching)"
 echo ""
 # midealocal.discover.discover() macht einen lokalen UDP-Broadcast und liefert
 # IP-Adresse + Geraete-ID je Geraet OHNE Cloud-Zugang - genau die zwei Werte,
@@ -878,23 +1187,23 @@ PYEOF
 ) || DISCOVER_RC=$?
 
 if [[ "$DISCOVER_RC" -eq 0 && -n "$DISCOVERED" ]]; then
-    ok "Gefundene Geraete - diese IP und Geraete-ID gleich unten eintragen:"
-    printf "    %-15s  %s\n" "IP-ADRESSE" "GERAETE-ID"
+    ok "$(t discover_found)"
+    printf "    %-15s  %s\n" "$(t col_ip)" "$(t col_device_id)"
     printf "    %-15s  %s\n" "---------------" "----------"
     while IFS=$'\t' read -r disc_ip disc_id; do
         printf "    %-15s  %s\n" "$disc_ip" "$disc_id"
     done <<< "$DISCOVERED"
     echo ""
 else
-    warn "Keine Geraete automatisch erkannt (Netzwerk-/Client-Isolation? Geraet aus?)."
-    warn "IP und Geraete-ID koennen auch manuell eingetragen werden - siehe README, 'Netzwerk-Fehlerbehebung'."
+    warn "$(t discover_none)"
+    warn "$(t discover_manual_hint)"
 fi
 
 # =============================================================================
 # 9. devices.json interaktiv anlegen (ueber python3/json fuer sichere Escapes)
 # =============================================================================
 echo ""
-echo -e "${YELLOW}--- Geraetekonfiguration ---${NC}"
+echo -e "${YELLOW}--- $(t hdr_device_config) ---${NC}"
 
 IP_REGEX='^([0-9]{1,3}\.){3}[0-9]{1,3}$'
 DEVICE_NAMES=(); DEVICE_IPS=(); DEVICE_IDS=()
@@ -908,7 +1217,7 @@ fi
 
 USE_DISCOVERED=""
 if [[ "${#DISC_IPS[@]}" -gt 0 ]]; then
-    read -r -p "  ${#DISC_IPS[@]} Geraet(e) erkannt - IP/ID automatisch uebernehmen und nur Namen vergeben? [J/n]: " ANS_AUTO
+    read -r -p "$(t prompt_use_discovered "${#DISC_IPS[@]}")" ANS_AUTO
     [[ ! "$ANS_AUTO" =~ ^[nN]$ ]] && USE_DISCOVERED="yes"
 fi
 
@@ -916,9 +1225,9 @@ if [[ -n "$USE_DISCOVERED" ]]; then
     # Auto-Befuellung: IP/ID stammen aus der Discovery, nur noch Name je Geraet.
     for (( i=0; i<${#DISC_IPS[@]}; i++ )); do
         echo ""
-        echo "  Geraet $((i + 1)) von ${#DISC_IPS[@]}:  IP ${DISC_IPS[i]}   ID ${DISC_IDS[i]}"
+        printf '%s\n' "$(t dev_line_auto "$((i + 1))" "${#DISC_IPS[@]}" "${DISC_IPS[i]}" "${DISC_IDS[i]}")"
         while true; do
-            read -r -p "    Name (z.B. Wohnzimmer): " DEV_NAME
+            read -r -p "$(t prompt_dev_name)" DEV_NAME
             if reason="$(is_valid_device_name "$DEV_NAME" 2>&1)"; then
                 break
             fi
@@ -928,13 +1237,13 @@ if [[ -n "$USE_DISCOVERED" ]]; then
     done
 else
     # Manuelle Eingabe (Fallback: nichts erkannt oder bewusst abgelehnt).
-    read -r -p "  Anzahl der Klimaanlagen: " DEVICE_COUNT
-    [[ "$DEVICE_COUNT" =~ ^[1-9][0-9]*$ ]] || error "Ungueltige Anzahl: '$DEVICE_COUNT'."
+    read -r -p "$(t prompt_device_count)" DEVICE_COUNT
+    [[ "$DEVICE_COUNT" =~ ^[1-9][0-9]*$ ]] || error "$(t err_invalid_count "$DEVICE_COUNT")"
     for (( i=1; i<=DEVICE_COUNT; i++ )); do
         echo ""
-        echo "  Geraet $i von $DEVICE_COUNT:"
+        printf '%s\n' "$(t dev_line_manual "$i" "$DEVICE_COUNT")"
         while true; do
-            read -r -p "    Name (z.B. Wohnzimmer)  : " DEV_NAME
+            read -r -p "$(t prompt_dev_name)" DEV_NAME
             if reason="$(is_valid_device_name "$DEV_NAME" 2>&1)"; then
                 break
             fi
@@ -942,15 +1251,15 @@ else
         done
 
         while true; do
-            read -r -p "    IP-Adresse              : " DEV_IP
+            read -r -p "$(t prompt_dev_ip)" DEV_IP
             [[ "$DEV_IP" =~ $IP_REGEX ]] && break
-            warn "Ungueltiges IP-Format. Beispiel: 192.168.0.186"
+            warn "$(t err_ip_format)"
         done
 
         while true; do
-            read -r -p "    Geraete-ID (nur Ziffern): " DEV_ID
+            read -r -p "$(t prompt_dev_id)" DEV_ID
             [[ "$DEV_ID" =~ ^[0-9]+$ ]] && break
-            warn "Geraete-ID muss numerisch sein (siehe 'id' aus der Discover-Ausgabe)."
+            warn "$(t err_dev_id_numeric)"
         done
 
         DEVICE_NAMES+=("$DEV_NAME"); DEVICE_IPS+=("$DEV_IP"); DEVICE_IDS+=("$DEV_ID")
@@ -997,7 +1306,7 @@ except BaseException:
     raise
 PYEOF
 
-ok "devices.json geschrieben (chmod 600)."
+ok "$(t devices_written)"
 
 # =============================================================================
 # 10. (Zugangsdaten wurden bereits in Schritt 7 in credentials.json abgelegt.)
@@ -1007,12 +1316,12 @@ ok "devices.json geschrieben (chmod 600)."
 # 11. Token/Key-Paare abrufen
 # =============================================================================
 echo ""
-info "Rufe Token/Key-Paare fuer alle Geraete ab..."
+info "$(t tokens_fetching)"
 if python3 midea_refresh_tokens.py --all; then
-    ok "Token/Key-Paare erfolgreich abgerufen."
+    ok "$(t tokens_fetched)"
 else
-    warn "Token-Abruf mit Fehlern beendet. Spaeter wiederholen mit:"
-    warn "  cd $INSTALL_DIR && venv/bin/python3 midea_refresh_tokens.py --all"
+    warn "$(t tokens_failed)"
+    warn "$(t tokens_retry_cmd "$INSTALL_DIR")"
 fi
 
 # =============================================================================
@@ -1025,14 +1334,14 @@ install_all_wrappers
 # 13. Schnelltest
 # =============================================================================
 echo ""
-read -r -p "  Testlauf fuer das erste Geraet durchfuehren? [j/N]: " DO_TEST
+read -r -p "$(t prompt_test_run)" DO_TEST
 if [[ "$DO_TEST" =~ ^[jJyY]$ ]]; then
     FIRST_DEVICE=$(python3 -c "import json; print(json.load(open('devices.json'))['devices'][0]['name'])")
-    info "Teste Geraet: $FIRST_DEVICE"
+    info "$(t test_running "$FIRST_DEVICE")"
     if python3 midea_ieco_ensure.py "$FIRST_DEVICE"; then
-        ok "Testlauf erfolgreich!"
+        ok "$(t test_ok)"
     else
-        warn "Testlauf fehlgeschlagen. Siehe Abschnitt 'Netzwerk-Fehlerbehebung' in README_german.md."
+        warn "$(t test_failed)"
     fi
 fi
 
@@ -1052,7 +1361,7 @@ CRON_LINE_REFRESH="0 3 * * 0 cd $IDQ && venv/bin/python3 midea_refresh_tokens.py
 CRON_LINE_LOGROTATE="0 0 1 * * truncate -s 0 $IDQ/ieco.log $IDQ/refresh.log $CRON_MARKER"
 
 echo ""
-echo -e "${YELLOW}--- Optionaler Cron-Job ---${NC}"
+echo -e "${YELLOW}--- $(t hdr_cron) ---${NC}"
 echo ""
 echo "$CRON_LINE_IECO"
 echo "$CRON_LINE_REFRESH"
@@ -1060,22 +1369,22 @@ echo "$CRON_LINE_LOGROTATE"
 echo ""
 
 if command -v crontab &>/dev/null; then
-    read -r -p "  Diese Cron-Jobs jetzt automatisch eintragen? [j/N]: " DO_CRON
+    read -r -p "$(t prompt_cron_add)" DO_CRON
     if [[ "$DO_CRON" =~ ^[jJyY]$ ]]; then
         EXISTING_CRON=$(crontab -l 2>/dev/null || true)
         if echo "$EXISTING_CRON" | grep -qF "$CRON_MARKER"; then
-            warn "midea-ieco-Cron-Jobs sind bereits eingetragen. Ueberspringe, um Duplikate zu vermeiden."
+            warn "$(t cron_already)"
         else
             { echo "$EXISTING_CRON"
               echo "$CRON_LINE_IECO"
               echo "$CRON_LINE_REFRESH"
               echo "$CRON_LINE_LOGROTATE"
             } | crontab -
-            ok "Cron-Jobs eingetragen fuer Benutzer $(whoami)."
+            ok "$(t cron_added "$(whoami)")"
         fi
     fi
 else
-    warn "Kein 'crontab'-Kommando gefunden. Cron-Jobs muessen manuell eingerichtet werden."
+    warn "$(t cron_no_crontab)"
 fi
 
 # =============================================================================
@@ -1083,15 +1392,8 @@ fi
 # =============================================================================
 echo ""
 echo -e "${GREEN}=================================================${NC}"
-echo -e "${GREEN}   Installation abgeschlossen!                  ${NC}"
+echo -e "${GREEN}   $(t banner_install_done)${NC}"
 echo -e "${GREEN}=================================================${NC}"
 echo ""
-echo "  Verzeichnis:        $INSTALL_DIR"
-echo "  Wrapper-Befehl:     midea-ieco <Geraetename>   (falls $BIN_DIR im PATH ist)"
-echo "  Aktualisieren:      midea-ieco-update"
-echo "  Direkter Aufruf:    cd $INSTALL_DIR && venv/bin/python3 midea_ieco_ensure.py <Geraetename>"
-echo "  Alle Geraete:       venv/bin/python3 midea_ieco_ensure.py all"
-echo "  Token auffrischen:  venv/bin/python3 midea_refresh_tokens.py --all"
-echo ""
-echo "  Detaillierte Anleitung: README_german.md / README.md"
+printf '%s\n' "$(t final_summary "$INSTALL_DIR" "$BIN_DIR" "$INSTALL_DIR")"
 echo ""

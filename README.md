@@ -46,6 +46,15 @@ MIDEA_IECO_DIR=/your/custom/path MIDEA_IECO_BIN_DIR=/your/custom/bin \
   bash -c "$(curl -fsSL https://raw.githubusercontent.com/tuxbox78/midea-ieco/main/install.sh)"
 ```
 
+The installer, its update mode, and the whole onboarding are **bilingual (English/German)**. The language follows your locale automatically — English by default, German on a `de_*` locale (`LANG` / `LC_ALL` / `LC_MESSAGES`). Force it explicitly with the `MIDEA_IECO_LANG` environment variable (`en` or `de`), which is handy for the one-liner:
+
+```bash
+MIDEA_IECO_LANG=de \
+  bash -c "$(curl -fsSL https://raw.githubusercontent.com/tuxbox78/midea-ieco/main/install.sh)"
+```
+
+A downloaded script also accepts a `--lang en|de` flag (e.g. `install.sh --lang de`).
+
 If the install directory doesn't exist yet, the installer creates it and hands ownership to you (using `sudo` only if its parent isn't writable). It never takes over a directory that already exists: if the install directory is present but not writable, it stops and shows your options (choose another path via `MIDEA_IECO_DIR`, fix the permissions yourself, or remove it). The small `midea-ieco` wrapper is placed into the bin directory with a single `sudo install` step when that directory is root-owned (e.g. MacPorts' `/opt/local/bin`), without changing the directory's ownership.
 
 > **Before you begin:** Have your **MSmartHome username and password** ready — the same credentials used in the official Midea app. They are requested once during installation to fetch device tokens.

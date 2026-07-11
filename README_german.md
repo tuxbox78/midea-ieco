@@ -46,6 +46,15 @@ MIDEA_IECO_DIR=/eigener/pfad MIDEA_IECO_BIN_DIR=/eigener/bin \
   bash -c "$(curl -fsSL https://raw.githubusercontent.com/tuxbox78/midea-ieco/main/install.sh)"
 ```
 
+Installer, Update-Modus und das gesamte Onboarding sind **zweisprachig (Deutsch/Englisch)**. Die Sprache richtet sich automatisch nach deiner Locale — Deutsch bei einer `de_*`-Locale (`LANG` / `LC_ALL` / `LC_MESSAGES`), sonst Englisch. **Wichtig:** Viele Raspberry Pis laufen mit einer `en_*`-Locale (z. B. `en_GB`) und zeigen dann Englisch. Erzwinge Deutsch über die Umgebungsvariable `MIDEA_IECO_LANG=de` – praktisch direkt beim Einzeiler:
+
+```bash
+MIDEA_IECO_LANG=de \
+  bash -c "$(curl -fsSL https://raw.githubusercontent.com/tuxbox78/midea-ieco/main/install.sh)"
+```
+
+Ein manuell heruntergeladenes Skript akzeptiert zusätzlich das Flag `--lang en|de` (z. B. `install.sh --lang de`).
+
 Existiert das Installationsverzeichnis noch nicht, legt der Installer es an und überträgt dir den Besitz (`sudo` nur, falls der übergeordnete Ordner nicht beschreibbar ist). Ein bereits bestehendes Verzeichnis wird nie übernommen: ist das Installationsverzeichnis vorhanden, aber nicht beschreibbar, bricht der Installer ab und zeigt deine Optionen (anderen Pfad über `MIDEA_IECO_DIR` wählen, Rechte selbst korrigieren oder Verzeichnis entfernen). Der kleine `midea-ieco`-Wrapper wird bei einem root-eigenen Bin-Verzeichnis (z. B. MacPorts’ `/opt/local/bin`) mit einem einzigen `sudo install`-Schritt abgelegt, ohne dessen Besitzverhältnisse zu ändern.
 
 > **Bevor du beginnst:** Halte deinen **MSmartHome-Benutzernamen und dein Passwort** bereit – dieselben Zugangsdaten wie in der offiziellen Midea-App. Sie werden einmalig während der Installation zum Abholen der Geräte-Token abgefragt.
