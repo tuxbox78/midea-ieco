@@ -337,6 +337,38 @@ async def ensure_ieco(dev_conf: dict, only_if_on: bool) -> bool:
         await close_device(device)
 
 
+def _device_config_problem(d: dict) -> str | None:
+    """Prueft einen (bereits als Objekt bekannten) Geraeteeintrag auf die zum
+    Verbinden zwingend noetigen Felder. Gibt einen Klartext-Grund zurueck, wenn
+    das Geraet NICHT ansteuerbar ist, sonst None.
+
+    Geprueft werden genau die Felder, die connect_and_refresh AUSSERHALB seines
+    try-Blocks liest: die Pflichtfelder name/ip/id (dev_conf["name"] sowie
+    AC(ip=..., device_id=int(dev_conf["id"]))) und das optionale port
+    (int(dev_conf.get("port", 6444))). Ein fehlendes Pflichtfeld oder eine
+    nicht-numerische id/port wuerde dort mit einem ungefangenen KeyError/
+    ValueError/TypeError den ganzen Lauf abbrechen. token/key werden hier bewusst
+    NICHT geprueft: fehlen sie, meldet der Verbindungsaufbau das ohnehin als
+    sauberen Fehlschlag (im try -> RuntimeError -> Exit 2)."""
+    for key in ("name", "ip", "id"):
+        if key not in d:
+            return f"Pflichtfeld '{key}' fehlt"
+    try:
+        int(d["id"])
+    except (TypeError, ValueError):
+        return f"Feld 'id' ist nicht numerisch ({d['id']!r})"
+    # port ist optional (Default 6444), wird aber - wenn vorhanden - ebenfalls
+    # ausserhalb des try mit int() konvertiert; ein nicht-numerischer/leerer/
+    # None-Wert wuerde dort ungefangen abbrechen. Fehlt der Schluessel, greift
+    # der Default 6444 - dann gibt es nichts zu pruefen.
+    if "port" in d:
+        try:
+            int(d["port"])
+        except (TypeError, ValueError):
+            return f"Feld 'port' ist nicht numerisch ({d['port']!r})"
+    return None
+
+
 async def main() -> None:
     parser = argparse.ArgumentParser(
         prog=CMD_MAIN,
@@ -368,13 +400,25 @@ async def main() -> None:
     # Nicht-Objekt-Eintraege (nur durch Hand-Edit moeglich) koennen keine
     # Geraete sein: klar melden und ueberspringen, statt spaeter im
     # Steuerungspfad mit einem TypeError abzubrechen (konsistent zur Uebersicht).
-    # d.get statt d["name"] faengt zusaetzlich einen Objekt-Eintrag ohne
-    # "name"-Feld ab, statt einen KeyError zu werfen.
-    devices = [d for d in config["devices"] if isinstance(d, dict)]
-    skipped = len(config["devices"]) - len(devices)
-    if skipped:
-        print(f"WARNUNG: {skipped} unerwartete(r) Eintrag/Eintraege in "
+    dict_entries = [d for d in config["devices"] if isinstance(d, dict)]
+    nondict = len(config["devices"]) - len(dict_entries)
+    if nondict:
+        print(f"WARNUNG: {nondict} unerwartete(r) Eintrag/Eintraege in "
               f"{CONFIG_PATH.name} uebersprungen (kein Objekt).")
+
+    # Objekt-Eintraege ohne die zum Verbinden noetigen Felder (name/ip/id)
+    # wuerden spaeter in connect_and_refresh mit einem ungefangenen KeyError/
+    # ValueError abbrechen - vorab pruefen, benennen und ueberspringen
+    # (symmetrisch zur Uebersicht).
+    devices = []
+    for d in dict_entries:
+        problem = _device_config_problem(d)
+        if problem is None:
+            devices.append(d)
+        else:
+            label = d["name"] if isinstance(d.get("name"), str) else "(ohne Namen)"
+            print(f"WARNUNG: Geraet {label!r} in {CONFIG_PATH.name} "
+                  f"unvollstaendig ({problem}) - uebersprungen.")
 
     if args.target != TARGET_ALL:
         devices = [d for d in devices if d.get("name") == args.target]

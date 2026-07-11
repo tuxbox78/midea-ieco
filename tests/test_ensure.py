@@ -477,6 +477,101 @@ class MalformedEntryDeviceSelectionTests(unittest.TestCase):
         self.assertIn("WARNUNG", out)
         self.assertEqual(len(self.processed), 0)
 
+    def test_all_skips_incomplete_dict(self):
+        # Objekt ohne ip/id: gemeldet + uebersprungen, gueltiges verarbeitet.
+        self._write({"devices": [{"name": "X"},
+                                 {"name": "W", "ip": "1.2.3.4", "id": 1, "token": "t", "key": "k"}]})
+        code, out = self._run(["all"])
+        self.assertEqual(code, 0)
+        self.assertIn("unvollstaendig", out)
+        self.assertEqual(len(self.processed), 1)
+
+    def test_named_incomplete_target_not_found(self):
+        # Der benannte Ziel-Eintrag ist unvollstaendig -> uebersprungen ->
+        # 'nicht gefunden' Exit 1, mit erklaerender Warnung (kein Crash).
+        self._write({"devices": [{"name": "W", "ip": "1.2.3.4"}]})  # kein id
+        code, out = self._run(["W"])
+        self.assertEqual(code, 1)
+        self.assertIn("unvollstaendig", out)
+        self.assertEqual(len(self.processed), 0)
+
+    def test_noninteger_id_skipped(self):
+        self._write({"devices": [{"name": "B", "ip": "1.2.3.4", "id": "abc", "token": "t", "key": "k"},
+                                 {"name": "W", "ip": "1.2.3.4", "id": 1, "token": "t", "key": "k"}]})
+        code, out = self._run(["all"])
+        self.assertEqual(code, 0)
+        self.assertIn("numerisch", out)
+        self.assertEqual(len(self.processed), 1)
+
+    def test_bad_port_skipped(self):
+        # Nicht-numerischer port wuerde in connect_and_refresh ungefangen
+        # abbrechen -> vorab ueberspringen; das gueltige Geraet laeuft normal.
+        self._write({"devices": [{"name": "B", "ip": "1.2.3.4", "id": 1, "port": "abc",
+                                  "token": "t", "key": "k"},
+                                 {"name": "W", "ip": "1.2.3.4", "id": 1, "token": "t", "key": "k"}]})
+        code, out = self._run(["all"])
+        self.assertEqual(code, 0)
+        self.assertIn("port", out)
+        self.assertEqual(len(self.processed), 1)
+
+    def test_incomplete_only_no_crash_real_path(self):
+        # Direkter Crash-Schutz: OHNE Mock von ensure_ieco/connect_and_refresh.
+        # Ohne den Guard wuerde connect_and_refresh auf {"name":"X"} mit einem
+        # ungefangenen KeyError('ip') abbrechen. Mit Guard wird X vorab
+        # uebersprungen -> devices leer -> Exit 1, ohne je zu verbinden.
+        self._write({"devices": [{"name": "X"}]})
+        with mock.patch.object(mie.sys, "argv", ["midea-ieco", "all"]), \
+                redirect_stdout(io.StringIO()) as out:
+            with self.assertRaises(SystemExit) as cm:
+                asyncio.run(mie.main())
+        self.assertEqual(cm.exception.code, 1)
+        self.assertIn("unvollstaendig", out.getvalue())
+
+
+class DeviceConfigProblemTests(unittest.TestCase):
+    """_device_config_problem: gueltige Geraete -> None; fehlendes name/ip/id
+    oder nicht-numerische id -> Klartext-Grund (das sind genau die Felder, die
+    connect_and_refresh ausserhalb seines try liest)."""
+
+    def test_complete_device_ok(self):
+        self.assertIsNone(mie._device_config_problem(
+            {"name": "W", "ip": "1.2.3.4", "id": 12345, "token": "t", "key": "k"}))
+
+    def test_numeric_string_id_ok(self):
+        self.assertIsNone(mie._device_config_problem({"name": "W", "ip": "1.2.3.4", "id": "123"}))
+
+    def test_missing_ip_flagged(self):
+        self.assertIn("ip", mie._device_config_problem({"name": "W", "id": 1}))
+
+    def test_missing_id_flagged(self):
+        self.assertIn("id", mie._device_config_problem({"name": "W", "ip": "1.2.3.4"}))
+
+    def test_noninteger_id_flagged(self):
+        self.assertIn("numerisch", mie._device_config_problem(
+            {"name": "W", "ip": "1.2.3.4", "id": "abc"}))
+
+    def test_none_and_list_id_flagged(self):
+        self.assertIn("numerisch", mie._device_config_problem(
+            {"name": "W", "ip": "1.2.3.4", "id": None}))
+        self.assertIn("numerisch", mie._device_config_problem(
+            {"name": "W", "ip": "1.2.3.4", "id": [1]}))
+
+    def test_valid_or_absent_port_ok(self):
+        # port ist optional: fehlt es (Default 6444) oder ist es int-konvertibel,
+        # ist es kein Problem.
+        self.assertIsNone(mie._device_config_problem({"name": "W", "ip": "1.2.3.4", "id": 1}))
+        self.assertIsNone(mie._device_config_problem(
+            {"name": "W", "ip": "1.2.3.4", "id": 1, "port": 6444}))
+        self.assertIsNone(mie._device_config_problem(
+            {"name": "W", "ip": "1.2.3.4", "id": 1, "port": "6444"}))
+
+    def test_noninteger_port_flagged(self):
+        # port wird in connect_and_refresh ebenfalls ausserhalb des try mit int()
+        # konvertiert -> nicht-numerischer/leerer/None/Listen-Wert = Absturz.
+        for bad in ("abc", "", None, [1]):
+            self.assertIn("port", mie._device_config_problem(
+                {"name": "W", "ip": "1.2.3.4", "id": 1, "port": bad}))
+
 
 if __name__ == "__main__":
     unittest.main()
