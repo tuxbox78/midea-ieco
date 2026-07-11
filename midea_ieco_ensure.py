@@ -32,6 +32,21 @@ CONNECT_RETRIES = 3
 ACTION_RETRIES = 3
 RETRY_DELAY = 3.0
 
+# Reservierte Ziel-Woerter: das sind keine Geraetenamen, sondern Sonderbefehle.
+# 'all' -> alle Geraete; 'list' -> nur die Uebersicht anzeigen (kein Netz).
+# WICHTIG: in Sync halten mit is_valid_device_name() in install.sh, das
+# Geraetenamen mit genau diesen Werten bereits bei der Einrichtung ablehnt.
+TARGET_ALL = "all"
+TARGET_LIST = "list"
+RESERVED_TARGETS = frozenset({TARGET_ALL, TARGET_LIST})
+
+# Stabile, oeffentliche Befehlsnamen: die von install.sh in BIN_DIR angelegten
+# Wrapper. Als Konstanten gebuendelt, damit die Uebersicht/Hilfe genau die
+# Namen nennt, unter denen die Werkzeuge tatsaechlich installiert werden.
+CMD_MAIN = "midea-ieco"
+CMD_REFRESH = "midea-ieco-refresh-tokens"
+CMD_UPDATE = "midea-ieco-update"
+
 
 def load_config() -> dict:
     """Liest devices.json. Fehlt die Datei, ist sie unlesbar, kein gueltiges
@@ -53,6 +68,72 @@ def load_config() -> dict:
               '{"devices": [...]}.')
         sys.exit(1)
     return data
+
+
+def _read_devices_soft() -> tuple[list, str | None]:
+    """Liest die Geraeteliste NUR fuer die Anzeige (Uebersicht) moeglichst
+    tolerant: statt wie load_config() bei jedem Problem hart abzubrechen, wird
+    ein (devices, hinweis)-Paar zurueckgegeben. So bleibt `midea-ieco list`
+    auch bei fehlender oder kaputter devices.json informativ und endet mit
+    Exit 0. Gibt es keinen verwertbaren Inhalt, ist devices leer und hinweis
+    erklaert warum. Es findet KEIN Netzwerkzugriff statt."""
+    if not CONFIG_PATH.exists():
+        return [], f"Noch keine {CONFIG_PATH.name} vorhanden - bitte install.sh ausfuehren."
+    try:
+        with open(CONFIG_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        return [], f"{CONFIG_PATH} konnte nicht gelesen werden ({type(exc).__name__}: {exc})."
+    if not isinstance(data, dict) or not isinstance(data.get("devices"), list):
+        return [], f'{CONFIG_PATH} hat nicht die erwartete Form {{"devices": [...]}}.'
+    return data["devices"], None
+
+
+def print_overview() -> None:
+    """Gibt eine kompakte, netzwerkfreie Uebersicht aus: was das Werkzeug tut,
+    wo die Konfiguration liegt, welche Geraete konfiguriert sind (nur Name/IP/
+    Port - NIEMALS token/key) und die wichtigsten Beispielaufrufe inklusive der
+    Schwesterbefehle. Zweck: die Nutzung vollstaendig erfassen, ohne Pfade oder
+    Dateien kennen zu muessen. Endet immer erfolgreich (der Aufrufer setzt
+    Exit 0). Baut bewusst KEINE Verbindung auf, damit die Uebersicht sofort und
+    unabhaengig von der Netzwerklage funktioniert."""
+    devices, note = _read_devices_soft()
+
+    print(f"{CMD_MAIN} - haelt den iECO-Modus von Midea-Klimaanlagen lokal aktiv.")
+    print(f"Konfiguration: {CONFIG_PATH}")
+    print("")
+
+    if note is not None:
+        print(f"Hinweis: {note}")
+    elif not devices:
+        print("Konfigurierte Geraete: (keine)")
+    else:
+        print(f"Konfigurierte Geraete ({len(devices)}):")
+        for d in devices:
+            name = d.get("name", "(ohne Namen)")
+            ip = d.get("ip", "?")
+            port = d.get("port", 6444)
+            print(f"  - {name}  ->  {ip}:{port}")
+            # Sicherheits-/Konsistenz-Guard: ein Geraetename, der zufaellig
+            # einem reservierten Wort entspricht (nur per Hand-Edit moeglich),
+            # ist per CLI nicht ansteuerbar - er wuerde als Sonderbefehl
+            # interpretiert. Klar darauf hinweisen, statt still zu scheitern.
+            if name in RESERVED_TARGETS:
+                print(f"      WARNUNG: '{name}' ist ein reserviertes Wort und per "
+                      f"Kommando nicht ansteuerbar - bitte in {CONFIG_PATH.name} umbenennen.")
+
+    print("")
+    print("Beispiele:")
+    print(f"  {CMD_MAIN} <Geraetename>          iECO sicherstellen (schaltet bei Bedarf ein)")
+    print(f"  {CMD_MAIN} {TARGET_ALL}                    alle konfigurierten Geraete")
+    print(f"  {CMD_MAIN} {TARGET_ALL} --only-if-on       nur laufende Geraete, schaltet nichts ein")
+    print(f"  {CMD_MAIN} {TARGET_LIST}                   diese Uebersicht anzeigen")
+    print(f"  {CMD_REFRESH} --all     Token/Key aus der Cloud erneuern")
+    print(f"  {CMD_UPDATE}              Projekt aktualisieren")
+    print("")
+    print(f"Vollstaendige Optionen: {CMD_MAIN} --help")
+    print(f"(Die {CMD_MAIN}-Befehle setzen ihr BIN-Verzeichnis im PATH voraus; "
+          f"sonst direkt: venv/bin/python3 <skript> ...)")
 
 
 async def close_device(device: AC) -> None:
@@ -233,9 +314,15 @@ async def ensure_ieco(dev_conf: dict, only_if_on: bool) -> bool:
 
 async def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Stellt sicher, dass iECO auf Midea-Klimaanlagen aktiv ist."
+        prog=CMD_MAIN,
+        description="Stellt sicher, dass iECO auf Midea-Klimaanlagen aktiv ist.",
     )
-    parser.add_argument("target", help="Geraetename aus devices.json, oder 'all'")
+    parser.add_argument(
+        "target",
+        nargs="?",
+        help="Geraetename aus devices.json, 'all' (alle Geraete) oder 'list' "
+             "(konfigurierte Geraete anzeigen). Ohne Argument: Uebersicht.",
+    )
     parser.add_argument(
         "--only-if-on",
         action="store_true",
@@ -243,10 +330,19 @@ async def main() -> None:
     )
     args = parser.parse_args()
 
+    # Discoverability zuerst und OHNE Netzwerk: kein Argument oder das
+    # reservierte 'list' zeigt nur die Uebersicht (Beispiele + konfigurierte
+    # Geraete) und endet erfolgreich - bewusst VOR load_config(), damit die
+    # Uebersicht auch bei fehlender/kaputter devices.json funktioniert und
+    # niemals eine Verbindung aufbaut. --only-if-on ist hier bedeutungslos.
+    if args.target is None or args.target == TARGET_LIST:
+        print_overview()
+        sys.exit(0)
+
     config = load_config()
     devices = config["devices"]
 
-    if args.target != "all":
+    if args.target != TARGET_ALL:
         devices = [d for d in devices if d["name"] == args.target]
         if not devices:
             print(f"Geraet '{args.target}' nicht in devices.json gefunden.")
