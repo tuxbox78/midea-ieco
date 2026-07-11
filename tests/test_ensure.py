@@ -50,6 +50,13 @@ class LoadConfigTests(unittest.TestCase):
         self.path.write_text("{ bad", encoding="utf-8")
         self._expect_exit1()
 
+    def test_invalid_utf8_exits_1(self):
+        # Nicht-UTF-8 (Latin-1-Umlaut, Byte 0xFC) -> UnicodeDecodeError, ein
+        # ValueError, aber KEIN JSONDecodeError. Muss dennoch sauber Exit 1
+        # liefern statt eines rohen Tracebacks.
+        self.path.write_bytes(b'{"devices": [{"name": "K\xfcche"}]}')
+        self._expect_exit1()
+
     def test_toplevel_list_exits_1(self):
         self.path.write_text("[]", encoding="utf-8")
         self._expect_exit1()
@@ -377,6 +384,16 @@ class OverviewTests(unittest.TestCase):
         code, out = self._run(["list"])
         self.assertEqual(code, 0)
         self.assertNotIn("SECRETNAME", out)
+
+    def test_invalid_utf8_config_is_graceful(self):
+        # Nicht-UTF-8-devices.json (z.B. Geraetename in Latin-1 gespeichert,
+        # Byte 0xFC) loest UnicodeDecodeError aus - ein ValueError, NICHT
+        # JSONDecodeError. Die Uebersicht muss trotzdem mit Exit 0 samt Hinweis
+        # erscheinen statt mit einem Traceback abzubrechen.
+        self.path.write_bytes(b'{"devices": [{"name": "K\xfcche", "ip": "1.2.3.4"}]}')
+        code, out = self._run(["list"])
+        self.assertEqual(code, 0)
+        self.assertIn("Hinweis", out)
 
 
 class OverviewWithoutMsmartTests(unittest.TestCase):

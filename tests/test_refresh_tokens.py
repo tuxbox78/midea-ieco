@@ -51,6 +51,14 @@ class LoadConfigTests(_ConfigPathMixin):
             mrt.load_config()
         self.assertEqual(cm.exception.code, 1)
 
+    def test_invalid_utf8_exits_1(self):
+        # Nicht-UTF-8 (Latin-1-Umlaut, Byte 0xFC) -> UnicodeDecodeError: ein
+        # ValueError, aber KEIN JSONDecodeError. Muss sauber Exit 1 liefern.
+        self.path.write_bytes(b'{"devices": [{"name": "K\xfcche"}]}')
+        with self.assertRaises(SystemExit) as cm, redirect_stderr(io.StringIO()):
+            mrt.load_config()
+        self.assertEqual(cm.exception.code, 1)
+
     def test_toplevel_list_exits_1(self):
         self.path.write_text("[]", encoding="utf-8")
         with self.assertRaises(SystemExit) as cm, redirect_stderr(io.StringIO()):

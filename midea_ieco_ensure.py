@@ -56,8 +56,9 @@ CMD_UPDATE = "midea-ieco-update"
 
 
 def load_config() -> dict:
-    """Liest devices.json. Fehlt die Datei, ist sie unlesbar, kein gueltiges
-    JSON oder hat sie nicht die erwartete Form ({"devices": [...]}), wird mit
+    """Liest devices.json. Fehlt die Datei, ist sie unlesbar, nicht als UTF-8
+    dekodierbar, kein gueltiges JSON oder hat sie nicht die erwartete Form
+    ({"devices": [...]}), wird mit
     klarer Meldung abgebrochen statt mit einem rohen Traceback - relevant fuer
     den 20-Minuten-Cron-Lauf."""
     if not CONFIG_PATH.exists():
@@ -66,7 +67,7 @@ def load_config() -> dict:
     try:
         with open(CONFIG_PATH, encoding="utf-8") as f:
             data = json.load(f)
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError) as exc:  # ValueError deckt JSONDecodeError UND UnicodeDecodeError (nicht-UTF-8-Datei) ab
         print(f"FEHLER: {CONFIG_PATH} konnte nicht gelesen werden "
               f"({type(exc).__name__}: {exc}).")
         sys.exit(1)
@@ -89,7 +90,7 @@ def _read_devices_soft() -> tuple[list, str | None]:
     try:
         with open(CONFIG_PATH, encoding="utf-8") as f:
             data = json.load(f)
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError) as exc:  # ValueError deckt JSONDecodeError UND UnicodeDecodeError (nicht-UTF-8-Datei) ab
         return [], f"{CONFIG_PATH} konnte nicht gelesen werden ({type(exc).__name__}: {exc})."
     if not isinstance(data, dict) or not isinstance(data.get("devices"), list):
         return [], f'{CONFIG_PATH} hat nicht die erwartete Form {{"devices": [...]}}.'

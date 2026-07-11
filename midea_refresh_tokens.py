@@ -86,8 +86,9 @@ def extract_token_key_pairs(text: str) -> list[tuple[str, str]]:
 
 def load_config() -> dict:
     """Liest devices.json. Fehlt die Datei, wird eine leere Geraeteliste
-    zurueckgegeben (normaler Erstlauf). Ist die Datei hingegen unlesbar, kein
-    gueltiges JSON oder hat sie nicht die erwartete Form ({"devices": [...]}),
+    zurueckgegeben (normaler Erstlauf). Ist die Datei hingegen unlesbar, nicht
+    als UTF-8 dekodierbar, kein gueltiges JSON oder hat sie nicht die erwartete
+    Form ({"devices": [...]}),
     wird mit klarer Meldung auf stderr abgebrochen - ein verstaendlicher
     Hinweis ist im woechentlichen Cron-Lauf deutlich nuetzlicher als ein roher
     Traceback."""
@@ -96,7 +97,7 @@ def load_config() -> dict:
     try:
         with open(CONFIG_PATH, encoding="utf-8") as f:
             data = json.load(f)
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError) as exc:  # ValueError deckt JSONDecodeError UND UnicodeDecodeError (nicht-UTF-8-Datei) ab
         print(f"FEHLER: {CONFIG_PATH} konnte nicht gelesen werden "
               f"({type(exc).__name__}: {exc}).", file=sys.stderr)
         sys.exit(1)
@@ -171,7 +172,7 @@ def load_credentials() -> tuple[str | None, str | None]:
     try:
         with open(CREDENTIALS_PATH, encoding="utf-8") as f:
             data = json.load(f)
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError) as exc:  # ValueError deckt JSONDecodeError UND UnicodeDecodeError (nicht-UTF-8-Datei) ab
         print(f"WARNUNG: {CREDENTIALS_PATH} konnte nicht gelesen werden "
               f"({type(exc).__name__}: {exc}). Nutze Argumente/Prompt.")
         return None, None
