@@ -8,6 +8,7 @@ oder direkt: python3 tests/test_ensure.py
 """
 import asyncio
 import io
+import json
 import sys
 import tempfile
 import unittest
@@ -266,6 +267,95 @@ class IecoVerificationCapabilityTests(unittest.TestCase):
         d = CapabilityGatedDevice(power_state=True, true_ieco=True)
         self.assertTrue(self._run([d]))
         self.assertEqual(d.apply_calls, 0)
+
+
+class OverviewTests(unittest.TestCase):
+    """Discoverability: kein Argument und 'list' zeigen eine netzwerkfreie
+    Uebersicht (Exit 0) - ohne token/key und ohne je connect_and_refresh
+    aufzurufen. Regressionsschutz: echte Geraetenamen verhalten sich unveraendert."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "devices.json"
+        orig = mie.CONFIG_PATH
+        mie.CONFIG_PATH = self.path
+        self.addCleanup(lambda: setattr(mie, "CONFIG_PATH", orig))
+
+    def _write(self, obj):
+        self.path.write_text(json.dumps(obj), encoding="utf-8")
+
+    def _run(self, argv):
+        """Treibt main() mit gepatchtem argv. connect_and_refresh MUSS ungenutzt
+        bleiben - jeder Aufruf laesst den Test scheitern (beweist: kein Netz).
+        Liefert (exit_code, stdout)."""
+        async def _boom(*a, **k):
+            raise AssertionError("connect_and_refresh im Overview-Pfad aufgerufen")
+
+        out = io.StringIO()
+        with ExitStack() as es:
+            es.enter_context(mock.patch.object(mie, "connect_and_refresh", _boom))
+            es.enter_context(mock.patch.object(mie.sys, "argv", ["midea-ieco"] + argv))
+            es.enter_context(redirect_stdout(out))
+            with self.assertRaises(SystemExit) as cm:
+                asyncio.run(mie.main())
+        return cm.exception.code, out.getvalue()
+
+    def test_no_arg_prints_overview_exit0(self):
+        self._write({"devices": []})
+        code, out = self._run([])
+        self.assertEqual(code, 0)
+        self.assertIn("Beispiele:", out)
+        # Die Uebersicht muss die Schwesterbefehle nennen (Discoverability-Ziel).
+        self.assertIn("midea-ieco-refresh-tokens", out)
+        self.assertIn("midea-ieco-update", out)
+
+    def test_list_prints_devices_exit0(self):
+        self._write({"devices": [{"name": "Wohnzimmer", "ip": "192.168.0.5", "port": 6444}]})
+        code, out = self._run(["list"])
+        self.assertEqual(code, 0)
+        self.assertIn("Wohnzimmer", out)
+        self.assertIn("192.168.0.5:6444", out)
+
+    def test_overview_never_prints_secrets(self):
+        # Kernsicherheit der Funktion: token/key duerfen NIE in der Ausgabe stehen.
+        self._write({"devices": [{"name": "X", "ip": "1.2.3.4", "port": 6444,
+                                  "id": 1, "token": "DEADBEEFTOKEN", "key": "CAFEKEY"}]})
+        code, out = self._run(["list"])
+        self.assertEqual(code, 0)
+        self.assertNotIn("DEADBEEFTOKEN", out)
+        self.assertNotIn("CAFEKEY", out)
+
+    def test_missing_config_is_graceful(self):
+        # Keine devices.json: die Uebersicht bleibt informativ und endet mit 0.
+        code, out = self._run(["list"])
+        self.assertEqual(code, 0)
+        self.assertIn("install.sh", out)
+
+    def test_malformed_config_is_graceful(self):
+        self.path.write_text("{ kaputt", encoding="utf-8")
+        code, out = self._run(["list"])
+        self.assertEqual(code, 0)
+
+    def test_list_ignores_only_if_on(self):
+        self._write({"devices": []})
+        code, _ = self._run(["list", "--only-if-on"])
+        self.assertEqual(code, 0)
+
+    def test_reserved_device_name_is_flagged(self):
+        # Ein Geraet, das wie ein reserviertes Wort heisst, ist per CLI nicht
+        # erreichbar -> die Uebersicht warnt aktiv.
+        self._write({"devices": [{"name": "list", "ip": "1.2.3.4", "port": 6444}]})
+        code, out = self._run(["list"])
+        self.assertEqual(code, 0)
+        self.assertIn("WARNUNG", out)
+
+    def test_unknown_device_name_still_exits_1(self):
+        # Regressionsschutz: ein echter (nicht reservierter) Name bleibt Exit 1.
+        self._write({"devices": [{"name": "Wohnzimmer", "ip": "1.2.3.4", "port": 6444,
+                                  "id": 1, "token": "t", "key": "k"}]})
+        code, _ = self._run(["Nichtvorhanden"])
+        self.assertEqual(code, 1)
 
 
 if __name__ == "__main__":
