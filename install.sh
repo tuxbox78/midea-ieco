@@ -134,8 +134,8 @@ Verzeichnisse ueber Umgebungsvariablen ueberschreibbar:
                            de='Name darf nicht leer sein.' ;;
         dev_name_dash)     en="Name must not start with '-' (would be mistaken for an option)."
                            de="Name darf nicht mit '-' beginnen (sonst als Option missdeutet)." ;;
-        dev_name_reserved) en="'all' is reserved (means 'all devices') - please choose another name."
-                           de="'all' ist reserviert (steht fuer 'alle Geraete') - bitte anders benennen." ;;
+        dev_name_reserved) en="'all' and 'list' are reserved words (all devices / show overview) - please choose another name."
+                           de="'all' und 'list' sind reservierte Woerter (alle Geraete / Uebersicht) - bitte anders benennen." ;;
         dev_name_ctrl)     en='Name must not contain control characters.'
                            de='Name darf keine Steuerzeichen enthalten.' ;;
         py_not_found)      en='python3 not found. Attempting automatic installation...'
@@ -327,18 +327,20 @@ Verzeichnisse ueber Umgebungsvariablen ueberschreibbar:
         banner_install_done) en='Installation complete!';  de='Installation abgeschlossen!' ;;
         final_summary) en="  Directory:          %s
   Wrapper command:    midea-ieco <device-name>   (if %s is in PATH)
+  Overview / devices: midea-ieco list
   Update:             midea-ieco-update
+  Refresh tokens:     midea-ieco-refresh-tokens --all
   Direct call:        cd %s && venv/bin/python3 midea_ieco_ensure.py <device-name>
   All devices:        venv/bin/python3 midea_ieco_ensure.py all
-  Refresh tokens:     venv/bin/python3 midea_refresh_tokens.py --all
 
   Full guide: README.md / README_german.md"
                        de="  Verzeichnis:        %s
   Wrapper-Befehl:     midea-ieco <Geraetename>   (falls %s im PATH ist)
+  Uebersicht/Geraete: midea-ieco list
   Aktualisieren:      midea-ieco-update
+  Token auffrischen:  midea-ieco-refresh-tokens --all
   Direkter Aufruf:    cd %s && venv/bin/python3 midea_ieco_ensure.py <Geraetename>
   Alle Geraete:       venv/bin/python3 midea_ieco_ensure.py all
-  Token auffrischen:  venv/bin/python3 midea_refresh_tokens.py --all
 
   Detaillierte Anleitung: README_german.md / README.md" ;;
     esac
@@ -553,16 +555,17 @@ shell_quote_for_cron() {
 
 # Prueft einen Geraetenamen. Rueckgabe 0 = gueltig; sonst 1 mit einem
 # Ablehnungsgrund auf stderr. Abgelehnt werden: leer, fuehrendes '-'
-# (sonst als Option missdeutet), das reservierte 'all' (steht fuer 'alle
-# Geraete') und Steuerzeichen (die u.a. eine spaetere Weiterverarbeitung
-# zerlegen koennten).
+# (sonst als Option missdeutet), die reservierten Woerter 'all' (alle
+# Geraete) und 'list' (Uebersicht) - in Sync mit RESERVED_TARGETS in
+# midea_ieco_ensure.py - sowie Steuerzeichen (die u.a. eine spaetere
+# Weiterverarbeitung zerlegen koennten).
 is_valid_device_name() {
     local name="$1"
     if [[ -z "$name" ]]; then
         printf '%s\n' "$(t dev_name_empty)" >&2; return 1
     elif [[ "$name" == -* ]]; then
         printf '%s\n' "$(t dev_name_dash)" >&2; return 1
-    elif [[ "$name" == "all" ]]; then
+    elif [[ "$name" == "all" || "$name" == "list" ]]; then
         printf '%s\n' "$(t dev_name_reserved)" >&2; return 1
     elif [[ "$name" == *[[:cntrl:]]* ]]; then
         printf '%s\n' "$(t dev_name_ctrl)" >&2; return 1
@@ -949,6 +952,11 @@ install_all_wrappers() {
     # statt Direktaufruf - so unabhaengig vom Exec-Bit der install.sh.
     install_bin_wrapper "midea-ieco-update" \
         "exec bash ${q}/install.sh --update \"\$@\""
+    # Token-Refresh-Wrapper: ruft direkt den venv-Python (analog midea-ieco),
+    # damit `midea-ieco-refresh-tokens --all|--name X` ohne den langen
+    # 'cd ... && venv/bin/python3 ...'-Pfad nutzbar ist.
+    install_bin_wrapper "midea-ieco-refresh-tokens" \
+        "exec ${q}/venv/bin/python3 ${q}/midea_refresh_tokens.py \"\$@\""
 
     ensure_bin_on_path
 }
