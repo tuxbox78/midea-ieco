@@ -337,7 +337,7 @@ Die einfachste Lösung ohne zusätzliche Serversoftware ist die native iOS-Kurzb
    ```
 
 4. Den Kurzbefehl benennen, z. B. **Wohnzimmer iECO**.
-5. Per Siri aufrufen, z. B.: *„Hey Siri, starte Eco-Modus im Wohnzimmer."*
+5. Per Siri aufrufen, z. B.: *„Hey Siri, starte Wohnzimmer iECO."*
 
 > **Tipp für nicht-interaktive SSH-Sitzungen:** Verwende `venv/bin/python3` direkt statt `source venv/bin/activate && python3`. Das ist zuverlässiger, weil nicht-interaktive Shells `source` unterschiedlich behandeln können.
 
