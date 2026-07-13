@@ -338,7 +338,7 @@ The simplest solution without additional server software is the native iOS Short
    ```
 
 4. Name the shortcut, for example **Living room iECO**.
-5. Call it with Siri, for example: *"Hey Siri, enable eco mode in the living room."*
+5. Call it with Siri, for example: *"Hey Siri, start living romm ieco."*
 
 > **Tip for non-interactive SSH sessions:** Use `venv/bin/python3` directly rather than `source venv/bin/activate && python3`. It is more robust because non-interactive shells can handle `source` differently.
 
