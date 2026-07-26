@@ -29,7 +29,12 @@ Kleine, zuverlässige Kommandozeilen-Werkzeuge zur lokalen Steuerung des **iECO-
 
 Dieses Tool macht **eine Sache gut**: iECO (und den einfachen Ein-/Aus-/Status) auf deinen Geräten setzen — per Cron oder Kurzbefehl, **ohne Home Assistant oder sonstige dauerlaufende Smart-Home-Serversoftware**. Das ist sein gesamter Zweck.
 
-Wer die volle Klimasteuerung will (Temperatur, Modus, Lüfter, Dashboards, komplexe Automatisierungen) oder **ohnehin Home Assistant betreibt**, nutzt besser die aktiv gepflegte Integration [`midea_ac_lan`](https://github.com/wuwentao/midea_ac_lan) — sie bietet iECO als eine Voreinstellung unter vielen weiteren Steuerungen. Dieses Projekt ist für den engeren Fall gedacht: „Ich habe einen Raspberry Pi / Mac / kleinen Server und will einfach nur, dass iECO an bleibt."
+Wer die volle Klimasteuerung will (Temperatur, Modus, Lüfter, Dashboards, komplexe Automatisierungen) oder **ohnehin Home Assistant betreibt**, nutzt besser eine Home-Assistant-Integration. Die beiden verbreiteten unterscheiden sich allerdings genau in dem Punkt, um den es hier geht:
+
+- [`midea-ac-py`](https://github.com/mill1000/midea-ac-py) basiert auf `msmart-ng` — derselben Bibliothek, die dieses Projekt zur Steuerung nutzt — und **bietet iECO** als Steuerung an (unter den „Advanced controls").
+- [`midea_ac_lan`](https://github.com/wuwentao/midea_ac_lan) bietet viele Steuerungen, **kann iECO aber nicht setzen**. Es basiert auf `midea-local`, das überhaupt keine iECO-Eigenschaft kennt (geprüft gegen 6.6.1 und 6.11.0 im Juli 2026); das dort angebotene `eco`-Preset ist der einfache, fest auf 24 °C gesetzte ECO-Modus von oben — eine leichte Verwechslung, die genau dieser Dokumentation selbst passiert ist, bis ein Nutzer darauf hinwies.
+
+In beiden Fällen liefert eine Integration nur die *Steuerung*. iECO nach einem Verlust wieder zu aktivieren — typischerweise nach einem Aus/Ein außerhalb der App — erfordert zusätzlich eine Automatisierung. Dieses Projekt ist für den engeren Fall gedacht: „Ich habe einen Raspberry Pi / Mac / kleinen Server, will kein Home Assistant und einfach nur, dass iECO an bleibt."
 
 ## Schnellinstallation per Einzeiler
 
@@ -387,7 +392,7 @@ Nein. Geräte-Tokens werden über das lokale Netzwerk mit dem eingebauten Hilfsk
 
 **Brauche ich Home Assistant?**
 
-Nein — ohne auszukommen ist gerade der Sinn (siehe **Zweck & Alternativen** oben). Wer bereits Home Assistant nutzt, ist mit der Integration `midea_ac_lan` besser bedient.
+Nein — ohne auszukommen ist gerade der Sinn (siehe **Zweck & Alternativen** oben). Wer bereits Home Assistant nutzt und iECO dort haben möchte, nimmt [`midea-ac-py`](https://github.com/mill1000/midea-ac-py): Es basiert auf derselben `msmart-ng`-Bibliothek und bietet iECO als Steuerung an. `midea_ac_lan` kann iECO trotz größeren Funktionsumfangs gar nicht setzen. In beiden Fällen braucht es zusätzlich eine Automatisierung, die iECO nach einem Aus/Ein wieder aktiviert — genau das erledigt dieses Tool von Haus aus.
 
 ## Hintergrund: ECO vs. iECO
 

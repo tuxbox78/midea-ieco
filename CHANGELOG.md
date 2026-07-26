@@ -34,6 +34,21 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   indication on the display. Switching through the app preserves it, which is
   why not every owner runs into this. No change to how the tool behaves.
 
+### Fixed
+- Documentation: both READMEs claimed that the `midea_ac_lan` Home Assistant
+  integration "exposes iECO as one preset" and recommended it to Home Assistant
+  users. **It cannot set iECO at all** — an instance of the very ECO/iECO mix-up
+  this project exists to explain. `midea_ac_lan` is built on `midea-local`, which
+  has no iECO property whatsoever (verified against 6.6.1 and the current 6.11.0:
+  the only eco-related AC attribute is `eco_mode`), and its documented presets are
+  `none, comfort, eco, boost, sleep, away` — that `eco` being the plain
+  fixed-24 °C ECO mode. The integration that *does* expose iECO is
+  [`midea-ac-py`](https://github.com/mill1000/midea-ac-py), built on the same
+  `msmart-ng` library this project uses for control. Both READMEs now name the
+  distinction, and the "Do I need Home Assistant?" FAQ points to `midea-ac-py`.
+  Reported by a user who had gone hunting for a preset that was never there —
+  thank you.
+
 ## [0.2.0] - 2026-07-11
 
 ### Added
