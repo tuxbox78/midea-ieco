@@ -6,6 +6,20 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- Documentation: the claim that iECO ends on its own after roughly eight hours
+  is now marked **unconfirmed** in both READMEs, after several PortaSplit owners
+  reported never observing such a cut-off. Midea's own "up to eight hours with
+  only 1.2 kWh" is a *consumption* figure, not a timeout — the likely source of
+  the confusion — and any interaction (app, IR remote, changing the target
+  temperature) appears to reset such a timer anyway, so it would rarely be seen
+  in practice. It has not been isolated in a controlled measurement here.
+  The reproducible behaviour this project actually addresses is now stated more
+  prominently in its place: iECO is lost whenever a unit is switched off and on
+  **outside the app** — at the unit or with the remote — silently, with no
+  indication on the display. Switching through the app preserves it, which is
+  why not every owner runs into this. No change to how the tool behaves.
+
 ## [0.2.0] - 2026-07-11
 
 ### Added

@@ -12,7 +12,7 @@ Small, reliable command-line tools for local control of the **iECO mode** (and g
 
 **What it does**
 
-- Re-enables **iECO** automatically after every manual power cycle and after its eight-hour timeout
+- Re-enables **iECO** automatically whenever a unit has dropped out of it — typically after a manual power cycle
 - Runs entirely on your **local network** (no cloud dependency in normal operation), triggered by cron, Siri Shortcuts, or Homebridge
 - **Never changes your target temperature** — it only ensures iECO is active at the setpoint you already chose
 
@@ -370,9 +370,9 @@ If you see unexpected on/off or mode changes, that is most likely this device-si
 
 No. It only ensures iECO is active at whatever setpoint the unit already has. It never writes a temperature.
 
-**iECO switched off again after a few hours — did something break?**
+**iECO was off again later — did something break?**
 
-No. iECO exits on its own after about eight hours (and after any manual power cycle) — that is Midea's behavior, not a fault. The recommended cron job (`--only-if-on`, every 20 minutes) simply turns it back on the next time it runs.
+No, and this is exactly what the tool is for. What is well established is that iECO is lost when the unit is switched off and on **outside the app** — at the unit itself or with the IR remote. It does not come back on its own, and nothing on the display tells you. (Switching off and on *through the app* keeps it, which is why not everyone runs into this.) Whether iECO *additionally* ends by itself after roughly eight hours of undisturbed operation is **not confirmed** — see the note under [Background: ECO vs. iECO](#background-eco-vs-ieco). Either way it makes no difference here: the recommended cron job (`--only-if-on`, every 20 minutes) reads the real state from the unit and re-enables iECO only when it is actually off.
 
 **Do I need a Raspberry Pi or a server?**
 
@@ -404,20 +404,22 @@ Midea air conditioners like the PortaSplit have **two separate energy-saving mod
 | Activation | Physical button on the unit or remote control | Only through the MSmartHome / Midea Smarthome app |
 | Target temperature | **Fixed automatically at 24 °C**, fan set to Auto | **Whatever target temperature the user has set** (e.g. 21 °C, 25 °C, etc.) — not fixed |
 | Mechanism | Simple fixed setpoint | Cloud-connected, adaptive algorithm that fine-tunes compressor output around the user's chosen setpoint |
-| Auto-shutoff | Can auto power off after a period of inactivity at setpoint | Automatically exits after eight hours and reverts to regular Auto mode |
+| Auto-shutoff | Can auto power off after a period of inactivity at setpoint | Lost whenever the unit is power-cycled outside the app; an additional ~8-hour timeout is often claimed but **unconfirmed** (see the note below) |
 | Availability | Available offline, works with the IR remote | Requires the unit to stay connected to Wi-Fi/cloud while active |
 
 In short: **iECO does not force 24 °C.** It works at any temperature you have configured on the unit; it simply makes the compressor regulate more gently and efficiently around that setpoint instead of running at full unrestricted power. This project is specifically about **iECO**, not the simpler button-activated ECO mode.
 
 ### What iECO does
 
-Midea advertises iECO as saving up to 60% compared with standard operation, with up to eight hours of operation using only 1.2 kWh at typical settings ([Midea Corporate](https://www.midea.com/th-en/news/energy-saving-air-conditioner)). A German ten-hour practical test using the PortaSplit measured about 100 W lower consumption in iECO than in Auto mode while maintaining a comfortable room temperature of 24.5–25.7 °C ([4-Happy-Home on YouTube](https://www.youtube.com/watch?v=ia4gUxGh5ms)). Community reports confirm that iECO can be run successfully at other target temperatures as well, such as 21 °C, with correspondingly adjusted (not fixed) energy use.
+Midea advertises iECO as saving up to 60% compared with standard operation, with up to eight hours of operation using only 1.2 kWh at typical settings ([Midea Corporate](https://www.midea.com/th-en/news/energy-saving-air-conditioner)). Note that this "eight hours" is a **consumption** figure — it does not say iECO switches off after eight hours; the two are easily conflated (see the note further down). A German ten-hour practical test using the PortaSplit measured about 100 W lower consumption in iECO than in Auto mode while maintaining a comfortable room temperature of 24.5–25.7 °C ([4-Happy-Home on YouTube](https://www.youtube.com/watch?v=ia4gUxGh5ms)). Community reports confirm that iECO can be run successfully at other target temperatures as well, such as 21 °C, with correspondingly adjusted (not fixed) energy use.
 
 Measurements made for this project found approximately 4 kWh **per day** of additional consumption during continuous operation at a given setpoint when iECO was not active, with no apparent comfort or cooling advantage from running without it.
 
 ### The problem: iECO disappears after manual use
 
-iECO automatically exits after eight hours and returns to regular Auto mode. More importantly, iECO can currently be enabled **only through the MSmartHome / Midea Smarthome app**; there is no physical iECO button on the remote control (that button only controls the simpler, fixed-24°C ECO mode described above).
+iECO can currently be enabled **only through the MSmartHome / Midea Smarthome app**; there is no physical iECO button on the remote control (that button only controls the simpler, fixed-24°C ECO mode described above).
+
+> **About the "eight hours":** you will find the claim that iECO ends on its own after roughly eight hours — including in earlier versions of this document. Treat it with caution. Midea's own "up to eight hours with only 1.2 kWh" is a *consumption* figure, not a timeout, and several PortaSplit owners report never observing such a cut-off; any interaction (opening the app, using the remote, adjusting the target temperature) appears to reset such a timer anyway, so it would rarely be seen in practice. This has not been isolated in a controlled measurement here. **What is reproducible is the next paragraph** — and that is what this project exists for.
 
 If the air conditioner is subsequently switched off and on manually—at the unit or with the remote—iECO remains off. This is easy to miss because the unit otherwise appears to work normally, still respecting whatever target temperature was last set. Instead of remembering to open the app and re-enable iECO after every manual power cycle, this project automates that task reliably in the background.
 
