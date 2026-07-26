@@ -24,3 +24,6 @@ __pycache__/
 
 # Atomic-write temp files (mkstemp orphans, e.g. .devices.json.<rand>.tmp)
 *.tmp
+
+# OS metadata (macOS Finder)
+.DS_Store
