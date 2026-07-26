@@ -6,7 +6,21 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- Both READMEs now list the press coverage of this project ("In the media" /
+  "In den Medien"), with a transparency note on what was supplied to which
+  outlet and that no money changed hands in either direction.
+
 ### Changed
+- Documentation: the measured extra consumption without iECO is now stated as
+  the honest range **2 to 3.8 kWh per day and unit** instead of a flat "roughly
+  4 kWh". Re-deriving the per-day figures from the raw Shelly logs showed the
+  4 kWh to be the optimistic end: 3.8 kWh/day holds for the unit with a clean
+  like-for-like comparison, while the second unit lands at 2.0–3.2 kWh/day
+  depending on whether partial-runtime days are included. The measurement setup
+  (two units, individual power meters, ten days, unchanged 23 °C setpoint) and
+  its limitations are now named explicitly, as is the evidence *for*
+  comparability (near-identical overnight base load on iECO and non-iECO days).
 - Documentation: the claim that iECO ends on its own after roughly eight hours
   is now marked **unconfirmed** in both READMEs, after several PortaSplit owners
   reported never observing such a cut-off. Midea's own "up to eight hours with

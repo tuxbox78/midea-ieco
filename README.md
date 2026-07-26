@@ -413,7 +413,9 @@ In short: **iECO does not force 24 °C.** It works at any temperature you have c
 
 Midea advertises iECO as saving up to 60% compared with standard operation, with up to eight hours of operation using only 1.2 kWh at typical settings ([Midea Corporate](https://www.midea.com/th-en/news/energy-saving-air-conditioner)). Note that this "eight hours" is a **consumption** figure — it does not say iECO switches off after eight hours; the two are easily conflated (see the note further down). A German ten-hour practical test using the PortaSplit measured about 100 W lower consumption in iECO than in Auto mode while maintaining a comfortable room temperature of 24.5–25.7 °C ([4-Happy-Home on YouTube](https://www.youtube.com/watch?v=ia4gUxGh5ms)). Community reports confirm that iECO can be run successfully at other target temperatures as well, such as 21 °C, with correspondingly adjusted (not fixed) energy use.
 
-Measurements made for this project found approximately 4 kWh **per day** of additional consumption during continuous operation at a given setpoint when iECO was not active, with no apparent comfort or cooling advantage from running without it.
+Measurements made for this project — two identical units, each behind its own power meter (Shelly Plus Plug S), ten days in June 2026 at an unchanged 23 °C setpoint — found **2 to 3.8 kWh per day and unit** of additional consumption when iECO was not active, with no apparent comfort or cooling advantage from running without it. The cleaner of the two comparisons (same daily pattern on all days) came out at 3.8 kWh/day — roughly half the consumption with iECO; the second unit, where everyday use interfered on some days, at 2.0–3.2 kWh/day.
+
+To be clear about what that is: an everyday measurement, not a lab test. The with/without days are different calendar days, outdoor temperature and solar gain were not logged, and the period is short. What does support comparability: the **overnight base load is practically identical** on iECO and non-iECO days (~104–120 Wh on the office unit), so the difference is not simply "hotter days" — it arises in the active cooling hours, where the peak hourly value roughly doubles to triples without iECO.
 
 ### The problem: iECO disappears after manual use
 
@@ -466,6 +468,18 @@ python3 -c "import inspect; from msmart.device.AC.device import AirConditioner a
 - `devices.json` holds sensitive values (each device's token/key): keep it at `chmod 600`. It is **git-ignored**, so your real values are never tracked — only the `devices.example.json` template is. (An early commit did track a `devices.json`, but it contained only non-functional dummy placeholders; no real credentials exist anywhere in the git history.)
 - `midea-local.json` is a throwaway 0600 file `midea_refresh_tokens.py` writes **only inside a private per-call temporary directory** — an empty `{}` that pins the `midealocal` CLI to a deterministic, credential-free lookup (independent of any user-global config). It never lands in the project tree and is removed immediately; the name is **git-ignored** as a safety net.
 - For Siri over SSH, use SSH-key authentication and do **not** expose SSH to the Internet using port forwarding. Use a VPN (e.g. Tailscale) for remote access instead.
+
+## In the media
+
+German tech outlets that have covered this project or used its measurements:
+
+| Date | Outlet | Topic |
+|---|---|---|
+| 26 Jul 2026 | **Caschy's Blog** — Carsten Knobloch | [Saving energy with iECO on the PortaSplit](https://stadt-bremerhaven.de/midea-portasplit-wie-ihr-mit-ieco-strom-spart/) — introduces the ECO/iECO distinction and links this project |
+| 26 Jul 2026 | **techboys.de** — Gary Madeo | [The iECO mode in practice](https://www.techboys.de/portasplit-ieco) — built on this project's consumption measurements (Shelly logs, day-by-day tables, the 2–3.8 kWh range) |
+| 26 Jul 2026 | **techboys.de** — Gary Madeo | [Midea's token-API shutdown](https://www.techboys.de/portasplit-home-assistant) — the update to the 25 July article includes this project's test protocol on which cloud still issues device tokens |
+
+For transparency: I supplied the measurement data, the API protocol and screenshots to `techboys.de` and am credited there as the source. The articles themselves were written and fact-checked independently by their authors — no money changed hands in either direction, and I had no say over the wording. The underlying raw data is described under [Background: ECO vs. iECO](#background-eco-vs-ieco); the measurement's limitations are stated there as openly as in the articles.
 
 ## License and sharing
 

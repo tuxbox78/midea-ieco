@@ -412,7 +412,9 @@ Kurz gesagt: **iECO erzwingt keine 24 °C.** Es arbeitet bei jeder beliebigen, a
 
 Midea bewirbt iECO damit, bis zu 60 % Energie im Vergleich zum Normalbetrieb einzusparen – bis zu acht Stunden Betrieb mit nur 1,2 kWh bei typischen Einstellungen ([Midea Corporate](https://www.midea.com/th-en/news/energy-saving-air-conditioner)). Achtung: Diese „acht Stunden" sind eine **Verbrauchsangabe** – sie besagen nicht, dass iECO nach acht Stunden abschaltet; beides wird leicht verwechselt (siehe Hinweis weiter unten). Ein deutscher Zehn-Stunden-Praxistest mit der PortaSplit ergab rund 100 W niedrigeren Verbrauch im iECO-Modus gegenüber dem Auto-Modus bei gleichzeitig angenehmer Raumtemperatur von 24,5–25,7 °C ([4-Happy-Home auf YouTube](https://www.youtube.com/watch?v=ia4gUxGh5ms)). Community-Berichte bestätigen zudem, dass iECO auch bei anderen Zieltemperaturen wie 21 °C erfolgreich läuft, mit entsprechend angepasstem – nicht fixem – Energieverbrauch.
 
-Messungen im Rahmen dieses Projekts ergaben rund 4 kWh **pro Tag** Mehrverbrauch im Dauerbetrieb bei einem gegebenen Sollwert ohne aktiven iECO-Modus, ohne erkennbaren Komfort- oder Kühlvorteil durch den Betrieb ohne iECO.
+Messungen im Rahmen dieses Projekts – zwei baugleiche Geräte an je einem eigenen Messstecker (Shelly Plus Plug S), zehn Tage im Juni 2026 bei unverändert 23 °C Sollwert – ergaben **2 bis 3,8 kWh pro Tag und Gerät** Mehrverbrauch ohne aktiven iECO-Modus, ohne erkennbaren Komfort- oder Kühlvorteil. Der sauberere der beiden Vergleiche (an allen Tagen gleiches Betriebsmuster) lag bei 3,8 kWh/Tag – also rund der Hälfte des Verbrauchs mit iECO; das zweite Gerät, bei dem an manchen Tagen der Alltag hineinfunkte, bei 2,0–3,2 kWh/Tag.
+
+Was das ist und was nicht: eine Alltagsmessung, kein Labortest. Die Tage mit und ohne iECO sind verschiedene Kalendertage, Außentemperatur und Sonneneinstrahlung wurden nicht mitprotokolliert, der Zeitraum ist kurz. Für die Vergleichbarkeit spricht: Die **nächtliche Grundlast ist an iECO- und Nicht-iECO-Tagen praktisch identisch** (~104–120 Wh beim Büro-Gerät). Der Unterschied kommt also nicht schlicht von „heißeren Tagen", sondern entsteht in den aktiven Kühlstunden – dort verdoppelt bis verdreifacht sich der höchste Stundenwert ohne iECO.
 
 ### Das Problem: iECO verschwindet nach manuellem Eingriff
 
@@ -465,6 +467,18 @@ python3 -c "import inspect; from msmart.device.AC.device import AirConditioner a
 - `devices.json` enthält sensible Werte (Token/Key je Gerät): dauerhaft bei `chmod 600` belassen. Sie ist **git-ignoriert**, deine echten Werte werden also nie versioniert — nur die `devices.example.json`-Vorlage. (Ein früher Commit enthielt zwar eine `devices.json`, jedoch ausschließlich funktionslose Dummy-Platzhalter; echte Zugangsdaten liegen an keiner Stelle der Git-History.)
 - `midea-local.json` ist eine Wegwerf-0600-Datei, die `midea_refresh_tokens.py` **ausschließlich in einem privaten, pro Aufruf frischen Temp-Verzeichnis** anlegt — ein leeres `{}`, das die `midealocal`-CLI auf eine deterministische, zugangsdatenfreie Abfrage festnagelt (unabhängig von jeder nutzer-globalen Config). Sie landet nie im Projektbaum und wird sofort entfernt; der Name ist als Sicherheitsnetz **git-ignoriert**.
 - Für Siri über SSH SSH-Schlüssel-Authentifizierung verwenden und SSH **nicht** per Port-Weiterleitung ins Internet freigeben. Für Remote-Zugriff stattdessen ein VPN (z. B. Tailscale) nutzen.
+
+## In den Medien
+
+Fachmedien, die über dieses Projekt berichtet oder seine Messungen verwendet haben:
+
+| Datum | Medium | Thema |
+|---|---|---|
+| 26.07.2026 | **Caschys Blog** — Carsten Knobloch | [Mit iECO Strom sparen bei der PortaSplit](https://stadt-bremerhaven.de/midea-portasplit-wie-ihr-mit-ieco-strom-spart/) — erklärt die ECO/iECO-Unterscheidung und verlinkt dieses Projekt |
+| 26.07.2026 | **techboys.de** — Gary Madeo | [Der iECO-Modus in der Praxis](https://www.techboys.de/portasplit-ieco) — aufgebaut auf den Verbrauchsmessungen dieses Projekts (Shelly-Logs, Tagestabellen, die Spanne 2–3,8 kWh) |
+| 26.07.2026 | **techboys.de** — Gary Madeo | [Mideas Token-API-Abschaltung](https://www.techboys.de/portasplit-home-assistant) — das Update zum Artikel vom 25.07. enthält das Testprotokoll dieses Projekts dazu, welche Cloud noch Geräte-Token ausgibt |
+
+Zur Transparenz: Messdaten, API-Protokoll und Screenshots habe ich `techboys.de` zur Verfügung gestellt und werde dort als Quelle genannt. Die Artikel selbst sind redaktionell unabhängig entstanden und wurden von den Autoren eigenständig nachgerechnet — es floss kein Geld, in keine Richtung, und ich hatte keinen Einfluss auf die Formulierungen. Die zugrunde liegenden Rohdaten sind unter [Hintergrund: ECO vs. iECO](#hintergrund-eco-vs-ieco) beschrieben; die Grenzen der Messung stehen dort genauso offen wie in den Artikeln.
 
 ## Lizenz und Weitergabe
 
