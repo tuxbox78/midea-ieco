@@ -541,6 +541,12 @@ _lang_value_is_effective() {   # $1 = Rohwert hinter dem '='
         \'*\') v="${v#\'}"; v="${v%\'}" ;;
         \"*\") v="${v#\"}"; v="${v%\"}" ;;
     esac
+    # NACH dem Entquoten erneut trimmen: cron speichert '   ' als drei
+    # Leerzeichen, resolve_lang trimmt sie aber weg und faellt auf Englisch
+    # zurueck. Ohne diesen zweiten Schnitt gaelte ein solcher Wert als gesetzt,
+    # waehrend der Job englisch protokolliert.
+    v="${v#"${v%%[![:space:]]*}"}"
+    v="${v%"${v##*[![:space:]]}"}"
     [[ -n "$v" ]]
 }
 
@@ -599,9 +605,23 @@ cron_lines_needing_lang() {   # $1 = bestehende Crontab
             fi
         fi
         case "$line" in *"$CRON_MARKER"*) : ;; *) continue ;; esac
-        if [[ "$env_effective" -eq 1 ]] || _cron_line_sets_lang_inline "$line"; then
-            continue
-        fi
+        # Traegt die Zeile eine EIGENE Zuweisung, entscheidet deren Wert: eine
+        # zeileneigene Zuweisung ueberschreibt die Umgebung ('VAR= kommando'),
+        # eine leere schaltet die Sprache also wieder ab. Nur ohne eigene
+        # Zuweisung gilt die naechstliegende Zuweisung oberhalb.
+        #
+        # Die ANWESENHEIT wird bewusst getrennt geprueft: _cron_line_sets_lang_inline
+        # liefert fuer "gar keine Zuweisung" und "unwirksame Zuweisung" denselben
+        # Rueckgabewert - wer beides in einer Bedingung zusammenfasst, dreht den
+        # Vorrang genau falsch herum.
+        case "$line" in
+            *MIDEA_IECO_LANG=*)
+                if _cron_line_sets_lang_inline "$line"; then continue; fi
+                ;;
+            *)
+                if [[ "$env_effective" -eq 1 ]]; then continue; fi
+                ;;
+        esac
         # Die Logrotate-Zeile traegt keinen Skriptnamen und faellt hier korrekt
         # heraus: sie ruft kein Werkzeug auf und braucht keine Sprache.
         case "$line" in

@@ -1376,6 +1376,32 @@ $CL_OLD_IECO
 $CL_OLD_REFRESH" "ZEILE_IECO
 ZEILE_REFRESH" "leerer Wert in Double-Quotes zaehlt ebenfalls nicht"
 
+CL_EMPTY_IECO="*/20 * * * * cd /opt && MIDEA_IECO_LANG= venv/bin/python3 midea_ieco_ensure.py all --only-if-on >> /opt/ieco.log 2>&1 $CRON_MARKER"
+
+# Ein Wert aus lauter Leerzeichen IN Quotes ist ebenfalls keiner: cron speichert
+# ihn wortwoertlich, resolve_lang trimmt ihn weg und faellt auf Englisch zurueck.
+assert_hint "MIDEA_IECO_LANG='   '
+$CL_OLD_IECO
+$CL_OLD_REFRESH" "ZEILE_IECO
+ZEILE_REFRESH" "gequoteter Nur-Leerzeichen-Wert zaehlt nicht als gesetzt"
+
+assert_hint "MIDEA_IECO_LANG=\"   \"
+$CL_OLD_IECO
+$CL_OLD_REFRESH" "ZEILE_IECO
+ZEILE_REFRESH" "dasselbe in Double-Quotes"
+
+# Vorrang: eine zeileneigene Zuweisung ueberschreibt die Umgebung. Steht oben
+# 'de' und die Zeile selbst setzt LEER, laeuft der Job auf Englisch - der
+# Hinweis muss also kommen, obwohl oben etwas Gueltiges steht.
+assert_hint "MIDEA_IECO_LANG=de
+$CL_EMPTY_IECO
+$CL_NEW_REFRESH" "ZEILE_IECO" "leere Zuweisung IN der Zeile schlaegt die aeussere"
+
+# Gegenprobe in die andere Richtung: die Zeile setzt gueltig, oben steht leer.
+assert_hint "MIDEA_IECO_LANG=
+$CL_NEW_IECO
+$CL_NEW_REFRESH" "" "gueltige Zuweisung IN der Zeile schlaegt die leere aeussere"
+
 # Umgekehrt darf ein GEQUOTETER Wert nicht faelschlich als leer gelten.
 assert_hint "MIDEA_IECO_LANG='de'
 $CL_OLD_IECO
@@ -1383,7 +1409,7 @@ $CL_OLD_REFRESH" "" "gequoteter Wert gilt als gesetzt"
 
 # Derselbe Wert-Massstab gilt fuer die INLINE-Zuweisung in der Job-Zeile: sonst
 # gilt eine Zeile als migriert, die ihre Ausgabe trotzdem auf Englisch schreibt.
-CL_EMPTY_IECO="*/20 * * * * cd /opt && MIDEA_IECO_LANG= venv/bin/python3 midea_ieco_ensure.py all --only-if-on >> /opt/ieco.log 2>&1 $CRON_MARKER"
+# (CL_EMPTY_IECO ist weiter oben definiert, wo es zuerst gebraucht wird.)
 assert_hint "$CL_EMPTY_IECO
 $CL_NEW_REFRESH
 $CL_LOGROT" "ZEILE_IECO" "inline gesetzte, aber LEERE Sprachvariable zaehlt nicht"
