@@ -830,7 +830,7 @@ CRON_REAL_PY="$(command -v python3)"
 # eine BESTEHENDE Crontab nicht mehr - jeder Re-Run legt dann Duplikate an.
 CANONICAL_CRON_MARKER="# midea-ieco-managed"
 
-setup_onboarding_sandbox() {   # $1 = Name, $2 = Discovery-Ausgabe (leer = keine)
+setup_onboarding_sandbox() {   # $1 = Name, $2 = Discovery-Ausgabe, $3 = Crontab-Vorbestand
     ONB="$WORK/$1"
     DISC_FILE="$WORK/$1_discovered"
     printf '%s' "${2:-}" > "$DISC_FILE"
@@ -843,7 +843,12 @@ setup_onboarding_sandbox() {   # $1 = Name, $2 = Discovery-Ausgabe (leer = keine
     ONB_BIN="$WORK/$1_bin"; mkdir -p "$ONB_BIN"
     ONB_HOME="$WORK/$1_home"; mkdir -p "$ONB_HOME"
     ONB_OUT="$WORK/$1_out.txt"
-    CRON_FILE="$WORK/$1_crontab"; : > "$CRON_FILE"
+    # Crontab-Vorbestand ($3): der Normalfall auf einem echten System ist eine
+    # Crontab, in der schon etwas steht. Ohne diesen Parameter startete jeder
+    # E2E-Lauf mit leerer Crontab - und konnte deshalb gar nicht sehen, ob der
+    # Installer fremde Eintraege ueberschreibt.
+    CRON_FILE="$WORK/$1_crontab"
+    if [ -n "${3:-}" ]; then printf '%s\n' "$3" > "$CRON_FILE"; else : > "$CRON_FILE"; fi
     CRON_WRITES="$WORK/$1_writes"; : > "$CRON_WRITES"
     ONB_STUB="$WORK/$1_stub"; mkdir -p "$ONB_STUB"
     # python3: nur die Pruef-Aufrufe des Installers werden gestubbt. Der
@@ -963,6 +968,9 @@ assert "$rc" "alle geschriebenen Zeilen tragen den Marker (n_ohne=$unmarked)"
 
 # --- Idempotenz: ein zweiter Lauf darf NICHTS anhaengen ---------------------
 CRON_SUM_BEFORE="$(cksum < "$CRON_FILE")"
+# Der Zustand VOR dem --reconfigure-Lauf ist zugleich der, den die .bak-Sicherung
+# festhalten muss (unten).
+DJ_BEFORE_RECONF="$(cksum < "$ONB/devices.json")"
 run_onboarding --reconfigure
 rc=0; [ "$ONB_RC" -eq 0 ] || rc=1
 assert "$rc" "zweiter Lauf (--reconfigure) laeuft durch (Exit $ONB_RC)"
@@ -970,6 +978,106 @@ rc=0; [ "$(wc -c < "$CRON_WRITES" | tr -d ' ')" -eq 1 ] || rc=1
 assert "$rc" "Re-Run schreibt die Crontab NICHT erneut (keine Duplikate)"
 rc=0; [ "$(cksum < "$CRON_FILE")" = "$CRON_SUM_BEFORE" ] || rc=1
 assert "$rc" "Crontab nach dem Re-Run byte-identisch"
+
+# --- --reconfigure sichert die alte devices.json -----------------------------
+# Die .bak-Datei ist die einzige Undo-Moeglichkeit, wenn jemand versehentlich neu
+# einrichtet: das Onboarding schreibt Token und Key leer und der Refresh-Lauf
+# scheitert womoeglich. Ohne diese Zusicherung liess sich das 'cp -p' ersatzlos
+# entfernen. Sie enthaelt echte Token, also gehoert sie auf 0600 - 'cp -p' haelt
+# die Rechte der Quelle, die der atomare Write auf 0600 gesetzt hat.
+rc=0; [ -f "$ONB/devices.json.bak" ] || rc=1
+assert "$rc" "--reconfigure legt devices.json.bak an"
+rc=0; [ "$(cksum < "$ONB/devices.json.bak")" = "$DJ_BEFORE_RECONF" ] || rc=1
+assert "$rc" "devices.json.bak ist byte-identisch zum Stand VOR dem Lauf"
+rc=0; [ "$(mode_of "$ONB/devices.json.bak")" = "600" ] || rc=1
+assert "$rc" "devices.json.bak traegt 0600 (sie enthaelt Token und Key)"
+
+# --- Dritter Lauf OHNE --reconfigure: der konfig-sichere Re-Run --------------
+# Der haeufigste Weg zurueck in den Installer ist ein erneutes 'curl | bash'.
+# Der Guard davor entscheidet, ob dabei das Onboarding erneut laeuft - und das
+# wuerde die vorhandene devices.json mit leeren Token ueberschreiben, diesmal
+# OHNE .bak (die legt nur --reconfigure an). Die Guard-FUNKTION war geprueft,
+# ihre Aufrufstelle nicht: sie liess sich auf 'if false' setzen, ohne dass etwas
+# rot wurde.
+DJ_SUM_RERUN="$(cksum < "$ONB/devices.json")"
+run_onboarding
+rc=0; [ "$ONB_RC" -eq 0 ] || rc=1
+assert "$rc" "dritter Lauf ohne --reconfigure laeuft durch (Exit $ONB_RC)"
+rc=0; [ "$(cksum < "$ONB/devices.json")" = "$DJ_SUM_RERUN" ] || rc=1
+assert "$rc" "konfig-sicherer Re-Run: devices.json byte-identisch erhalten"
+rc=0; grep -qE "Bereits eingerichtet|Already set up" "$ONB_OUT" || rc=1
+assert "$rc" "konfig-sicherer Re-Run: meldet 'bereits eingerichtet'"
+rc=0; grep -qE "Anzahl der Klimaanlagen|How many air conditioners" "$ONB_OUT" && rc=1
+assert "$rc" "konfig-sicherer Re-Run: Onboarding wird NICHT erneut durchlaufen"
+rc=0; [ "$(wc -c < "$CRON_WRITES" | tr -d ' ')" -eq 1 ] || rc=1
+assert "$rc" "konfig-sicherer Re-Run: schreibt die Crontab nicht"
+
+# ---------------------------------------------------------------------------
+echo "== Onboarding End-to-End: fremde Cron-Jobs bleiben unangetastet =="
+# ---------------------------------------------------------------------------
+# Der Schreibblock haengt unsere drei Zeilen an die BESTEHENDE Crontab an. Faellt
+# dort das 'echo "$EXISTING_CRON"' weg, loescht der Installer saemtliche fremden
+# Jobs des Nutzers - und die Suite blieb gruen, weil jeder E2E-Lauf mit LEERER
+# Crontab begann. Die Zusicherung "alle geschriebenen Zeilen tragen den Marker"
+# stand dem sogar entgegen; mit Bestand gilt sie nur fuer die NEUEN Zeilen.
+FOREIGN_CRON="MAILTO=admin@example.org
+# taegliche Sicherung - gehoert dem Nutzer
+0 5 * * * /usr/local/bin/backup.sh --full >> /var/log/backup.log 2>&1
+@reboot /usr/local/bin/tunnel.sh"
+
+setup_onboarding_sandbox onbkeep "" "$FOREIGN_CRON"
+# Manuelle Eingabe: weiter / Anzahl / Name / IP / ID / kein Testlauf / Cron JA.
+ONB_INPUT=("" "1" "Wohnzimmer" "192.168.0.5" "12345" "n" "j")
+run_onboarding
+
+rc=0; [ "$ONB_RC" -eq 0 ] || rc=1
+assert "$rc" "Onboarding mit vorhandener Crontab laeuft durch (Exit $ONB_RC)"
+
+# Byte-genau: 'grep -Fx' vergleicht die GANZE Zeile. Ein Teilstring-Vergleich
+# faende auch eine verstuemmelte Zeile wieder.
+kept=0; missing=""
+while IFS= read -r fline; do
+    if grep -qFx "$fline" "$CRON_FILE"; then
+        kept=$((kept + 1))
+    else
+        missing="$missing [fehlt: $fline]"
+    fi
+done <<< "$FOREIGN_CRON"
+rc=0; [ "$kept" -eq 4 ] || rc=1
+assert "$rc" "alle 4 fremden Zeilen byte-identisch erhalten (n=$kept)$missing"
+
+# Angehaengt, nicht davorgeschoben: die Reihenfolge einer Crontab ist bedeutsam
+# (Env-Zuweisungen gelten fuer die Jobs DARUNTER - siehe Sprachhinweis oben).
+last_foreign="$(grep -n -F '@reboot /usr/local/bin/tunnel.sh' "$CRON_FILE" | head -1 | cut -d: -f1)"
+first_managed="$(grep -n -F "$CANONICAL_CRON_MARKER" "$CRON_FILE" | head -1 | cut -d: -f1)"
+rc=1
+if [ -n "$last_foreign" ] && [ -n "$first_managed" ] && [ "$first_managed" -gt "$last_foreign" ]; then
+    rc=0
+fi
+assert "$rc" "unsere Zeilen werden ANGEHAENGT (erste verwaltete $first_managed > letzte fremde $last_foreign)"
+
+# Die Marker-Zusicherung, auf die NEU geschriebenen Zeilen eingeschraenkt: genau
+# die vier fremden Zeilen duerfen ohne Marker dastehen.
+unmarked_keep=$(grep -c -v -e '^[[:space:]]*$' -e "$CANONICAL_CRON_MARKER" "$CRON_FILE" || true)
+rc=0; [ "$unmarked_keep" -eq 4 ] || rc=1
+assert "$rc" "nur die 4 fremden Zeilen sind markerlos - jede neue traegt ihn (n=$unmarked_keep)"
+
+rc=0; cron_line_has 'midea_ieco_ensure.py' '*/20 * * * *' \
+        'midea_ieco_ensure.py all --only-if-on' "$CANONICAL_CRON_MARKER" || rc=1
+assert "$rc" "iECO-Job wird trotz Bestand eingetragen"
+rc=0; cron_line_has 'midea_refresh_tokens.py' '0 3 * * 0' "$CANONICAL_CRON_MARKER" || rc=1
+assert "$rc" "Token-Refresh wird trotz Bestand eingetragen"
+rc=0; [ "$(wc -c < "$CRON_WRITES" | tr -d ' ')" -eq 1 ] || rc=1
+assert "$rc" "genau EIN Schreibvorgang trotz Bestand"
+
+# Idempotenz MIT Bestand: der zweite Lauf darf weder Duplikate anlegen noch
+# Fremdes verlieren.
+CRON_SUM_KEEP="$(cksum < "$CRON_FILE")"
+run_onboarding --reconfigure
+rc=0; [ "$ONB_RC" -eq 0 ] || rc=1
+assert "$rc" "Re-Run mit Bestand laeuft durch (Exit $ONB_RC)"
+rc=0; [ "$(cksum < "$CRON_FILE")" = "$CRON_SUM_KEEP" ] || rc=1
+assert "$rc" "Re-Run mit Bestand: Crontab byte-identisch (kein Duplikat, kein Verlust)"
 
 # ---------------------------------------------------------------------------
 echo "== Onboarding End-to-End: erkannte Geraete werden richtig uebernommen =="
@@ -1205,6 +1313,35 @@ assert "$rc" "_write_path_block: BIN_DIR nach Sourcen im PATH"
 occ="$(printf '%s' ":$got:" | grep -o ':/opt/local/bin:' | wc -l | tr -d ' ')"
 rc=0; [ "$occ" -eq 1 ] || rc=1
 assert "$rc" "_write_path_block: kein PATH-Duplikat bei doppeltem Sourcen (n=$occ)"
+
+# (b2) ANHAENGEN, nicht ueberschreiben: die Startdatei gehoert dem Nutzer und ist
+# im Regelfall nicht leer. Ein '>' statt '>>' wuerde sie komplett leeren - eine
+# gegen eine LEERE Datei gefuehrte Pruefung kann das prinzipiell nicht sehen.
+RCF_KEEP="$WORK/rc_existing"
+cat > "$RCF_KEEP" <<'EOF'
+# vom Nutzer gepflegt
+export EDITOR=vim
+alias ll='ls -la'
+EOF
+RCK_SUM_BEFORE="$(cksum < "$RCF_KEEP")"
+RCK_LINES_BEFORE="$(wc -l < "$RCF_KEEP" | tr -d ' ')"
+_write_path_block "$RCF_KEEP"
+
+kept=0
+while IFS= read -r rline; do
+    if grep -qFx "$rline" "$RCF_KEEP"; then kept=$((kept + 1)); fi
+done <<< "# vom Nutzer gepflegt
+export EDITOR=vim
+alias ll='ls -la'"
+rc=0; [ "$kept" -eq 3 ] || rc=1
+assert "$rc" "_write_path_block: bestehende rc-Zeilen byte-identisch erhalten (n=$kept)"
+
+# Der Bestand steht weiterhin am ANFANG - der Block wurde angehaengt.
+rc=0; [ "$(head -n "$RCK_LINES_BEFORE" "$RCF_KEEP" | cksum)" = "$RCK_SUM_BEFORE" ] || rc=1
+assert "$rc" "_write_path_block: der Bestand bleibt der Dateianfang (angehaengt, nicht davor)"
+
+rc=0; grep -qF "$PATH_BLOCK_MARKER" "$RCF_KEEP" || rc=1
+assert "$rc" "_write_path_block: Marker auch in der nicht-leeren Datei ergaenzt"
 
 # (c) ensure_bin_on_path: BIN_DIR bereits im PATH -> keine rc-Datei angefasst.
 HOME="$WORK/h_inpath"; mkdir -p "$HOME"; SHELL="/bin/bash"
