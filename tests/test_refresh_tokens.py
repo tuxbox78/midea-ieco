@@ -1186,6 +1186,21 @@ class HintTruthTableTests(_LangMixin):
         self.assertEqual(self._label((self.R, self.O, self.S)), None)
         self.assertEqual(self._label((self.R, self.S, self.O)), None)
 
+    def test_an_unclassified_code_before_the_first_answer_is_harmless(self):
+        """Der Kopf ist bewusst grosszuegiger als der Schwanz.
+
+        Bei [unklassifiziert, abgelehnt, stumm] sind beide Aussagen des Textes
+        wahr: es WURDE geantwortet, und danach nicht mehr. Was davor geschah,
+        aendert daran nichts - im Schwanz dagegen wuerde derselbe Code das
+        behauptete Ende entkraeften. Diese Asymmetrie ist eine Entscheidung und
+        kein Versehen; sie betrifft 64 der 2801 Folgen bis Laenge vier. Ohne
+        diesen Fall liesse sich der Kopf stillschweigend verschaerfen und ein
+        korrekter, nuetzlicher Hinweis verschwaende."""
+        self.assertEqual(self._label((self.O, self.R, self.S)), "hint_mixed")
+        self.assertEqual(self._label((self.O, self.K, self.U)), "hint_mixed")
+        # Gegenprobe zum Schwanz-Fall darueber, damit der Kontrast im Test steht.
+        self.assertEqual(self._label((self.R, self.O, self.S)), None)
+
     def test_empty_and_unclassifiable_stay_silent(self):
         self.assertEqual(self._label(()), None)
         self.assertEqual(self._label((self.O, self.O)), None)

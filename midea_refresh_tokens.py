@@ -702,6 +702,14 @@ def summarize_failure_hint(codes: list[str]) -> str | None:
     # kein Verstummen belegen. Trifft eine der Bedingungen nicht zu, wird bewusst
     # NICHTS gesagt - die Einzelzeilen pro Kandidat nennen den jeweiligen Grund
     # ohnehin praezise.
+    #
+    # VOR der ersten Antwort ist derselbe Code dagegen unschaedlich und bleibt
+    # bewusst zugelassen: bei [unklassifiziert, abgelehnt, stumm] sind beide
+    # Aussagen des Hinweises wahr - es WURDE geantwortet, und danach nicht mehr.
+    # Der Kopf ist damit absichtlich grosszuegiger als der Schwanz, wo derselbe
+    # Code das behauptete Ende entkraeften wuerde. Betrifft 64 der 2801 Folgen
+    # bis Laenge vier; festgehalten in tests/KNOWN_GAPS.md, damit die Asymmetrie
+    # nicht spaeter fuer ein Versehen gehalten und "korrigiert" wird.
     answered_at = [i for i, code in enumerate(codes) if code in _ANSWERED_CODES]
     blocking_at = [i for i, code in enumerate(codes) if code in _BLOCKING_CODES]
     if answered_at and blocking_at and answered_at[0] < blocking_at[0]:
