@@ -138,6 +138,57 @@ assert "$rc" "Meldung verweist auf install.sh"
 rc=0; [ ! -s "$ARGV_LOG" ] || rc=1
 assert "$rc" "ohne venv wird nichts ausgefuehrt"
 
+# ---------------------------------------------------------------------------
+echo "== exec: der Wrapper WIRD der Python-Prozess =="
+# ---------------------------------------------------------------------------
+# Der Wrapper begruendet sein 'exec' mit der Signalzustellung: ein SIGTERM aus
+# Cron oder systemd (oder ein SSH-Disconnect) soll den Python-Prozess treffen,
+# der die AC-Verbindung haelt - nicht eine Shell, die danebensteht und Python
+# verwaist zuruecklaesst. Nachweisen laesst sich das ueber die PROZESSIDENTITAET:
+# mit 'exec' traegt Python die PID des Wrappers, ohne 'exec' ist es ein
+# Kindprozess mit eigener PID. Genau daraus folgen Signalzustellung UND der
+# strukturell durchgereichte Exit-Code.
+#
+# Bis hierher liess sich das 'exec' streichen, ohne dass etwas rot wurde:
+# Argumentdurchreichung und Exit-Code ueberstehen den Wegfall unveraendert.
+#
+# Anmerkung fuer andere Umgebungen: optimiert eine Shell den letzten Befehl
+# eines Skripts von sich aus zu einem exec, bleibt dieser Test fuer korrekten
+# Code gruen und faengt lediglich die Mutation nicht mehr. Gemessen mit der bash
+# dieses Projekts (3.2) forkt der Aufruf ohne 'exec' nachweislich.
+new_sandbox execpid
+PIDFILE="$WORK/child.pid"
+# Fake-Python, der seine eigene PID hinterlegt und dann wartet.
+cat > "$SB/venv/bin/python3" <<EOF
+#!/usr/bin/env bash
+printf '%s' "\$\$" > "$PIDFILE"
+sleep 10
+EOF
+chmod +x "$SB/venv/bin/python3"
+rm -f "$PIDFILE"
+
+bash "$SB/midea_ieco_ensure.sh" all --only-if-on &
+WRAPPER_PID=$!
+
+# Begrenztes Warten statt festem Schlafen: auf einer langsamen Maschine soll der
+# Test nicht falsch-rot werden, und im Fehlerfall nicht ewig haengen.
+waited=0
+while [ ! -s "$PIDFILE" ] && [ "$waited" -lt 100 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+done
+CHILD_PID="$(cat "$PIDFILE" 2>/dev/null || true)"
+
+rc=0; [ -n "$CHILD_PID" ] || rc=1
+assert "$rc" "der Fake-Python startet ueberhaupt (PID-Datei nach ${waited}x0.1s)"
+
+rc=0; [ "$CHILD_PID" = "$WRAPPER_PID" ] || rc=1
+assert "$rc" "Wrapper-PID ($WRAPPER_PID) IST die Python-PID ($CHILD_PID) - exec, kein Fork"
+
+kill "$WRAPPER_PID" 2>/dev/null || true
+if [ -n "$CHILD_PID" ]; then kill "$CHILD_PID" 2>/dev/null || true; fi
+wait "$WRAPPER_PID" 2>/dev/null || true
+
 echo ""
 echo "RESULT(test_wrapper.sh): $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
