@@ -16,7 +16,10 @@ for f in install.sh midea_ieco_ensure.sh tests/test_install.sh tests/run_all.sh;
 done
 
 echo "### python syntax (py_compile) ###"
-python3 -m py_compile midea_ieco_ensure.py midea_refresh_tokens.py tests/*.py || fail=1
+# tools/ ist mit drin, damit auch die Diagnose-Werkzeuge (die nur von Hand am
+# echten Geraet laufen und deshalb keine Unit-Tests haben) nicht mit einem
+# Syntaxfehler ins Repo gelangen koennen.
+python3 -m py_compile midea_ieco_ensure.py midea_refresh_tokens.py tests/*.py tools/*.py || fail=1
 
 echo "### python unit tests ###"
 python3 -m unittest discover -s tests -p 'test_*.py' || fail=1
@@ -24,7 +27,7 @@ python3 -m unittest discover -s tests -p 'test_*.py' || fail=1
 echo "### install.sh function tests ###"
 bash tests/test_install.sh || fail=1
 
-rm -rf "$REPO/__pycache__" "$REPO/tests/__pycache__"
+rm -rf "$REPO/__pycache__" "$REPO/tests/__pycache__" "$REPO/tools/__pycache__"
 echo ""
 if [ "$fail" -eq 0 ]; then echo "ALL GREEN"; else echo "FAILURES ABOVE"; fi
 exit "$fail"
