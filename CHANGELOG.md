@@ -7,6 +7,14 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **The installer now says so when a managed cron job is not active.** A crontab
+  carrying our marker counts as "already set up", so nothing more is written — if
+  the iECO line had since been deleted or commented out, the product silently did
+  not run at all and nobody mentioned it. The notice lists exactly the missing
+  lines and writes nothing: the messages next to it promise the crontab is left
+  untouched, and printing keeps that literally true while making a duplicate job
+  impossible. A job run through the documented `midea_ieco_ensure.sh` wrapper
+  counts as present.
 - `tests/test_wrapper.sh`: functional tests for `midea_ieco_ensure.sh`. The wrapper
   is the second production path for `--only-if-on` (Siri shortcuts, SSH) and had no
   functional test at all — `bash -n` and `shellcheck` both stay green when `"$@"`
@@ -132,6 +140,24 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   why not every owner runs into this. No change to how the tool behaves.
 
 ### Fixed
+- **`error()` writes to stderr.** Several functions are called inside command
+  substitutions; on stdout their error message ended up inside the captured value
+  instead of on screen, and `set -euo pipefail` then aborted completely silently —
+  an install path containing a newline ended the run without a single word.
+- **A crontab that could not be read reliably is no longer rewritten.**
+  `crontab -l` exits non-zero both when there is no crontab and when reading fails,
+  and the second case was destructive: the write branch treated the user's crontab
+  as empty and replaced it with our three lines, reporting success. Reproduced end
+  to end — three foreign lines in, zero out. The two cases need not be told apart;
+  the crontab is now read twice and nothing is written when the results disagree.
+- **The cron language notice: a whitespace value is not a value, and the line
+  wins.** `MIDEA_IECO_LANG='   '` counted as set although cron stores the spaces
+  verbatim and `resolve_lang` strips them and falls back to English. And an
+  assignment above the jobs masked an *empty* assignment on the job line itself,
+  though shell precedence is the other way round — `VAR= command` overrides the
+  environment. Four further shapes of hand-edited line are still misjudged; they
+  need a shell parser to get right and are written up in `tests/KNOWN_GAPS.md`
+  with the measured cases rather than guessed at.
 - **The mixed-failure hint claimed things that had not happened.** When
   `VERIFY_BAD_KEY` joined the set of "the device answered" codes, the hint text was
   not revisited: for `[wrong key, silent]` it asserted a rejection that never took
@@ -245,6 +271,28 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   thank you.
 
 ### Testing
+- **The test suite could write outside its sandbox — and download to do it.**
+  `install.sh` resolves its install directory from `MIDEA_IECO_RESOLVED_DIR` before
+  anything else and exports that variable to child processes itself. Inherited from
+  the environment, it aimed every end-to-end section at that directory: measured on
+  a victim, a complete venv of 898 files with msmart-ng and midea-local really
+  installed from PyPI, plus `devices.json`, plus a ZIP download from GitHub copied
+  over the target in the update path. The directory it hits is exactly the
+  `.git`-stripped copy this project's own mutation-testing recipe tells you to make.
+  The whole `MIDEA_IECO_*` family is now unset at the head of `tests/test_install.sh`;
+  `git`, `curl` and `unzip` are stubbed as loud failures in every end-to-end sandbox
+  as defence in depth. Worth knowing which is which: only the unset protects — the
+  venv is built by the venv's own `pip`, which no PATH stub can intercept.
+- **The wrapper test left a `sleep` holding the suite's stdout**, so anything
+  capturing the output — a pipe, a command substitution, a CI step log — waited ten
+  seconds: 1.0 s redirected to a file against 10.9 s captured. Fixed on both sides,
+  and `run_all.sh` now captures that test the way CI does and fails above 8 seconds,
+  which guards the pair permanently.
+- **Both call sites of the cron language notice are now exercised, not counted.**
+  Reachability rested on a source-text `grep -c`, which stays green when a call site
+  is emptied. Two end-to-end runs replace it, and they assert on the warning text
+  rather than on the printed cron line — install.sh prints those lines
+  unconditionally further up, so the obvious assertion is vacuously green.
 - **Existing user data is now a fixture, not an empty directory.** Four places
   where the installer touches data the user already has were only exercised from
   an empty starting state, so the assertions could not see destruction. Each of

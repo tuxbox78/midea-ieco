@@ -164,6 +164,61 @@ locale can arrive would widen the check for no practical gain.
 
 ---
 
+### 6. The cron language notice misjudges four shapes of hand-edited line
+
+The notice asks one question: does this managed cron line set `MIDEA_IECO_LANG`?
+Answering it exactly means parsing the command field the way `/bin/sh` does —
+quotes, backslash escapes, command separators, and the schedule fields in front.
+Two attempts at that parser each introduced defects worse than the gap (one of
+them would have made the installer warn about every line it writes itself), so
+the shapes below are measured and written down instead:
+
+| line (no environment assignment above it) | notice | truth |
+|---|---|---|
+| `… MIDEA_IECO_LANG='   ' venv/bin/python3 …` | silent | job logs English |
+| `… # midea-ieco-managed # MIDEA_IECO_LANG=de` | silent | job logs English |
+| `… midea_ieco_ensure.py --note MIDEA_IECO_LANG=de all` | silent | job logs English |
+| `… >> /opt/MIDEA_IECO_LANG=de.log 2>&1` | silent | job logs English |
+
+All four need a hand-edited crontab, and the cost is a missing hint — never a
+wrong action. The reverse direction exists too and is the safe one: a token after
+the command word with an *empty* value produces a superfluous notice.
+
+A related, deliberate boundary: a value that is present but not one this project
+understands (`MIDEA_IECO_LANG=de # x`, which cron stores verbatim, or `fr`)
+counts as set. The notice reports "you never set it", not "you set it wrongly" —
+second-guessing a value the user typed would nag whoever chose
+`MIDEA_IECO_LANG=en` on purpose.
+
+### 7. Where a test guards a conjunction rather than each half
+
+- **The wrapper test's `exec sleep` and its `>/dev/null`** each remove the stall
+  on their own, so neither can be killed individually. What is guarded is the
+  conjunction: `tests/run_all.sh` captures the wrapper test's output the way CI
+  does and fails above 8 seconds (normal ≈ 1 s, the known fault ≈ 11 s).
+- **The `git`/`curl`/`unzip` stubs in the end-to-end sandboxes** cannot be killed
+  either: with the `MIDEA_IECO_*` unset in place the suite makes no such calls
+  anyway. The `unset` itself *is* killable — removing it and pointing
+  `MIDEA_IECO_RESOLVED_DIR` at a victim directory fills it with 898 files.
+  Whether the suite still writes outside its sandbox is a checkpoint someone has
+  to run, not a permanent assertion; a permanent one would need a recursion guard
+  and roughly half again the runtime.
+
+### 8. What the inactive-job notice cannot see
+
+`print_cron_missing_hint` matches the prefixes `midea_ieco_ensure` and
+`midea_refresh_tokens` on marked, active lines. Consequences, all print-only:
+
+- a hand-written marked line invoking the **`midea-ieco` bin wrapper** is not
+  recognised, so the notice fires although the job exists (superfluous advice —
+  the marker text itself contains `midea-ieco`, so matching it would hit every
+  managed line);
+- an install directory whose *path* contains `midea_ieco_ensure` makes every
+  marked line look like the iECO job, silencing that half of the notice;
+- a foreign line carrying our marker makes the notice fire for both tools;
+- the notice is not suppressible: a user who removed the jobs but left a
+  marker-bearing comment sees it on every run.
+
 ## Equivalent mutants (survive by design, not by omission)
 
 Do not "fix" these by adding a test — there is nothing to observe.
@@ -189,8 +244,9 @@ listed it as equivalent, and that no longer holds.
 ## Deliberately not covered
 
 - **`hint_all_cap`** was removed rather than tested: our verification cap sits above
-  msmart-ng's own worst case (`authenticate` ≈ 12 s, `refresh` ≈ 6 s and it does not
-  propagate network errors at all), so an all-timeout run cannot realistically occur.
+  msmart-ng's own worst case (`authenticate` ≈ 12 s and it does not propagate
+  network errors at all; the `refresh` ≈ 6 s figure is an estimate that has not been
+  re-derived from the pinned source), so an all-timeout run is not expected to occur.
   `VERIFY_CAP` still classifies correctly if it ever does; there is simply no invented
   advice attached to it.
 - **The generated crontab of existing installations** is never rewritten. The

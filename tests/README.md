@@ -33,13 +33,17 @@ Contents:
   crontab and with foreign jobs already in it — and asserts what actually reaches
   `crontab -`, including that existing entries survive byte-identically. Nothing
   leaves the sandbox: `HOME` and the install/bin directories point into a temp dir
-  and no network is touched. The PATH stubs differ per sandbox: the `--update` run
-  stubs `python3`, `pip` and `git` (it never calls `crontab`), the onboarding run
-  stubs `python3`, `pip` and `crontab` — and its `python3` stub answers only the
-  installer's probe calls, delegating the `devices.json` write to the real
-  interpreter so the test does not merely check its own stub. `git` is not stubbed
-  there and is never reached: without a `.git` directory `fetch_project_files`
-  takes a different branch.
+  and no network is touched. What actually keeps it there is the `unset` of the
+  whole `MIDEA_IECO_*` family at the head of the file — `install.sh` resolves its
+  install directory from `MIDEA_IECO_RESOLVED_DIR` first and exports that variable
+  itself, so an inherited value aims every end-to-end run at a foreign directory.
+  On top of that, `git`, `curl` and `unzip` are stubbed as loud failures in every
+  end-to-end sandbox; that is defence in depth, not the protection (the venv is
+  built by the venv's own `pip`, which no PATH stub intercepts). Each sandbox also
+  stubs what it drives: `python3` and `pip` everywhere, `crontab` in the onboarding
+  runs. The onboarding `python3` stub answers only the installer's probe calls and
+  delegates the `devices.json` write to the real interpreter, so the test does not
+  merely check its own stub.
 - `test_wrapper.sh` — functional tests for `midea_ieco_ensure.sh`, the wrapper
   behind the Siri shortcuts and SSH calls: that every argument (especially
   `--only-if-on`) reaches Python unchanged, that the exit code is passed through,
