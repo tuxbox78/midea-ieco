@@ -17,7 +17,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import ExitStack, redirect_stdout
+from contextlib import ExitStack, redirect_stdout, suppress
 from pathlib import Path
 from unittest import mock
 
@@ -880,6 +880,77 @@ class ConnectAndRefreshBodyTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 self._connect()
         self.assertEqual(len(_RecordingAC.instances), mie.CONNECT_RETRIES)
+
+
+class ConnectPacingOrderTests(unittest.TestCase):
+    """Die Pause zwischen zwei VERBINDUNGSVERSUCHEN, reihenfolgegenau.
+
+    Von den vier sleep-Aufrufen des Moduls waren drei reihenfolgegenau
+    festgeschrieben (Settle nach apply, Pause im apply-Retry, Pause zwischen den
+    Geraeten) - ausgerechnet der, der die Verbindungsversuche entzerrt, liess
+    sich ersatzlos entfernen. Genau dafuer gibt es das Pacing: das Geraet
+    vertraegt nur EINE lokale Verbindung und blockiert nach dichten Zugriffen
+    voruebergehend. Ohne die Pause erzeugt der Wiederholungsversuch also die
+    Stoerung, die er ueberwinden soll.
+
+    Geprueft wird die REIHENFOLGE, nicht die Anzahl: eine Pause hinter dem
+    letzten Versuch entzerrt nichts, ergibt bei einem Zaehltest aber dieselbe
+    Zahl."""
+
+    DEV = {"name": "W", "ip": "1.2.3.4", "port": 6445, "id": 42,
+           "token": "t", "key": "k"}
+
+    def setUp(self):
+        _RecordingAC.instances = []
+        module = sys.modules["msmart.device.AC.device"]
+        original = module.AirConditioner
+        module.AirConditioner = _RecordingAC
+        self.addCleanup(lambda: setattr(module, "AirConditioner", original))
+
+    def _events(self, retries, succeed_at=None):
+        """Ereignisliste eines connect_and_refresh-Laufs.
+
+        Versuche und Pausen landen in DERSELBEN Liste - nur so ist ihre
+        Reihenfolge zueinander ueberhaupt vergleichbar."""
+        events = []
+        state = {"n": 0}
+
+        async def _authenticate(self_ac, token, key):
+            state["n"] += 1
+            events.append("versuch")
+            if succeed_at is None or state["n"] < succeed_at:
+                raise RuntimeError("nope")
+
+        async def _sleep(seconds):
+            events.append(f"pause {seconds}")
+
+        with ExitStack() as es:
+            es.enter_context(mock.patch.object(_RecordingAC, "authenticate",
+                                               _authenticate))
+            es.enter_context(mock.patch.object(mie.asyncio, "sleep", _sleep))
+            es.enter_context(redirect_stdout(io.StringIO()))
+            with suppress(RuntimeError):
+                asyncio.run(mie.connect_and_refresh(dict(self.DEV),
+                                                    retries=retries))
+        return events
+
+    def test_a_pause_sits_between_two_attempts(self):
+        pause = f"pause {mie.RETRY_DELAY}"
+        self.assertEqual(self._events(3),
+                         ["versuch", pause, "versuch", pause, "versuch"])
+
+    def test_no_pause_follows_the_last_attempt(self):
+        # Eine Pause nach dem letzten Versuch verzoegert nur die Fehlermeldung.
+        events = self._events(2)
+        self.assertEqual(events[-1], "versuch")
+        self.assertEqual(events, ["versuch", f"pause {mie.RETRY_DELAY}", "versuch"])
+
+    def test_a_successful_first_attempt_never_pauses(self):
+        self.assertEqual(self._events(3, succeed_at=1), ["versuch"])
+
+    def test_the_pause_precedes_the_attempt_that_succeeds(self):
+        self.assertEqual(self._events(3, succeed_at=2),
+                         ["versuch", f"pause {mie.RETRY_DELAY}", "versuch"])
 
 
 class RenderedMessageOrderTests(unittest.TestCase):
