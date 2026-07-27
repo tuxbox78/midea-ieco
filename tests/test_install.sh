@@ -1022,8 +1022,9 @@ echo "== Cron-Sprachhinweis: je Werkzeug-Zeile, Env-Zeile anerkannt =="
 # beiden verwalteten Zeilen migriert war, und sie warnte, obwohl eine
 # eigenstaendige Env-Zeile die Sprache laengst fuer alle Jobs setzte - dem
 # ueblichen Weg, eine Variable fuer saemtliche Cron-Jobs zu hinterlegen.
-eval "$(extract_func cron_sets_lang_globally "$INSTALL")"
-eval "$(extract_func cron_tool_line_needs_lang "$INSTALL")"
+eval "$(extract_func _lang_value_is_effective "$INSTALL")"
+eval "$(extract_func _cron_line_sets_lang_inline "$INSTALL")"
+eval "$(extract_func cron_lines_needing_lang "$INSTALL")"
 eval "$(extract_func print_cron_lang_hint "$INSTALL")"
 eval "$(grep '^CRON_MARKER=' "$INSTALL")"
 
@@ -1093,6 +1094,81 @@ assert_hint "# MIDEA_IECO_LANG=de
 $CL_OLD_IECO
 $CL_OLD_REFRESH" "ZEILE_IECO
 ZEILE_REFRESH" "auskommentierte Env-Zeile zaehlt nicht"
+
+# Eine auskommentierte JOB-Zeile laeuft nicht und protokolliert folglich auch
+# nichts - fuer sie eine Sprachumstellung vorzuschlagen waere Rauschen. Das ist
+# der Fall, den der Kommentar-Guard wirklich abfaengt: die Zusicherung darueber
+# haelt auch ohne ihn, weil '# MIDEA_IECO_LANG' schon am Variablennamen
+# scheitert. Vor dieser Runde warnte der Installer hier.
+assert_hint "# $CL_OLD_IECO
+$CL_NEW_REFRESH
+$CL_LOGROT" "" "auskommentierte verwaltete Job-Zeile loest keinen Hinweis aus"
+
+# --- POSITION der Env-Zeile ------------------------------------------------
+# cron wendet eine eigenstaendige Zuweisung NUR auf die DARUNTER stehenden Jobs
+# an (man 5 crontab). Eine positionsblinde Pruefung schwieg auch dann, wenn die
+# Zuweisung unterhalb stand - die Jobs protokollierten weiter englisch, und der
+# Hinweis, der genau das haette sagen sollen, blieb aus.
+assert_hint "$CL_OLD_IECO
+$CL_OLD_REFRESH
+$CL_LOGROT
+MIDEA_IECO_LANG=de" "ZEILE_IECO
+ZEILE_REFRESH" "Env-Zeile UNTER den Jobs wirkt nicht auf sie"
+
+# Steht sie zwischen den beiden Jobs, gilt sie fuer den unteren und nicht fuer
+# den oberen - der Hinweis muss also GENAU eine Zeile nennen.
+assert_hint "$CL_OLD_IECO
+MIDEA_IECO_LANG=de
+$CL_OLD_REFRESH
+$CL_LOGROT" "ZEILE_IECO" "Env-Zeile ZWISCHEN den Jobs deckt nur den unteren"
+
+# Die naechstliegende Zuweisung oberhalb gewinnt: eine spaetere ueberschreibt
+# eine fruehere, auch wenn sie den Wert wieder leert.
+assert_hint "MIDEA_IECO_LANG=de
+MIDEA_IECO_LANG=
+$CL_OLD_IECO
+$CL_OLD_REFRESH" "ZEILE_IECO
+ZEILE_REFRESH" "spaetere LEERE Zuweisung hebt die fruehere auf"
+
+assert_hint "MIDEA_IECO_LANG=
+MIDEA_IECO_LANG=de
+$CL_OLD_IECO
+$CL_OLD_REFRESH" "" "spaetere gesetzte Zuweisung ersetzt die leere"
+
+# --- WERT der Zuweisung ----------------------------------------------------
+# Ein leerer Wert setzt die Sprache NICHT: resolve_lang faellt dafuer auf
+# Englisch zurueck (in midea_i18n.py wie in install.sh). Eine Pruefung, die nur
+# auf das '=' sieht, haelt genau diesen Fall faelschlich fuer erledigt.
+assert_hint "MIDEA_IECO_LANG=
+$CL_OLD_IECO
+$CL_OLD_REFRESH" "ZEILE_IECO
+ZEILE_REFRESH" "leerer Wert zaehlt nicht als gesetzt"
+
+assert_hint "MIDEA_IECO_LANG=''
+$CL_OLD_IECO
+$CL_OLD_REFRESH" "ZEILE_IECO
+ZEILE_REFRESH" "leerer Wert in Single-Quotes zaehlt ebenfalls nicht"
+
+assert_hint "MIDEA_IECO_LANG=\"\"
+$CL_OLD_IECO
+$CL_OLD_REFRESH" "ZEILE_IECO
+ZEILE_REFRESH" "leerer Wert in Double-Quotes zaehlt ebenfalls nicht"
+
+# Umgekehrt darf ein GEQUOTETER Wert nicht faelschlich als leer gelten.
+assert_hint "MIDEA_IECO_LANG='de'
+$CL_OLD_IECO
+$CL_OLD_REFRESH" "" "gequoteter Wert gilt als gesetzt"
+
+# Derselbe Wert-Massstab gilt fuer die INLINE-Zuweisung in der Job-Zeile: sonst
+# gilt eine Zeile als migriert, die ihre Ausgabe trotzdem auf Englisch schreibt.
+CL_EMPTY_IECO="*/20 * * * * cd /opt && MIDEA_IECO_LANG= venv/bin/python3 midea_ieco_ensure.py all --only-if-on >> /opt/ieco.log 2>&1 $CRON_MARKER"
+assert_hint "$CL_EMPTY_IECO
+$CL_NEW_REFRESH
+$CL_LOGROT" "ZEILE_IECO" "inline gesetzte, aber LEERE Sprachvariable zaehlt nicht"
+
+# Eine Zuweisung ohne verwaltete Zeilen ist kein Grund fuer irgendetwas.
+assert_hint "MIDEA_IECO_LANG=de
+0 5 * * * /usr/bin/backup.sh" "" "Env-Zeile ohne verwaltete Zeilen: kein Hinweis"
 
 # Erreichbarkeit: der Re-Run-Zweig ('bereits eingerichtet') verlaesst das Skript
 # per exit 0, bevor der Cron-Abschnitt erreicht wird. Ohne einen eigenen Aufruf

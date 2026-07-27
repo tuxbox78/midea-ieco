@@ -22,15 +22,25 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   answered *every* single attempt, which is the strongest evidence the tool can
   produce that the stored credentials no longer belong to the unit. It now says so
   and points at the token retrieval (`hint_all_answered`, EN/DE).
-- **The installer's "your cron jobs log in English" notice was wrong in both
-  directions.** It grepped across the whole crontab, so it went quiet as soon as
-  *one* of the two managed lines had been migrated, and it warned even when a
-  standalone `MIDEA_IECO_LANG=` environment line — the usual way to set a variable
-  for all cron jobs — had already set the language. It now checks each managed tool
-  line separately, recognises the environment line, ignores the logrotate line
-  (which runs no tool), and prints only the lines that actually need changing.
-  It is also reachable now: a plain re-run on a configured system exits before the
-  cron section, so the notice was previously almost impossible to see.
+- **The installer's "your cron jobs log in English" notice missed three cases.**
+  It used to grep across the whole crontab, so it went quiet as soon as *one* of
+  the two managed lines had been migrated, and it warned even when a standalone
+  `MIDEA_IECO_LANG=` environment line — the usual way to set a variable for all
+  cron jobs — had already set the language. Fixing those two introduced a third
+  fault: the replacement recognised the environment line **wherever** it stood and
+  **whatever** it contained, while cron applies such an assignment only to the jobs
+  *below* it (`man 5 crontab`) and an empty value makes `resolve_lang` fall back to
+  English. The check now walks the crontab line by line and carries the nearest
+  preceding assignment forward, so a line below the jobs, one between them, a later
+  assignment that empties an earlier one, and an empty or `''`/`""` value are all
+  handled the way cron actually behaves. The same value test applies to the inline
+  assignment in a job line, which previously counted `MIDEA_IECO_LANG=` with no
+  value as migrated. A commented-out managed job line no longer produces a notice
+  either — it does not run, so it logs nothing to translate. Worked out against a
+  table over position × value × migration state × commented-out before any code
+  changed; each row is a fixture in `tests/test_install.sh`.
+  The notice is also reachable now: a plain re-run on a configured system exits
+  before the cron section, so it was previously almost impossible to see.
 
 ### Added
 - `tests/test_wrapper.sh`: functional tests for `midea_ieco_ensure.sh`. The wrapper

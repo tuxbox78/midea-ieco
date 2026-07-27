@@ -522,25 +522,87 @@ shell_quote_for_cron() {
 # direkt darunter braucht ihn ebenfalls, und sie laeuft frueher.
 CRON_MARKER="# midea-ieco-managed"
 
-# Eine EIGENSTAENDIGE Env-Zeile in der Crontab (MIDEA_IECO_LANG=de) gilt fuer
-# alle darunter stehenden Jobs - das ist der uebliche Weg, eine Variable fuer
-# saemtliche Cron-Jobs zu setzen, und cron wertet sie selbst aus. Wer das getan
-# hat, braucht keinen Hinweis, auch wenn die Kommandozeilen selbst nichts setzen.
-# Eine auskommentierte Zeile zaehlt nicht.
-cron_sets_lang_globally() {   # $1 = bestehende Crontab
-    printf '%s\n' "$1" | grep -qE '^[[:space:]]*MIDEA_IECO_LANG[[:space:]]*='
+# Ist der Wert einer MIDEA_IECO_LANG-Zuweisung WIRKSAM? Ein leerer Wert zaehlt
+# NICHT als gesetzt: resolve_lang (hier wie in midea_i18n.py) faellt dafuer auf
+# Englisch zurueck, die Zeile aendert also gar nichts. Genau ein umschliessendes
+# Quote-Paar wird entfernt, damit '' und "" als leer erkannt werden und 'de'
+# nicht faelschlich als leer gilt.
+_lang_value_is_effective() {   # $1 = Rohwert hinter dem '='
+    local v="$1"
+    v="${v#"${v%%[![:space:]]*}"}"      # fuehrende Leerzeichen
+    v="${v%"${v##*[![:space:]]}"}"      # abschliessende Leerzeichen
+    case "$v" in
+        \'*\') v="${v#\'}"; v="${v%\'}" ;;
+        \"*\") v="${v#\"}"; v="${v%\"}" ;;
+    esac
+    [[ -n "$v" ]]
 }
 
-# Prueft die verwalteten Zeilen EINES Werkzeugs (erkannt am Skriptnamen $2):
-# fehlt dort die Sprachvariable, laeuft der Job ohne Locale und protokolliert
-# damit auf Englisch. Bewusst je Werkzeug-Zeile statt ueber die ganze Crontab -
-# ein zeilenuebergreifendes grep meldete "alles in Ordnung", sobald EINE der
-# beiden Zeilen migriert war, und liess die andere unbemerkt zurueck. Die
-# Logrotate-Zeile enthaelt keinen Skriptnamen und faellt hier korrekt heraus:
-# sie ruft kein Werkzeug auf und braucht folglich keine Sprache.
-cron_tool_line_needs_lang() {   # $1 = bestehende Crontab, $2 = Skriptname
-    printf '%s\n' "$1" | grep -F "$CRON_MARKER" | grep -F "$2" \
-        | grep -qv 'MIDEA_IECO_LANG='
+# Traegt die Kommandozeile selbst eine wirksame Zuweisung? Der Wert endet am
+# naechsten Leerzeichen - 'MIDEA_IECO_LANG= venv/bin/python3 ...' setzt also
+# nichts, sieht fuer eine reine Suche nach 'MIDEA_IECO_LANG=' aber genauso aus
+# wie eine migrierte Zeile.
+_cron_line_sets_lang_inline() {   # $1 = Cron-Zeile
+    local rest
+    case "$1" in
+        *MIDEA_IECO_LANG=*) rest="${1#*MIDEA_IECO_LANG=}" ;;
+        *) return 1 ;;
+    esac
+    _lang_value_is_effective "${rest%%[[:space:]]*}"
+}
+
+# Ermittelt ZEILENWEISE, welche verwalteten Werkzeug-Zeilen ohne wirksame
+# Sprachvariable laufen (Ergebnis in CRON_NEEDS_IECO/CRON_NEEDS_REFRESH, global
+# wie DISC_IPS/DISC_IDS bei parse_discovered).
+#
+# Warum mit Zustand statt zweier greps ueber die ganze Crontab: cron wendet eine
+# eigenstaendige Zuweisung NUR auf die DARUNTER stehenden Jobs an (man 5
+# crontab). Eine positionsblinde Suche schwieg deshalb auch dann, wenn die
+# Zuweisung unter den Jobs oder zwischen ihnen stand oder leer war - in allen
+# drei Faellen protokollieren die Jobs weiter englisch. Es gilt jeweils die
+# NAECHSTLIEGENDE Zuweisung oberhalb; eine spaetere ueberschreibt die fruehere,
+# auch mit leerem Wert.
+#
+# Bewusst NICHT beruecksichtigt werden eigenstaendige LANG=/LC_ALL=-Zeilen:
+# resolve_lang wuerde sie zur Laufzeit zwar auswerten, der Hinweis empfiehlt
+# aber MIDEA_IECO_LANG. Ein ueberfluessiger Hinweis in diesem Sonderfall kostet
+# nichts - er schlaegt keine Aenderung an fremden Zeilen vor (KNOWN_GAPS).
+cron_lines_needing_lang() {   # $1 = bestehende Crontab
+    CRON_NEEDS_IECO=0
+    CRON_NEEDS_REFRESH=0
+    local line trimmed name env_effective=0
+    while IFS= read -r line; do
+        trimmed="${line#"${line%%[![:space:]]*}"}"
+        # Eine auskommentierte Zeile setzt nichts und ist kein Job. Der Marker
+        # steht am ZEILENENDE der verwalteten Zeilen, eine fuehrende '#' macht
+        # die ganze Zeile inaktiv.
+        case "$trimmed" in '#'*) continue ;; esac
+        # Eigenstaendige Zuweisung? Dann steht vor dem ERSTEN '=' genau unser
+        # Variablenname. Eine Job-Zeile faellt hier korrekt heraus: vor ihrem
+        # ersten '=' steht die Zeitangabe samt Kommandoanfang.
+        if [[ "$trimmed" == *=* ]]; then
+            name="${trimmed%%=*}"
+            name="${name%"${name##*[![:space:]]}"}"
+            if [[ "$name" == "MIDEA_IECO_LANG" ]]; then
+                if _lang_value_is_effective "${trimmed#*=}"; then
+                    env_effective=1
+                else
+                    env_effective=0
+                fi
+                continue
+            fi
+        fi
+        case "$line" in *"$CRON_MARKER"*) : ;; *) continue ;; esac
+        if [[ "$env_effective" -eq 1 ]] || _cron_line_sets_lang_inline "$line"; then
+            continue
+        fi
+        # Die Logrotate-Zeile traegt keinen Skriptnamen und faellt hier korrekt
+        # heraus: sie ruft kein Werkzeug auf und braucht keine Sprache.
+        case "$line" in
+            *midea_ieco_ensure.py*)    CRON_NEEDS_IECO=1 ;;
+            *midea_refresh_tokens.py*) CRON_NEEDS_REFRESH=1 ;;
+        esac
+    done <<< "$1"
 }
 
 # Weist auf verwaltete Cron-Zeilen ohne Sprachvariable hin - und zeigt GENAU die
@@ -548,18 +610,13 @@ cron_tool_line_needs_lang() {   # $1 = bestehende Crontab, $2 = Skriptname
 # selbst wird bewusst NICHT umgeschrieben: sie gehoert dem Nutzer, und '--update'
 # sagt ausdruecklich zu, sie nicht anzufassen.
 print_cron_lang_hint() {   # $1 = bestehende Crontab
-    if cron_sets_lang_globally "$1"; then
-        return 0
-    fi
-    local needs_ieco=0 needs_refresh=0
-    if cron_tool_line_needs_lang "$1" "midea_ieco_ensure.py"; then needs_ieco=1; fi
-    if cron_tool_line_needs_lang "$1" "midea_refresh_tokens.py"; then needs_refresh=1; fi
-    if [[ "$needs_ieco" -eq 0 && "$needs_refresh" -eq 0 ]]; then
+    cron_lines_needing_lang "$1"
+    if [[ "$CRON_NEEDS_IECO" -eq 0 && "$CRON_NEEDS_REFRESH" -eq 0 ]]; then
         return 0
     fi
     warn "$(t cron_lang_missing "$LANG_CHOICE")"
-    if [[ "$needs_ieco" -eq 1 ]]; then echo "$CRON_LINE_IECO"; fi
-    if [[ "$needs_refresh" -eq 1 ]]; then echo "$CRON_LINE_REFRESH"; fi
+    if [[ "$CRON_NEEDS_IECO" -eq 1 ]]; then echo "$CRON_LINE_IECO"; fi
+    if [[ "$CRON_NEEDS_REFRESH" -eq 1 ]]; then echo "$CRON_LINE_REFRESH"; fi
 }
 
 # Prueft einen Geraetenamen. Rueckgabe 0 = gueltig; sonst 1 mit einem
