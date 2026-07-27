@@ -973,6 +973,17 @@ class RenderedMessageOrderTests(unittest.TestCase):
         return out.getvalue()
 
     def _assert_order(self, text, *parts):
+        """Vergleicht die ERSTVORKOMMEN der Teilstuecke im gesamten Text.
+
+        Was dieser Helfer NICHT leistet: er sieht nicht die einzelne Zeile.
+        Steht ein Teilstueck schon in einer frueheren, korrekten Zeile, ist die
+        Behauptung erfuellt, obwohl die gemeinte Zeile vertauscht sein kann.
+        Dagegen helfen nur die Vollzeilen-Zusicherungen weiter unten.
+
+        Auf Erstvorkommen und nicht fortlaufend zu suchen ist Absicht: eine
+        fortlaufende Suche findet ein vertauschtes Paar im naechsten
+        Wiederholungsversuch erneut und faellt genau dadurch nicht mehr auf.
+        Gemessen an conn_attempt_failed, das dabei still ueberlebte."""
         last = -1
         for part in parts:
             self.assertIn(part, text)
@@ -1019,6 +1030,48 @@ class RenderedMessageOrderTests(unittest.TestCase):
         out = self._run([device])
         self._assert_order(out, "[Wohnzimmer]", "FAN_ONLY (5)", "COOL or HEAT")
 
+    # --- vollstaendig gerenderte Zeilen -----------------------------------
+    # Die Zusicherungen oben pruefen die REIHENFOLGE einzelner Bruchstuecke im
+    # Gesamttext. Das reicht nicht: eine korrekte fruehere Zeile kann die
+    # Reihenfolge-Behauptung erfuellen, waehrend die gepruefte Zeile vertauscht
+    # ist. Wirksam ist nur der Vergleich mit der KOMPLETTEN gerenderten Zeile -
+    # so wie es die Statuszeilen oben schon tun. Die Erwartung entsteht aus dem
+    # Katalog (t(...)), damit eine Umformulierung sie mitnimmt statt sie still
+    # zu veralten; festgehalten wird allein die Argument-REIHENFOLGE.
+
+    def test_device_error_line_renders_name_then_reason(self):
+        out = self._run([RuntimeError("VERBINDUNGSGRUND")])
+        self.assertIn(mie.t("dev_error", "Wohnzimmer", "VERBINDUNGSGRUND"), out)
+
+    def test_mode_guard_lines_render_in_full(self):
+        device = FakeDevice(power_state=True, ieco=False)
+        device.operational_mode = _OpMode.FAN_ONLY
+        out = self._run([device])
+        self.assertIn(mie.t("dev_mode_unsupported", "Wohnzimmer", "FAN_ONLY (5)",
+                            mie.t("mode_names_capable")), out)
+        self.assertIn(mie.t("dev_mode_nothing_switched", "Wohnzimmer",
+                            mie.t("mode_names_capable")), out)
+
+    def test_reconnect_and_apply_failure_lines_render_in_full(self):
+        out = self._run([FakeDevice(power_state=True, ieco=False,
+                                    apply_raises=RuntimeError("APPLYBOOM")),
+                         RuntimeError("RECONNECTBOOM")])
+        self.assertIn(mie.t("dev_reconnect_failed", "Wohnzimmer", "RuntimeError",
+                            "RECONNECTBOOM"), out)
+        # last_exc ist hier der Reconnect-Fehler: er war der letzte.
+        self.assertIn(mie.t("dev_apply_failed", "Wohnzimmer", "RECONNECTBOOM"), out)
+
+    def test_verify_failure_line_renders_name_then_reason(self):
+        out = self._run([FakeDevice(power_state=True, ieco=False),
+                         RuntimeError("VERIFYBOOM")])
+        self.assertIn(mie.t("dev_verify_failed", "Wohnzimmer", "VERIFYBOOM"), out)
+
+    def test_capability_failure_line_renders_in_full(self):
+        out = self._run([FakeDevice(power_state=True,
+                                    caps_raises=TimeoutError("KAPUTT"))])
+        self.assertIn(mie.t("dev_caps_failed", "Wohnzimmer", "TimeoutError",
+                            "KAPUTT"), out)
+
     def test_connection_attempt_line_counts_attempt_of_total(self):
         # connect_and_refresh laeuft hier ECHT (nur das AC-Objekt ist ein Fake).
         _RecordingAC.instances = []
@@ -1039,8 +1092,102 @@ class RenderedMessageOrderTests(unittest.TestCase):
                      "token": "t", "key": "k"}, retries=2))
         text = out.getvalue()
         self._assert_order(text, "[Wohnzimmer]", "1/2", "RuntimeError", "CONNBOOM")
+        # Vollstaendig gerendert: die Zeile wiederholt sich je Versuch, und
+        # eine Reihenfolge-Pruefung ueber den Gesamttext kann ein vertauschtes
+        # Paar in der Wiederholung uebersehen.
+        self.assertIn(mie.t("conn_attempt_failed", "Wohnzimmer", 1, 2,
+                            "RuntimeError", "CONNBOOM"), text)
+        self.assertIn(mie.t("conn_attempt_failed", "Wohnzimmer", 2, 2,
+                            "RuntimeError", "CONNBOOM"), text)
         # Die Aufgabemeldung nennt erst das Geraet, dann die Versuchszahl.
         self._assert_order(str(cm.exception), "Wohnzimmer", "2")
+        self.assertIn(mie.t("conn_gave_up", "Wohnzimmer", 2), str(cm.exception))
+
+
+class RenderedOverviewAndConfigLineTests(unittest.TestCase):
+    """Vollstaendig gerenderte Zeilen ausserhalb von ensure_ieco.
+
+    Uebersicht und Konfig-Meldungen entstehen an anderen Stellen und blieben
+    deshalb von RenderedMessageOrderTests unberuehrt. Am schwersten wiegen die
+    Beispielzeilen: sie sind die Anleitung, in die ein Neuling sieht, und
+    vertauscht ergeben sie 'all midea-ieco' - ein Kommando, das es nicht gibt."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "devices.json"
+        orig = mie.CONFIG_PATH
+        mie.CONFIG_PATH = self.path
+        self.addCleanup(lambda: setattr(mie, "CONFIG_PATH", orig))
+
+    def _main(self, argv):
+        out = io.StringIO()
+        with ExitStack() as es:
+            es.enter_context(mock.patch.object(mie.sys, "argv",
+                                               ["midea-ieco"] + argv))
+            es.enter_context(redirect_stdout(out))
+            with self.assertRaises(SystemExit):
+                asyncio.run(mie.main())
+        return out.getvalue()
+
+    def test_example_lines_pair_the_command_with_its_target(self):
+        self.path.write_text(json.dumps({"devices": []}), encoding="utf-8")
+        out = self._main([])
+        self.assertIn(mie.t("ov_example_all", mie.CMD_MAIN, mie.TARGET_ALL), out)
+        self.assertIn(mie.t("ov_example_only_if_on", mie.CMD_MAIN, mie.TARGET_ALL),
+                      out)
+        self.assertIn(mie.t("ov_example_list", mie.CMD_MAIN, mie.TARGET_LIST), out)
+
+    def test_reserved_name_line_names_the_device_then_the_file(self):
+        # Ein Geraet, das 'all' heisst, ist per CLI nicht ansteuerbar.
+        self.path.write_text(json.dumps({"devices": [
+            {"name": "all", "ip": "1.2.3.4", "port": 6444, "id": 1}]}),
+            encoding="utf-8")
+        out = self._main(["list"])
+        self.assertIn(mie.t("ov_reserved_name", "all", mie.CONFIG_PATH.name), out)
+
+    def test_skipped_entries_line_counts_first_then_names_the_file(self):
+        self.path.write_text(json.dumps({"devices": [
+            "kaputt", 42, {"name": "W", "ip": "1.2.3.4", "id": 1}]}),
+            encoding="utf-8")
+
+        async def _ensure(dev_conf, only_if_on):
+            return True
+
+        out = io.StringIO()
+        with ExitStack() as es:
+            es.enter_context(mock.patch.object(mie, "ensure_ieco", _ensure))
+            es.enter_context(mock.patch.object(mie.asyncio, "sleep", _anoop))
+            es.enter_context(mock.patch.object(mie.sys, "argv",
+                                               ["midea-ieco", "all"]))
+            es.enter_context(redirect_stdout(out))
+            with self.assertRaises(SystemExit):
+                asyncio.run(mie.main())
+        self.assertIn(mie.t("main_skipped_entries", 2, mie.CONFIG_PATH.name),
+                      out.getvalue())
+
+    # Die Fehlerdetails kommen aus einer GESETZTEN Ausnahme statt aus einer
+    # echten kaputten Datei: nur so sind Typname und Text im Test bekannt und
+    # die Erwartung bleibt ueber Python-Versionen hinweg stabil.
+    def test_unreadable_config_line_names_path_type_and_detail(self):
+        self.path.write_text("{}", encoding="utf-8")
+        out = io.StringIO()
+        with mock.patch.object(mie.json, "load", side_effect=ValueError("KAPUTT")), \
+                redirect_stdout(out):
+            with self.assertRaises(SystemExit):
+                mie.load_config()
+        self.assertIn(mie.t("cfg_unreadable", mie.CONFIG_PATH, "ValueError",
+                            "KAPUTT"), out.getvalue())
+
+    def test_soft_unreadable_config_line_names_path_type_and_detail(self):
+        # Der weiche Pfad der Uebersicht: er bricht NICHT ab, meldet aber
+        # denselben Sachverhalt - und mit denselben drei Werten.
+        self.path.write_text("{}", encoding="utf-8")
+        with mock.patch.object(mie.json, "load", side_effect=ValueError("KAPUTT")):
+            devices, problem = mie._read_devices_soft()
+        self.assertEqual(devices, [])
+        self.assertEqual(problem, mie.t("soft_cfg_unreadable", mie.CONFIG_PATH,
+                                        "ValueError", "KAPUTT"))
 
 
 class IncompleteEntryMessageOrderTests(unittest.TestCase):

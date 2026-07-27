@@ -299,6 +299,17 @@ class DiscoverInvocationTests(unittest.TestCase):
         self.assertGreater(len(marker), 10, key)
         self.assertIn(marker, str(cm.exception))
 
+    def _assert_rendered(self, cm, key, *args):
+        """Wie _assert_message, aber gegen die VOLLSTAENDIG gerenderte Meldung.
+
+        Der Marker oben ist das laengste Literal des Katalogtextes und liegt
+        damit zwangslaeufig NEBEN den Platzhaltern - ein vertauschtes
+        Wertepaar laesst ihn unberuehrt. Diese drei Meldungen fuehren je zwei
+        Werte (Ausnahmetyp und -text); vertauscht lesen sie sich als
+        'no space: OSError'. Die Werte kommen aus der im Test gesetzten
+        Ausnahme, sind hier also bekannt."""
+        self.assertIn(mrt.t(key, *args), str(cm.exception))
+
     @staticmethod
     def _ns(rc=0, out="", err=""):
         return SimpleNamespace(returncode=rc, stdout=out, stderr=err)
@@ -424,6 +435,8 @@ class DiscoverInvocationTests(unittest.TestCase):
             with self.assertRaises(RuntimeError) as cm:
                 mrt.fetch_candidate_credentials("1.2.3.4")
         self._assert_message(cm, "err_discover_start")
+        self._assert_rendered(cm, "err_discover_start", "PermissionError",
+                              "exec denied")
 
     def test_mkdtemp_failure_becomes_runtimeerror(self):
         # Temp-Verzeichnis nicht anlegbar (z.B. voller Datentraeger) -> klarer
@@ -433,6 +446,7 @@ class DiscoverInvocationTests(unittest.TestCase):
             with self.assertRaises(RuntimeError) as cm:
                 mrt.fetch_candidate_credentials("1.2.3.4")
         self._assert_message(cm, "err_tempdir")
+        self._assert_rendered(cm, "err_tempdir", "OSError", "no space")
 
     def test_config_write_failure_becomes_runtimeerror_and_cleans_up(self):
         # mkdtemp real (Verzeichnis entsteht wirklich), aber der {}-Write
@@ -452,6 +466,7 @@ class DiscoverInvocationTests(unittest.TestCase):
             with self.assertRaises(RuntimeError) as cm:
                 mrt.fetch_candidate_credentials("1.2.3.4")
         self._assert_message(cm, "err_isolation_config")
+        self._assert_rendered(cm, "err_isolation_config", "OSError", "nope")
         self.assertFalse(Path(created["dir"]).exists())
 
 
@@ -1618,6 +1633,16 @@ class RenderedMessageOrderTests(_LangMixin):
         return out.getvalue()
 
     def _assert_order(self, text, first, second):
+        """Vergleicht die ERSTVORKOMMEN beider Teilstuecke im gesamten Text.
+
+        Was dieser Helfer NICHT leistet: er sieht nicht die einzelne Zeile.
+        Steht ein Teilstueck schon in einer frueheren, korrekten Zeile, ist die
+        Behauptung erfuellt, obwohl die gemeinte Zeile vertauscht sein kann.
+        Dagegen helfen nur die Vollzeilen-Zusicherungen weiter unten.
+
+        Auf Erstvorkommen und nicht fortlaufend zu suchen ist Absicht: eine
+        fortlaufende Suche findet ein vertauschtes Paar in der naechsten
+        gleichartigen Zeile erneut und faellt dadurch nicht mehr auf."""
         self.assertIn(first, text)
         self.assertIn(second, text)
         self.assertLess(text.index(first), text.index(second),
@@ -1681,6 +1706,31 @@ class RenderedMessageOrderTests(_LangMixin):
             mrt.update_device(dict(self.DEV))
         self._assert_order(out.getvalue(), "[Wohnzimmer]", "FEHLERTEXT")
 
+    # --- vollstaendig gerenderte Zeilen -----------------------------------
+    # Die Zusicherungen oben pruefen Bruchstuecke und deren Reihenfolge im
+    # Gesamttext; eine korrekte fruehere Zeile kann diese Behauptung erfuellen,
+    # waehrend die gemeinte Zeile vertauscht ist. Wirksam ist der Vergleich mit
+    # der KOMPLETTEN gerenderten Zeile, aus dem Katalog erzeugt.
+
+    def test_candidates_found_line_renders_name_then_count(self):
+        out = self._run_update([("k1", "t1"), ("k2", "t2")], [(True, "", "")])
+        self.assertIn(mrt.t("dev_candidates_found", "Wohnzimmer", 2), out)
+
+    def test_total_failure_line_renders_name_then_count(self):
+        out = self._run_update(
+            [("k1", "t1"), ("k2", "t2")],
+            [(False, mrt.VERIFY_SILENT, "x"), (False, mrt.VERIFY_SILENT, "y")])
+        self.assertIn(mrt.t("dev_all_failed", "Wohnzimmer", 2), out)
+
+    def test_fetch_failure_line_renders_name_then_error(self):
+        out = io.StringIO()
+        with mock.patch.object(mrt, "fetch_candidate_credentials",
+                               side_effect=RuntimeError("FEHLERTEXT")), \
+                redirect_stdout(out):
+            mrt.update_device(dict(self.DEV))
+        self.assertIn(mrt.t("dev_fetch_failed", "Wohnzimmer", "FEHLERTEXT"),
+                      out.getvalue())
+
     def test_discover_exit_message_shows_the_code_then_the_output(self):
         # Vertauscht: "exited with code <Ausgabe>. Last output: 3".
         result = SimpleNamespace(returncode=3, stdout="", stderr="BOOMTAIL")
@@ -1718,6 +1768,37 @@ class ConfigMessageOrderTests(_ConfigPathMixin):
         # Vertauscht: "devices.json unexpected entry/entries in 2 skipped".
         self.assertIn("2 unexpected", text)
         self.assertLess(text.index("2 unexpected"), text.index("devices.json"))
+
+    # Die Fehlerdetails kommen aus einer GESETZTEN Ausnahme statt aus einer
+    # echten kaputten Datei: nur so sind Typname und Text bekannt und die
+    # Erwartung bleibt ueber Python-Versionen hinweg stabil.
+    def test_unreadable_config_line_renders_path_type_and_detail(self):
+        self.path.write_text("{}", encoding="utf-8")
+        err = io.StringIO()
+        with mock.patch.object(mrt.json, "load", side_effect=ValueError("KAPUTT")), \
+                redirect_stderr(err):
+            with self.assertRaises(SystemExit):
+                mrt.load_config()
+        self.assertIn(mrt.t("cfg_unreadable", mrt.CONFIG_PATH, "ValueError",
+                            "KAPUTT"), err.getvalue())
+
+    def test_write_failure_line_renders_type_then_detail(self):
+        # Der Schreibfehler ist die letzte Station eines erfolgreichen Laufs:
+        # vertauscht meldet er '[Errno ...]: OSError' statt 'OSError: ...'.
+        self.path.write_text(json.dumps({"devices": [
+            {"name": "W", "ip": "1.2.3.4", "id": 1}]}), encoding="utf-8")
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {"MIDEA_IECO_LANG": "en"}), \
+                mock.patch.dict(sys.modules, {"msmart": mock.MagicMock()}), \
+                mock.patch.object(mrt, "update_device", lambda dev: True), \
+                mock.patch.object(mrt, "save_config",
+                                  side_effect=OSError("PLATTE VOLL")), \
+                mock.patch.object(mrt.sys, "argv", ["x", "--all"]), \
+                redirect_stdout(io.StringIO()), redirect_stderr(err):
+            with self.assertRaises(SystemExit):
+                mrt.main()
+        self.assertIn(mrt.t("main_write_failed", "OSError", "PLATTE VOLL"),
+                      err.getvalue())
 
 
 class NoWriteWithoutVerificationTests(_LangMixin):
