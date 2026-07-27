@@ -7,6 +7,39 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **iECO is tied to the operating mode — the tool now says so.** `midea_ieco_ensure.py`
+  checks the operating mode before writing anything and reports a mode that cannot
+  carry iECO by name, instead of attempting a write that silently fails and then
+  reporting the generic "iECO ist laut Geraet weiterhin deaktiviert" (reported as
+  issue #3). With `--only-if-on` (the recommended cron job) this is deliberately
+  **not** an error — a deliberately chosen mode is not a fault, and a unit left in
+  Auto no longer produces 72 failed runs a day. On an explicit call it exits
+  non-zero and switches nothing at all, not even power. If iECO is already active,
+  the existing short-circuit still wins, so an overly narrow mode list can never
+  flag a working state as a problem; an undeterminable mode fails open.
+- Measured on a real unit (PortaSplit `2060008E`, 2026-07-27, all five modes via
+  the remote): **Cool and Heat carry iECO; Auto, Dry and Fan only discard it.**
+  This matches `msmart-ng`'s own capability decoding (`1,3,8 - Cool, 3,4,8 - Heat`),
+  which is collapsed into a single `supports_ieco` bool and therefore cannot be
+  read back at runtime. Both READMEs gained a "Which modes support iECO" section;
+  the practical consequence — **iECO is unavailable in Auto, through this tool and
+  through the Midea app alike** — was previously undocumented anywhere.
+- `tools/probe_ieco_current_mode.py` — measures whether iECO holds in the mode the
+  unit is currently in, without switching modes over the network (set the mode on
+  the remote). Two connections per reading, one when iECO is already on.
+- `tools/probe_ieco_modes.py` — automated sweep across all modes. Prefer the
+  gentler script above: Midea units accept a single local connection and can lock
+  their LAN interface up temporarily under rapid session churn. The sweep now
+  aborts on the first connection loss, lets the unit settle, and retries the state
+  restore patiently (45 s cooldown, then 6 attempts 20 s apart).
+
+### Changed
+- Operating modes are printed as name **and** number (`mode=FAN_ONLY (5)` instead of
+  `mode=5`). `msmart-ng`'s `OperationalMode` is an `IntEnum`, which renders as a bare
+  number from Python 3.11 on — unreadable in logs and bug reports. This also makes
+  the READMEs' log examples match reality again.
+
+### Added
 - Both READMEs now list the press coverage of this project ("In the media" /
   "In den Medien"), with a transparency note on what was supplied to which
   outlet and that no money changed hands in either direction.

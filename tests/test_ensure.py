@@ -7,6 +7,7 @@ Ausfuehren: python3 -m unittest tests.test_ensure  (aus dem Repo-Root)
 oder direkt: python3 tests/test_ensure.py
 """
 import asyncio
+import enum
 import io
 import json
 import subprocess
@@ -66,6 +67,17 @@ class LoadConfigTests(unittest.TestCase):
         self._expect_exit1()
 
 
+class _OpMode(enum.IntEnum):
+    """Bildet msmart-ng's OperationalMode nach (gleiche Werte, gleiches
+    IntEnum-Verhalten), damit die Fakes sich wie echte Geraete verhalten -
+    inklusive der Modusbindung von iECO."""
+    AUTO = 1
+    COOL = 2
+    DRY = 3
+    HEAT = 4
+    FAN_ONLY = 5
+
+
 class FakeDevice:
     """Konfigurierbares Fake-AC-Objekt fuer die Retry-Matrix (#13/#14)."""
 
@@ -75,7 +87,11 @@ class FakeDevice:
         self.power_state = power_state
         self.ieco = ieco
         self.eco = False
-        self.operational_mode = 1
+        # COOL als Standard: der Modus, in dem iECO tatsaechlich haelt (am Geraet
+        # gemessen). Mit dem frueheren AUTO-Default wuerden diese Tests am
+        # Modus-Guard haengenbleiben, statt den Pfad zu pruefen, um den es ihnen
+        # geht (Retry/Capabilities).
+        self.operational_mode = _OpMode.COOL
         self.supports_ieco = supports_ieco
         self._apply_raises = apply_raises
         self._caps_raises = caps_raises
@@ -213,7 +229,7 @@ class CapabilityGatedDevice:
     def __init__(self, *, power_state=True, true_ieco=True, supports_ieco=True):
         self.online = True
         self.power_state = power_state
-        self.operational_mode = 1
+        self.operational_mode = _OpMode.COOL
         self.eco = False
         self.supports_ieco = supports_ieco
         self._true_ieco = true_ieco
@@ -275,6 +291,120 @@ class IecoVerificationCapabilityTests(unittest.TestCase):
         d = CapabilityGatedDevice(power_state=True, true_ieco=True)
         self.assertTrue(self._run([d]))
         self.assertEqual(d.apply_calls, 0)
+
+
+class ModeLabelTests(unittest.TestCase):
+    """_mode_label: Name UND Zahl, robust gegen unerwartete Werte.
+
+    Hintergrund: msmart-ng's OperationalMode ist ein IntEnum und rendert ab
+    Python 3.11 im f-String als nackte Zahl - 'mode=5' ist in einem Bugreport
+    kaum zu deuten."""
+
+    def test_enum_shows_name_and_value(self):
+        self.assertEqual(mie._mode_label(_OpMode.FAN_ONLY), "FAN_ONLY (5)")
+        self.assertEqual(mie._mode_label(_OpMode.COOL), "COOL (2)")
+
+    def test_plain_int_still_readable(self):
+        self.assertEqual(mie._mode_label(2), "2")
+
+    def test_unknown_object_does_not_crash(self):
+        self.assertEqual(mie._mode_label(None), "None")
+
+    def test_mode_value_extracts_int(self):
+        self.assertEqual(mie._mode_value(_OpMode.COOL), 2)
+        self.assertEqual(mie._mode_value(4), 4)
+
+    def test_mode_value_none_when_undeterminable(self):
+        self.assertIsNone(mie._mode_value(None))
+        self.assertIsNone(mie._mode_value("cool"))
+
+
+class ModeGuardTests(unittest.TestCase):
+    """Modus-Guard (Issue #3): iECO ist an den Betriebsmodus gebunden.
+
+    Am echten Geraet gemessen (2026-07-27): COOL und HEAT tragen iECO, AUTO,
+    DRY und FAN_ONLY nicht. In einem nicht tragenden Modus darf KEIN apply()
+    mehr abgesetzt werden - es waere garantiert vergeblich."""
+
+    # Exakt die am echten Geraet gemessene Aufteilung.
+    CAPABLE = (_OpMode.COOL, _OpMode.HEAT)
+    NOT_CAPABLE = (_OpMode.AUTO, _OpMode.DRY, _OpMode.FAN_ONLY)
+
+    def _run(self, mode, *, only_if_on=False, ieco=False, power=True):
+        d_action = FakeDevice(power_state=power, ieco=ieco)
+        d_action.operational_mode = mode
+        d_verify = FakeDevice(power_state=True, ieco=True)
+        d_verify.operational_mode = mode
+        connect = _scripted_connect([d_action, d_verify])
+        with ExitStack() as es:
+            es.enter_context(mock.patch.object(mie, "connect_and_refresh", connect))
+            es.enter_context(mock.patch.object(mie.asyncio, "sleep", _anoop))
+            out = es.enter_context(redirect_stdout(io.StringIO()))
+            result = asyncio.run(mie.ensure_ieco(
+                {"name": "X", "ip": "1", "id": "1"}, only_if_on=only_if_on))
+        return result, out.getvalue(), d_action
+
+    def test_capable_modes_proceed_to_apply(self):
+        for mode in self.CAPABLE:
+            with self.subTest(mode=mode):
+                ok, _, dev = self._run(mode)
+                self.assertTrue(ok)
+                self.assertEqual(dev.apply_calls, 1)
+
+    def test_incapable_modes_skip_apply_entirely(self):
+        # Kern des Fixes: kein vergeblicher Schreibvorgang, kein Roundtrip.
+        for mode in self.NOT_CAPABLE:
+            with self.subTest(mode=mode):
+                _, out, dev = self._run(mode)
+                self.assertEqual(dev.apply_calls, 0)
+                self.assertIn("unterstuetzt kein iECO", out)
+
+    def test_incapable_mode_is_failure_on_explicit_call(self):
+        # Ohne --only-if-on wollte der Nutzer aktiv iECO -> kein stilles "OK".
+        for mode in self.NOT_CAPABLE:
+            with self.subTest(mode=mode):
+                ok, out, _ = self._run(mode, only_if_on=False)
+                self.assertFalse(ok)
+                self.assertIn("nichts geschaltet", out)
+
+    def test_incapable_mode_is_no_error_with_only_if_on(self):
+        # Im Cron ist ein bewusst gewaehlter Modus kein Fehlerzustand, sonst
+        # gaebe es 72 Fehlmeldungen pro Tag.
+        for mode in self.NOT_CAPABLE:
+            with self.subTest(mode=mode):
+                ok, out, _ = self._run(mode, only_if_on=True)
+                self.assertTrue(ok)
+                self.assertIn("kein Fehler", out)
+
+    def test_active_ieco_short_circuits_before_guard(self):
+        # Laeuft iECO bereits, darf eine zu enge Modus-Liste das NICHT als
+        # Problem melden - der Kurzschluss greift vorher.
+        ok, out, dev = self._run(_OpMode.FAN_ONLY, ieco=True)
+        self.assertTrue(ok)
+        self.assertEqual(dev.apply_calls, 0)
+        self.assertIn("Bereits im gewuenschten Zustand", out)
+        self.assertNotIn("unterstuetzt kein iECO", out)
+
+    def test_unknown_mode_fails_open(self):
+        # Laesst sich der Modus nicht bestimmen, wird NICHT blockiert - sonst
+        # koennte eine kuenftige msmart-Version funktionierende Geraete lahmlegen.
+        ok, out, dev = self._run("unbekannt")
+        self.assertTrue(ok)
+        self.assertEqual(dev.apply_calls, 1)
+        self.assertNotIn("unterstuetzt kein iECO", out)
+
+    def test_off_device_in_incapable_mode_is_not_powered_on(self):
+        # Kein Einschalten als halbe Aktion: der Nutzer wollte iECO, nicht
+        # blossen Betrieb ohne iECO.
+        ok, out, dev = self._run(_OpMode.AUTO, power=False, only_if_on=False)
+        self.assertFalse(ok)
+        self.assertEqual(dev.apply_calls, 0)
+        self.assertFalse(dev.power_state)
+
+    def test_guard_message_names_the_mode_and_the_remedy(self):
+        _, out, _ = self._run(_OpMode.FAN_ONLY)
+        self.assertIn("FAN_ONLY (5)", out)
+        self.assertIn("COOL oder HEAT", out)
 
 
 class OverviewTests(unittest.TestCase):

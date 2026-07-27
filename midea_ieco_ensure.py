@@ -54,6 +54,49 @@ CMD_MAIN = "midea-ieco"
 CMD_REFRESH = "midea-ieco-refresh-tokens"
 CMD_UPDATE = "midea-ieco-update"
 
+# Betriebsmodi, in denen iECO nachweislich haelt. Am echten Geraet gemessen
+# (2026-07-27, Midea PortaSplit / 2060008E, alle fuenf Modi durchgeschaltet):
+#   COOL (2) -> aktiv     HEAT (4) -> aktiv
+#   AUTO (1), DRY (3), FAN_ONLY (5) -> Befehl wird angenommen, aber verworfen
+# Das deckt sich mit msmart-ngs eigener Capability-Dekodierung, die iECO als
+# "1,3,8 - Cool, 3,4,8 - Heat, 8 = ECOMaster" liest (msmart/device/AC/command.py)
+# und dort mit "TODO iECO can be cool, heat or both" vermerkt ist: iECO ist je
+# nach Geraet an COOL und/oder HEAT gebunden, andere Modi kommen nicht vor.
+#
+# Als ZAHLEN hinterlegt, nicht als Enum-Member: msmart wird bewusst erst lazy
+# importiert (damit die netzwerkfreie Uebersicht auch ohne installiertes msmart
+# laeuft), ein Enum-Zugriff auf Modulebene wuerde das zunichtemachen.
+IECO_CAPABLE_MODE_VALUES = frozenset({2, 4})
+IECO_CAPABLE_MODE_NAMES = "COOL oder HEAT"
+
+
+def _mode_value(mode: object) -> int | None:
+    """Liefert den numerischen Wert eines Betriebsmodus, oder None, wenn er
+    sich nicht bestimmen laesst.
+
+    None ist ausdruecklich erlaubt und bedeutet 'unbekannt': der Modus-Guard
+    laesst in diesem Fall bewusst durch (fail-open), statt eine womoeglich
+    funktionierende Kombination auf einem anderen Geraet oder unter einer
+    kuenftigen msmart-Version faelschlich zu blockieren."""
+    try:
+        return int(mode)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _mode_label(mode: object) -> str:
+    """Formatiert einen Betriebsmodus lesbar als 'COOL (2)'.
+
+    msmart-ng's OperationalMode ist ein IntEnum: ab Python 3.11 rendert es im
+    f-String als nackte Zahl ('5'), was in Logs und Fehlerberichten schwer zu
+    deuten ist. Name UND Zahl zusammen sind eindeutig - und genau das Format,
+    das die READMEs ohnehin zeigen."""
+    name = getattr(mode, "name", None)
+    value = _mode_value(mode)
+    if name is None:
+        return str(mode) if value is None else str(value)
+    return f"{name} ({value})" if value is not None else str(name)
+
 
 def load_config() -> dict:
     """Liest devices.json. Fehlt die Datei, ist sie unlesbar, nicht als UTF-8
@@ -254,16 +297,47 @@ async def ensure_ieco(dev_conf: dict, only_if_on: bool) -> bool:
             return False
 
         print(f"[{name}] Status vor Aktion: power={is_on}, "
-              f"mode={device.operational_mode}, ieco={device.ieco}, eco={device.eco}")
+              f"mode={_mode_label(device.operational_mode)}, "
+              f"ieco={device.ieco}, eco={device.eco}")
 
         if not device.supports_ieco:
             print(f"[{name}] FEHLER: Geraet meldet keine iECO-Faehigkeit.")
             return False
 
+        # Kurzschluss BEWUSST vor dem Modus-Guard: laeuft iECO bereits, ist alles
+        # gut - unabhaengig davon, was wir ueber den Modus annehmen. So kann eine
+        # zu enge Modus-Liste niemals einen tatsaechlich funktionierenden Zustand
+        # als Problem melden.
         if is_on and device.ieco:
             print(f"[{name}] Bereits im gewuenschten Zustand (an, iECO aktiv). "
                   f"Keine weiteren Abfragen notwendig.")
             return True
+
+        # Modus-Guard: iECO ist an den Betriebsmodus gebunden (siehe
+        # IECO_CAPABLE_MODE_VALUES). In einem nicht tragenden Modus nimmt das
+        # Geraet den Befehl zwar an, verwirft ihn aber still - ein apply() samt
+        # Verifikations-Roundtrip waere garantiert vergeblich. Frueher lief das
+        # in die generische Meldung "iECO ist laut Geraet weiterhin deaktiviert",
+        # die den Grund nicht nannte (gemeldet als Issue #3).
+        mode_value = _mode_value(device.operational_mode)
+        if mode_value is not None and mode_value not in IECO_CAPABLE_MODE_VALUES:
+            mode_text = _mode_label(device.operational_mode)
+            print(f"[{name}] Betriebsmodus {mode_text} unterstuetzt kein iECO "
+                  f"(nur {IECO_CAPABLE_MODE_NAMES}).")
+            if only_if_on:
+                # Ein bewusst gewaehlter Modus ist kein Fehlerzustand. Im
+                # 20-Minuten-Cron wuerde ein Fehlschlag hier taeglich 72 Meldungen
+                # und Exit 2 erzeugen - konsistent zum ausgeschalteten Geraet wird
+                # das deshalb als "nichts zu tun" gewertet.
+                print(f"[{name}] --only-if-on aktiv: keine Aktion, kein Fehler.")
+                return True
+            # Beim ausdruecklichen Aufruf wollte der Nutzer iECO. Nichts schalten
+            # (auch nicht einschalten - eine halbe Aktion ohne iECO waere nicht das
+            # Gewuenschte), aber klar sagen, was zu tun ist, und den Lauf als
+            # nicht erfolgreich werten.
+            print(f"[{name}] Es wurde nichts geschaltet. Bitte die Anlage auf "
+                  f"{IECO_CAPABLE_MODE_NAMES} stellen und erneut aufrufen.")
+            return False
 
         was_off = not is_on
         if was_off:
@@ -324,7 +398,8 @@ async def ensure_ieco(dev_conf: dict, only_if_on: bool) -> bool:
             return False
 
         print(f"[{name}] Status nach Aktion: power={device.power_state}, "
-              f"mode={device.operational_mode}, ieco={device.ieco}, eco={device.eco}")
+              f"mode={_mode_label(device.operational_mode)}, "
+              f"ieco={device.ieco}, eco={device.eco}")
 
         if not device.ieco:
             print(f"[{name}] FEHLER: iECO ist laut Geraet weiterhin deaktiviert!")

@@ -21,6 +21,7 @@ Small, reliable command-line tools for local control of the **iECO mode** (and g
 ## Compatibility & requirements
 
 - **Air conditioners:** Midea PortaSplit and iECO-capable Midea rebrands (Comfee, Toshiba, Carrier, Klimaire, …), already added to the **MSmartHome / Midea Smarthome** app and connected to Wi-Fi.
+- **Operating mode:** the unit must be running in **Cool** or **Heat**. iECO is tied to the operating mode and is silently discarded in **Auto**, **Dry** and **Fan only** — by the unit itself, not by this tool. See [Which modes support iECO](#which-modes-support-ieco).
 - **Where it runs:** a small, **always-on** computer on the same LAN as the unit — Raspberry Pi, home server, NAS, or Mac. **Python 3.11+** (current Raspberry Pi OS ships it). (Not the iPhone itself.)
 - **Network:** the host must reach each unit on **TCP port 6444**, with no client/AP isolation on that segment. A **fixed IP** (DHCP reservation) is recommended but not required — you can always edit it later in `devices.json`. VLAN separation between IoT devices and computers is fine as long as routing and firewall rules permit that port; see [Network troubleshooting](#network-troubleshooting).
 - **Midea app (one-time only):** each unit must already be set up and online in the **MSmartHome / Midea Smarthome** app — that is how it joins your Wi-Fi. Afterwards the app is not needed, and **these scripts never ask for your Midea account or password**: device tokens are fetched locally (see *[Retrieve token/key pairs](#3-retrieve-tokenkey-pairs)*).
@@ -269,14 +270,21 @@ venv/bin/python3 midea_ieco_ensure.py all --only-if-on >> ieco.log 2>&1
 A healthy `ieco.log` block — the living-room unit was on with iECO off (so it gets enabled); the bedroom was off and is left untouched:
 
 ```text
-[Wohnzimmer] Status vor Aktion: power=True, mode=cool, ieco=False, eco=False
-[Wohnzimmer] Status nach Aktion: power=True, mode=cool, ieco=True, eco=False
+[Wohnzimmer] Status vor Aktion: power=True, mode=COOL (2), ieco=False, eco=False
+[Wohnzimmer] Status nach Aktion: power=True, mode=COOL (2), ieco=True, eco=False
 [Wohnzimmer] OK: iECO ist aktiv (vom Geraet bestaetigt).
 [Schlafzimmer] --only-if-on aktiv und Geraet ist aus. Keine Aktion, keine weiteren Abfragen.
 Gesamtergebnis: OK.
 ```
 
-> **The scripts log in German.** Key phrases: *Status vor/nach Aktion* = state before/after the action · *OK: iECO ist aktiv* = iECO confirmed on · *Geraet ist aus* = unit is off, skipped · *Bereits im gewuenschten Zustand* = already correct, nothing to do · *Gesamtergebnis: OK.* = the whole run succeeded. Any line containing **FEHLER** ("error") is a failure for that unit; `Gesamtergebnis: FEHLER` means at least one unit had a problem.
+A unit running in a mode that cannot carry iECO is reported plainly and left alone — with `--only-if-on` this is not an error (see [Which modes support iECO](#which-modes-support-ieco)):
+
+```text
+[Buero] Betriebsmodus AUTO (1) unterstuetzt kein iECO (nur COOL oder HEAT).
+[Buero] --only-if-on aktiv: keine Aktion, kein Fehler.
+```
+
+> **The scripts log in German.** Key phrases: *Status vor/nach Aktion* = state before/after the action · *OK: iECO ist aktiv* = iECO confirmed on · *Geraet ist aus* = unit is off, skipped · *Bereits im gewuenschten Zustand* = already correct, nothing to do · *Betriebsmodus … unterstuetzt kein iECO* = wrong operating mode, skipped · *Gesamtergebnis: OK.* = the whole run succeeded. Any line containing **FEHLER** ("error") is a failure for that unit; `Gesamtergebnis: FEHLER` means at least one unit had a problem.
 
 Because the cron lines use `2>&1`, warnings from the underlying `msmart-ng` library land in the same file. Logs contain device names, IP addresses, and power/iECO state — **never** your device tokens or keys (those live only in the `chmod 600` `devices.json`).
 
@@ -353,6 +361,34 @@ For all devices, use `all` in place of the device name. Add `--only-if-on` if Si
 
 If you prefer regular switches, status display, scenes, and automations in Apple Home, use Homebridge with `homebridge-cmd4`. It can map arbitrary shell commands to on/off/status operations, such as `midea_ieco_ensure.py LivingRoom` for "on." This is more work than the SSH Shortcuts option but provides full HomeKit integration.
 
+## Which modes support iECO
+
+iECO is **tied to the operating mode**. The unit accepts the command in every mode but silently discards it in modes that do not carry iECO — and nothing on the display tells you.
+
+Measured on a Midea PortaSplit (model `2060008E`) on 27 July 2026, stepping through all five modes on the remote:
+
+| Operating mode | iECO |
+|---|---|
+| **Cool** (2) | ✅ works |
+| **Heat** (4) | ✅ works |
+| Auto (1) | ❌ discarded |
+| Dry (3) | ❌ discarded |
+| Fan only (5) | ❌ discarded |
+
+This matches how `msmart-ng` decodes the iECO capability internally (`1,3,8 - Cool, 3,4,8 - Heat`): depending on the model, iECO is bound to Cool, to Heat, or to both — no other mode ever appears. On some units Heat may therefore not work either, but **no** unit supports Auto, Dry or Fan only.
+
+**The practical consequence: if you run your unit in Auto, iECO is unavailable** — through this tool *and* through the Midea app. Switch to Cool (or Heat) to use it.
+
+`midea_ieco_ensure.py` checks the mode before it does anything, so it no longer attempts a write that cannot succeed:
+
+```text
+[Buero] Betriebsmodus AUTO (1) unterstuetzt kein iECO (nur COOL oder HEAT).
+```
+
+With `--only-if-on` (the recommended cron job) this is deliberately **not** an error — a mode you chose on purpose is not a fault, and the run stays quiet. On an explicit call (`midea-ieco Buero`) it exits non-zero, because you asked for iECO and did not get it; nothing is switched in that case, not even the power state.
+
+> **Measuring your own unit:** if your model behaves differently, `tools/probe_ieco_current_mode.py` checks whether iECO holds in the mode currently set. Set the mode on the remote, then run it once per mode. Results are welcome in an issue — they help widen this table beyond a single model.
+
 ## Network troubleshooting
 
 If you see `No response from host` for every request, the most likely causes are:
@@ -374,6 +410,10 @@ If you see unexpected on/off or mode changes, that is most likely this device-si
 **Does this change my target temperature?**
 
 No. It only ensures iECO is active at whatever setpoint the unit already has. It never writes a temperature.
+
+**iECO won't switch on at all — what's wrong?**
+
+Most likely the operating mode. iECO works only in **Cool** and **Heat**; in **Auto**, **Dry** and **Fan only** the unit discards the command without any indication — that is the unit's behaviour, not a limitation of this tool. Since version 0.3.0 the script names this explicitly instead of reporting a generic failure. See [Which modes support iECO](#which-modes-support-ieco).
 
 **iECO was off again later — did something break?**
 
@@ -459,6 +499,7 @@ python3 -c "import inspect; from msmart.device.AC.device import AirConditioner a
 |---|---|---|
 | `TypeError: device_selector() got an unexpected keyword argument` | The `midea-local` API changed | Inspect the installed signature with `python3 -c "import inspect; from midealocal.devices import device_selector; print(inspect.signature(device_selector))"` |
 | `Device is not capable of property IECO` | Capabilities were never queried on the object used for `apply()` — `supports_ieco` is populated only by `get_capabilities()` | Call `get_capabilities()` on the fresh, authenticated `AC` object before setting capability-bound properties and calling `apply()`. For *setting*, the order relative to `refresh()` does not matter; for *reading* the current state it does — see the next row |
+| iECO is set without any error, but the unit stays out of it | The operating mode does not carry iECO. `supports_ieco` only says the *unit* can do iECO — it collapses `msmart-ng`'s per-mode capability (`1,3,8 - Cool, 3,4,8 - Heat`) into one bool, so the permitted mode cannot be read back at runtime. `msmart-ng` sends the command regardless (no mode guard, and `apply()` warns for eco/turbo/swing but not for iECO), and the firmware discards it in silence | Only set iECO in **Cool** or **Heat**; measure your own unit with `tools/probe_ieco_current_mode.py`. See [Which modes support iECO](#which-modes-support-ieco) |
 | `device.ieco` (or `eco`) reads `False` although the mode is active on the unit | `refresh()` only polls the properties in `_supported_properties`, and that set is populated by `get_capabilities()`. On a fresh object that merely authenticated and refreshed, IECO is never polled, so `device.ieco` stays at its default `False` | Call `get_capabilities()` **before** `refresh()` whenever the true state is read (status display, post-`apply()` verification). `midea_ieco_ensure.py` does exactly this for the initial status read and the verification reconnect |
 | Capability query times out / `Failed to query capabilities` although the token/key are correct | Initially misread as "the unit answers `get_capabilities()` only while powered on" — neither the `msmart-ng` code nor the final flow supports that; a connection left broken by a previous failed attempt produces the same symptom (see next row) | Retry on a completely fresh connection: `midea_ieco_ensure.py` re-creates the `AC` object and re-queries capabilities on every retry. The shipped flow queries capabilities before powering the unit on |
 | `[Errno 104] Connection reset by peer` after several attempts | A failed connection attempt left the `AC` object with a broken socket state | Create a **new** `AC` object for every retry |
