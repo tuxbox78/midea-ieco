@@ -399,6 +399,20 @@ If you see `No response from host` for every request, the most likely causes are
 - **Device is in WLAN power-saving mode / sleep** — verify the device is reachable with `ping 192.168.x.x` and `nc -zv 192.168.x.x 6444`
 - **Firewall on the server** blocking outgoing connections to port 6444 — check with `iptables -L` or `ufw status`
 
+### When token verification fails
+
+`midea_refresh_tokens.py` names the reason for every rejected candidate. It prints in **English by default**, and in German when your locale asks for it — set `MIDEA_IECO_LANG=de` (or `en`) to force a language, which is worth adding to your crontab since cron usually runs without a locale.
+
+The distinction between these causes matters, because they have nothing to do with each other:
+
+| Message | What it means | Where to look |
+|---|---|---|
+| *Geraet hat den Token aktiv abgelehnt (ERROR-Antwort)* | The unit is reachable and answered — it just refuses this token. Network and firewall are fine. | The token does not match this unit. Possible causes: firmware that handles local login differently, or a udpId variant the cloud lookup does not cover |
+| *Geraet nimmt die Verbindung an, antwortet aber nicht* | TCP connects, but nothing comes back | Most often the single-connection limit below. Close the Midea app, wait a few minutes, retry |
+| *Verbindungsaufbau fehlgeschlagen* | No connection at all | Wrong IP in `devices.json`, or port 6444 blocked — check with `nc -zv <IP> 6444` |
+
+There is one pattern worth knowing: **a Midea unit holds only a single local connection**, and after rapid repeated attempts it stops answering for a while — the Midea app on your phone occupies that same connection. If the first candidate is actively rejected and every later one then times out, the later ones were never meaningfully tested. The tool spaces its attempts out for exactly this reason and points the pattern out when it sees it. Wait a few minutes with the app closed before drawing conclusions.
+
 ## Known Midea app/firmware quirks
 
 Some early PortaSplit units have been reported to **switch themselves on/off or change modes on their own**, traced to a Midea app/cloud bug rather than the hardware ([connect.de, in German](https://www.connect.de/news/midea-portasplit-probleme-stoerung-schaltet-sich-automatisch-ein-und-aus-app-fehler-loesung-3209868.html)). Midea's own suggested workaround is to **block the unit's Internet access at the router** — which is exactly the setup this project is built for: with the cloud cut off, local LAN control keeps working normally.

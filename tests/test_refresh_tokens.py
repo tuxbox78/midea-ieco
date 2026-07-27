@@ -9,6 +9,7 @@ oder direkt: python3 tests/test_refresh_tokens.py
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -389,8 +390,10 @@ class MalformedEntryTargetTests(_ConfigPathMixin):
         out = io.StringIO()
         # msmart stubben, damit die Verfuegbarkeitspruefung in main() passiert;
         # update_device/save_config mocken, damit weder Hardware noch ein
-        # Dateischreibzugriff noetig ist.
-        with mock.patch.dict(sys.modules, {"msmart": mock.MagicMock()}), \
+        # Dateischreibzugriff noetig ist. Sprache pinnen, damit die Zusicherung
+        # nicht an der Locale des Ausfuehrenden haengt.
+        with mock.patch.dict(os.environ, {"MIDEA_IECO_LANG": "en"}), \
+                mock.patch.dict(sys.modules, {"msmart": mock.MagicMock()}), \
                 mock.patch.object(mrt, "update_device", _fake_update), \
                 mock.patch.object(mrt, "save_config", lambda cfg: None), \
                 mock.patch.object(mrt.sys, "argv", ["x"] + argv), \
@@ -405,7 +408,7 @@ class MalformedEntryTargetTests(_ConfigPathMixin):
             encoding="utf-8")
         code, out, processed = self._run(["--all"])
         self.assertEqual(code, 0)
-        self.assertIn("WARNUNG", out)
+        self.assertIn("WARNING", out)
         self.assertEqual(len(processed), 1)
 
     def test_named_skips_nondict_sibling(self):
@@ -417,6 +420,337 @@ class MalformedEntryTargetTests(_ConfigPathMixin):
         code, out, processed = self._run(["--name", "W"])
         self.assertEqual(code, 0)
         self.assertEqual(len(processed), 1)
+
+
+class _LangMixin(unittest.TestCase):
+    """Pinnt die Ausgabesprache fuer den Test. Ohne dieses Pinning haenge das
+    Ergebnis an der Locale des Ausfuehrenden - der Test waere auf einem
+    deutschen Entwicklerrechner gruen und im (englischen) CI rot."""
+
+    LANG = "en"
+
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.dict(os.environ, {"MIDEA_IECO_LANG": self.LANG})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+
+class ResolveLangTests(unittest.TestCase):
+    """#2: Ein englischsprachiger Nutzer bekam deutsche Fehlermeldungen. Die
+    Sprachwahl spiegelt jetzt resolve_lang() aus install.sh:
+    MIDEA_IECO_LANG > LC_ALL > LC_MESSAGES > LANG > 'en'."""
+
+    def _resolve(self, **env):
+        # clear=True: sonst wuerde eine echte Locale des Ausfuehrenden
+        # durchschlagen und den Test vom Host abhaengig machen.
+        with mock.patch.dict(os.environ, env, clear=True):
+            return mrt.resolve_lang()
+
+    def test_default_without_anything_is_english(self):
+        self.assertEqual(self._resolve(), "en")
+
+    def test_german_locale_yields_german(self):
+        self.assertEqual(self._resolve(LANG="de_DE.UTF-8"), "de")
+
+    def test_english_locale_yields_english(self):
+        self.assertEqual(self._resolve(LANG="en_GB.UTF-8"), "en")
+
+    def test_env_var_wins_over_locale(self):
+        self.assertEqual(self._resolve(MIDEA_IECO_LANG="de", LANG="en_US.UTF-8"), "de")
+        self.assertEqual(self._resolve(MIDEA_IECO_LANG="en", LANG="de_DE.UTF-8"), "en")
+
+    def test_lc_all_wins_over_lang(self):
+        self.assertEqual(self._resolve(LC_ALL="de_DE.UTF-8", LANG="en_US.UTF-8"), "de")
+
+    def test_lc_messages_considered(self):
+        self.assertEqual(self._resolve(LC_MESSAGES="de_DE.UTF-8"), "de")
+
+    def test_spellings_and_case(self):
+        for value in ("de", "DE", "German", "deutsch", "de-AT", "de_CH.UTF-8"):
+            self.assertEqual(self._resolve(MIDEA_IECO_LANG=value), "de", value)
+
+    def test_unknown_language_falls_back_to_english(self):
+        # Kein Halbdeutsch fuer z.B. franzoesische Locales - klarer Rueckfall.
+        for value in ("fr_FR.UTF-8", "C", "POSIX", "", "   "):
+            self.assertEqual(self._resolve(LANG=value), "en", repr(value))
+
+    def test_denmark_locale_is_not_mistaken_for_german(self):
+        # Gegenprobe zum Praefix-Vergleich: 'da_DK' beginnt nicht mit 'de',
+        # darf also nicht als Deutsch durchgehen.
+        self.assertEqual(self._resolve(LANG="da_DK.UTF-8"), "en")
+
+
+class CatalogTests(unittest.TestCase):
+    """#2: Der Katalog muss vollstaendig und in beiden Sprachen strukturgleich
+    sein - sonst faellt eine Luecke erst beim Nutzer auf."""
+
+    def _source(self):
+        return (REPO_DIR / "midea_refresh_tokens.py").read_text(encoding="utf-8")
+
+    def _used_keys(self):
+        src = self._source()
+        keys = set(re.findall(r'\bt\(\s*"([a-z0-9_]+)"', src))
+        keys |= set(re.findall(r'VERIFY_\w+, "([a-z0-9_]+)"', src))
+        return keys
+
+    def test_every_used_key_exists(self):
+        missing = self._used_keys() - set(mrt._MESSAGES)
+        self.assertEqual(missing, set(), f"Im Code verwendet, aber nicht im Katalog: {missing}")
+
+    def test_no_orphan_keys(self):
+        orphans = set(mrt._MESSAGES) - self._used_keys()
+        self.assertEqual(orphans, set(), f"Im Katalog, aber unbenutzt: {orphans}")
+
+    def test_placeholder_count_matches_between_languages(self):
+        # Ungleiche %s-Zahl waere ein TypeError zur Laufzeit - genau in dem
+        # Fehlerpfad, in dem man ihn am wenigsten gebrauchen kann.
+        for key, (english, german) in mrt._MESSAGES.items():
+            self.assertEqual(english.count("%s"), german.count("%s"), key)
+
+    def test_both_languages_non_empty_and_distinct_where_expected(self):
+        for key, (english, german) in mrt._MESSAGES.items():
+            self.assertTrue(english.strip(), key)
+            self.assertTrue(german.strip(), key)
+
+    def test_unknown_key_raises_instead_of_printing_nothing(self):
+        with self.assertRaises(KeyError):
+            mrt.t("does_not_exist")
+
+    def test_interpolation_works_in_both_languages(self):
+        with mock.patch.dict(os.environ, {"MIDEA_IECO_LANG": "en"}):
+            self.assertIn("Wohnzimmer", mrt.t("dev_fetching", "Wohnzimmer", "1.2.3.4"))
+        with mock.patch.dict(os.environ, {"MIDEA_IECO_LANG": "de"}):
+            self.assertIn("Wohnzimmer", mrt.t("dev_fetching", "Wohnzimmer", "1.2.3.4"))
+
+    def test_languages_actually_differ(self):
+        with mock.patch.dict(os.environ, {"MIDEA_IECO_LANG": "en"}):
+            english = mrt.t("diag_rejected")
+        with mock.patch.dict(os.environ, {"MIDEA_IECO_LANG": "de"}):
+            german = mrt.t("diag_rejected")
+        self.assertNotEqual(english, german)
+
+
+class ClassifyVerifyFailureTests(_LangMixin):
+    """#2: Ein gescheiterter Kandidat muss seinen GRUND nennen. Die Textmarken
+    stammen aus einer realen Messung gegen msmart-ng 2026.7.0 (je ein Fake-
+    Geraet pro Fall); msmart-ng meldet alle vier als denselben Typ
+    (AuthenticationError), unterscheidbar nur am Meldungstext."""
+
+    class _AuthenticationError(Exception):
+        """Stellvertreter fuer msmart.lan.AuthenticationError (kein msmart noetig)."""
+
+    def _classify(self, message):
+        return mrt.classify_verify_failure(self._AuthenticationError(message))
+
+    def test_error_packet_is_rejected(self):
+        # Der Fall aus Issue #2: Geraet sendet 8370...ERROR (PacketType 0xF).
+        code, text = self._classify("Error packet received.")
+        self.assertEqual(code, mrt.VERIFY_REJECTED)
+        self.assertIn("rejected", text)
+
+    def test_no_response_is_silent(self):
+        code, text = self._classify("No response from host.")
+        self.assertEqual(code, mrt.VERIFY_SILENT)
+        self.assertIn("does not answer", text)
+
+    def test_transport_closing_is_reset(self):
+        code, _ = self._classify("Transport is closing or closed.")
+        self.assertEqual(code, mrt.VERIFY_RESET)
+
+    def test_connect_failed_is_unreachable(self):
+        code, _ = self._classify("Connect failed.")
+        self.assertEqual(code, mrt.VERIFY_UNREACHABLE)
+
+    def test_rejected_and_silent_are_distinguishable(self):
+        # Kernpunkt aus #2: 'Token falsch' und 'Geraet stumm' sind voellig
+        # verschiedene Ursachen und duerfen nie denselben Code liefern.
+        self.assertNotEqual(self._classify("Error packet received.")[0],
+                            self._classify("No response from host.")[0])
+
+    def test_own_timeout_is_reported_separately(self):
+        # asyncio.wait_for wirft einen nackten TimeoutError - der darf NICHT
+        # als stummes Geraet durchgehen, sonst zeigt die Diagnose auf die
+        # falsche Ursache.
+        code, text = mrt.classify_verify_failure(TimeoutError())
+        self.assertEqual(code, mrt.VERIFY_CAP)
+        self.assertIn(str(mrt.VERIFY_TIMEOUT), text)
+
+    def test_authentication_error_is_not_swallowed_by_timeout_branch(self):
+        # Gegenprobe zur Klausel oben: msmart-ngs Fehler sind KEINE
+        # TimeoutError-Unterklasse, die isinstance-Pruefung darf sie nicht fangen.
+        self.assertNotIsInstance(self._AuthenticationError("x"), TimeoutError)
+        self.assertEqual(self._classify("No response from host.")[0], mrt.VERIFY_SILENT)
+
+    def test_unknown_message_keeps_original_text(self):
+        # Formuliert msmart-ng kuenftig anders um, geht Einordnung verloren -
+        # aber niemals die Information selbst.
+        code, text = self._classify("Some brand new failure mode")
+        self.assertEqual(code, mrt.VERIFY_OTHER)
+        self.assertIn("Some brand new failure mode", text)
+
+    def test_empty_message_still_yields_text(self):
+        code, text = self._classify("")
+        self.assertEqual(code, mrt.VERIFY_OTHER)
+        self.assertTrue(text.strip())
+
+    def test_marker_match_is_case_insensitive(self):
+        self.assertEqual(self._classify("ERROR PACKET RECEIVED.")[0], mrt.VERIFY_REJECTED)
+
+
+class ClassifyVerifyFailureGermanTests(ClassifyVerifyFailureTests):
+    """Dieselbe Matrix auf Deutsch: die CODES muessen sprachunabhaengig sein.
+    Nur die beiden textpruefenden Faelle werden sprachspezifisch ueberschrieben."""
+
+    LANG = "de"
+
+    def test_error_packet_is_rejected(self):
+        code, text = self._classify("Error packet received.")
+        self.assertEqual(code, mrt.VERIFY_REJECTED)
+        self.assertIn("abgelehnt", text)
+
+    def test_no_response_is_silent(self):
+        code, text = self._classify("No response from host.")
+        self.assertEqual(code, mrt.VERIFY_SILENT)
+        self.assertIn("antwortet", text)
+
+
+class SummarizeFailureHintTests(_LangMixin):
+    """#2: Aus den Codes ALLER Kandidaten einen handlungsleitenden Hinweis ableiten."""
+
+    def test_all_rejected_points_at_tokens_not_network(self):
+        hint = mrt.summarize_failure_hint([mrt.VERIFY_REJECTED] * 3)
+        self.assertIsNotNone(hint)
+        self.assertIn("Network", hint)
+
+    def test_all_silent_mentions_single_connection(self):
+        hint = mrt.summarize_failure_hint([mrt.VERIFY_SILENT] * 2)
+        self.assertIsNotNone(hint)
+        self.assertIn("ONE local connection", hint)
+
+    def test_mixed_rejected_then_silent_flags_the_pattern(self):
+        # Genau das Muster aus Issue #2: erster Kandidat aktiv abgelehnt,
+        # danach schweigt das Geraet -> spaetere Kandidaten sind nicht aussagekraeftig.
+        hint = mrt.summarize_failure_hint([mrt.VERIFY_REJECTED, mrt.VERIFY_SILENT,
+                                           mrt.VERIFY_SILENT])
+        self.assertIsNotNone(hint)
+        self.assertIn("NOT meaningful", hint)
+
+    def test_all_unreachable_points_at_port(self):
+        hint = mrt.summarize_failure_hint([mrt.VERIFY_UNREACHABLE])
+        self.assertIsNotNone(hint)
+        self.assertIn("6444", hint)
+
+    def test_empty_and_unclassifiable_yield_no_invented_hint(self):
+        self.assertIsNone(mrt.summarize_failure_hint([]))
+        self.assertIsNone(mrt.summarize_failure_hint([mrt.VERIFY_OTHER]))
+
+
+class SummarizeFailureHintGermanTests(SummarizeFailureHintTests):
+    """Gegenprobe auf Deutsch - dieselbe Logik, andere Sprache."""
+
+    LANG = "de"
+
+    def test_all_rejected_points_at_tokens_not_network(self):
+        hint = mrt.summarize_failure_hint([mrt.VERIFY_REJECTED] * 3)
+        self.assertIn("Netzwerk", hint)
+
+    def test_all_silent_mentions_single_connection(self):
+        hint = mrt.summarize_failure_hint([mrt.VERIFY_SILENT] * 2)
+        self.assertIn("EINE lokale Verbindung", hint)
+
+    def test_mixed_rejected_then_silent_flags_the_pattern(self):
+        hint = mrt.summarize_failure_hint([mrt.VERIFY_REJECTED, mrt.VERIFY_SILENT])
+        self.assertIn("NICHT aussagekraeftig", hint)
+
+
+def _fake_verify(results):
+    """Async-Ersatz fuer verify_credentials: liefert die Tupel der Reihe nach."""
+    seq = list(results)
+
+    async def _verify(ip, port, device_id, key, token):
+        return seq.pop(0)
+
+    return _verify
+
+
+class CandidateLoopTests(_LangMixin):
+    """#2: Kandidaten werden ENTZERRT geprueft (das Geraet haelt nur eine
+    Verbindung), und jeder Fehlschlag nennt seinen Grund."""
+
+    DEV = {"name": "W", "ip": "1.2.3.4", "id": 42, "port": 6444}
+
+    def _run(self, candidates, results):
+        slept = []
+        out = io.StringIO()
+        with mock.patch.object(mrt, "fetch_candidate_credentials",
+                               lambda host: (candidates, None)), \
+                mock.patch.object(mrt, "verify_credentials", _fake_verify(results)), \
+                mock.patch.object(mrt.time, "sleep", lambda s: slept.append(s)), \
+                redirect_stdout(out):
+            ok = mrt.update_device(dict(self.DEV))
+        return ok, out.getvalue(), slept
+
+    def test_delay_between_candidates_but_not_before_first(self):
+        ok, _, slept = self._run(
+            [("k1", "t1"), ("k2", "t2"), ("k3", "t3")],
+            [(False, mrt.VERIFY_REJECTED, "abgelehnt"),
+             (False, mrt.VERIFY_SILENT, "stumm"),
+             (False, mrt.VERIFY_SILENT, "stumm")])
+        self.assertFalse(ok)
+        # Drei Kandidaten -> genau ZWEI Pausen (keine vor dem ersten Versuch).
+        self.assertEqual(slept, [mrt.CANDIDATE_DELAY] * 2)
+
+    def test_no_delay_for_single_candidate(self):
+        ok, _, slept = self._run([("k1", "t1")], [(True, "", "")])
+        self.assertTrue(ok)
+        self.assertEqual(slept, [])
+
+    def test_success_does_not_sleep_after_hit(self):
+        # Erster Kandidat passt -> kein weiterer Versuch, keine weitere Pause.
+        ok, _, slept = self._run([("k1", "t1"), ("k2", "t2")],
+                                 [(True, "", "")])
+        self.assertTrue(ok)
+        self.assertEqual(slept, [])
+
+    def test_reason_is_printed_per_candidate(self):
+        _, out, _ = self._run(
+            [("k1", "t1"), ("k2", "t2")],
+            [(False, mrt.VERIFY_REJECTED, "Geraet hat den Token aktiv abgelehnt"),
+             (False, mrt.VERIFY_SILENT, "Geraet antwortet nicht")])
+        self.assertIn("Geraet hat den Token aktiv abgelehnt", out)
+        self.assertIn("Geraet antwortet nicht", out)
+
+    def test_summary_hint_is_printed_on_total_failure(self):
+        _, out, _ = self._run(
+            [("k1", "t1"), ("k2", "t2")],
+            [(False, mrt.VERIFY_REJECTED, "x"), (False, mrt.VERIFY_REJECTED, "y")])
+        self.assertIn("Hint:", out)
+        self.assertIn("Network", out)
+
+    def test_successful_candidate_is_stored(self):
+        dev = dict(self.DEV)
+        with mock.patch.object(mrt, "fetch_candidate_credentials",
+                               lambda host: ([("k1", "t1"), ("k2", "t2")], None)), \
+                mock.patch.object(mrt, "verify_credentials",
+                                  _fake_verify([(False, mrt.VERIFY_REJECTED, "x"),
+                                                (True, "", "")])), \
+                mock.patch.object(mrt.time, "sleep", lambda s: None), \
+                redirect_stdout(io.StringIO()):
+            ok = mrt.update_device(dev)
+        self.assertTrue(ok)
+        self.assertEqual((dev["key"], dev["token"]), ("k2", "t2"))
+
+
+class VerifyTimeoutHeadroomTests(unittest.TestCase):
+    """#2: Der eigene Deckel darf msmart-ngs interne Wiederholungslogik nicht
+    abschneiden - sonst wird ein noch laufender Versuch als 'Zeitlimit'
+    fehlgedeutet. msmart-ng 2026.7.0 braucht im Fehlerfall bis zu
+    5s (connect) + 3 x 2s (Lesetimeout) = 11s."""
+
+    def test_timeout_exceeds_msmart_worst_case(self):
+        msmart_worst_case = 5 + 3 * 2
+        self.assertGreater(mrt.VERIFY_TIMEOUT, msmart_worst_case)
 
 
 if __name__ == "__main__":

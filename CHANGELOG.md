@@ -6,6 +6,42 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **`midea_refresh_tokens.py` is now bilingual, and defaults to English.** It
+  printed German only — so the English-speaking reporter of issue #2 filed a
+  careful bug report and got answers in a language he may not read. `install.sh`
+  has had English/German support for a while; the Python side never did. Language
+  resolution mirrors the installer exactly (`MIDEA_IECO_LANG` > `LC_ALL` >
+  `LC_MESSAGES` > `LANG` > English), so a German desktop keeps German without any
+  configuration. **Note for existing German users:** cron jobs usually run without
+  a locale, so scheduled runs will now log in English — add
+  `MIDEA_IECO_LANG=de` to your crontab to keep German. `midea_ieco_ensure.py` is
+  still German-only and remains to be converted.
+- **A failed token verification now says *why* it failed** (prompted by issue #2).
+  `midea_refresh_tokens.py` reported every rejected candidate with the same
+  "lieferte keine gueltige Verbindung", collapsing causes that have nothing to do
+  with each other: a token the unit actively rejects (it answers with an `ERROR`
+  frame — `msmart-ng`'s `PacketType.ERROR = 0xF`), a unit that accepts the
+  connection but never answers, a closed port, and a reset connection all look
+  identical. `msmart-ng` reports all four as the same `AuthenticationError` and
+  distinguishes them only by message text, so each candidate is now classified
+  and named, and an unrecognised message is passed through verbatim rather than
+  swallowed. After a total failure the tool adds a hint derived from *all*
+  candidates — including the specific "rejected first, silent afterwards" pattern,
+  which means the later candidates were never meaningfully tested.
+- **Token candidates are no longer verified back to back.** Midea units hold a
+  single local connection and stop answering for a while after rapid session
+  churn (the same behaviour that made `tools/probe_ieco_modes.py` lock a unit up).
+  The candidate loop ran with no delay at all, so the verification could produce
+  the very silence it then reported: candidate 1 legitimately rejected, candidates
+  2 and 3 timing out against an already-blocked unit. There is now a pause between
+  candidates (`CANDIDATE_DELAY`, 5 s) and between devices (`DEVICE_DELAY`, 2 s),
+  matching how `midea_ieco_ensure.py` has always spaced its access.
+- `VERIFY_TIMEOUT` raised from 10 s to 15 s. `msmart-ng`'s own failure path needs
+  up to 11 s (5 s connect plus three internal 2 s read retries), so the old cap
+  could cut its retry logic off mid-flight and report a timeout for a unit that
+  would have answered — a false negative that also corrupted the new diagnosis.
+
 ### Added
 - **iECO is tied to the operating mode — the tool now says so.** `midea_ieco_ensure.py`
   checks the operating mode before writing anything and reports a mode that cannot

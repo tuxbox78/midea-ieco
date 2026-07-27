@@ -42,11 +42,209 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 CONFIG_PATH = Path(__file__).parent / "devices.json"
 SUBPROCESS_TIMEOUT = 60
-VERIFY_TIMEOUT = 10
+
+# Zeitlimit fuer EINEN Verifikationsversuch (authenticate bzw. refresh).
+# Bewusst groesser als msmart-ngs eigener Worst Case: dessen LAN.authenticate
+# braucht im Fehlerfall bis zu 5s Verbindungsaufbau + 3 interne Wiederholungen
+# a 2s Lesetimeout = ~11s. Ein kleinerer Deckel (frueher 10s) wuerde msmart-ngs
+# eigene Wiederholungslogik mitten im Lauf abschneiden und den Abbruch als
+# "Zeitlimit" ausweisen, obwohl das Geraet noch geantwortet haette - ein
+# Falschnegativ, das die Diagnose unten zusaetzlich verfaelschen wuerde.
+VERIFY_TIMEOUT = 15
+
+# Pause zwischen zwei Kandidaten-Verifikationen bzw. zwischen zwei Geraeten.
+# Midea-Klimaanlagen halten nur EINE lokale Verbindung gleichzeitig und
+# quittieren eine dichte Folge von Verbindungsversuchen mit einer voruebergehenden
+# Blockade: sie nehmen die TCP-Verbindung dann zwar noch an, antworten aber nicht
+# mehr. Ohne diese Pause kann bereits der eigene Pruefablauf die Ursache dafuer
+# sein, dass Kandidat 2 und 3 "nicht antworten" - obwohl nur Kandidat 1 wirklich
+# abgelehnt wurde. midea_ieco_ensure.py entzerrt seine Zugriffe aus demselben
+# Grund (RETRY_DELAY).
+CANDIDATE_DELAY = 5.0
+DEVICE_DELAY = 2.0
+
+
+# ---------------------------------------------------------------------------
+# Sprachwahl der Ausgabe
+#
+# Spiegelt bewusst 1:1 resolve_lang() aus install.sh, damit Installer und
+# Laufzeit dieselbe Sprache sprechen: MIDEA_IECO_LANG schlaegt die Locale
+# (LC_ALL > LC_MESSAGES > LANG), Default ist ENGLISCH. Grund fuer den
+# englischen Default: das Projekt hat englischsprachige Nutzer, die sonst
+# deutsche Fehlermeldungen bekommen, die sie nicht lesen koennen - genau das
+# ist in Issue #2 passiert. Wer eine deutsche Locale hat (LANG=de_DE.UTF-8),
+# bekommt weiterhin Deutsch, ohne etwas zu konfigurieren.
+#
+# Hinweis fuer Cron: Cron-Jobs laufen oft ohne gesetzte Locale, dort greift
+# also der englische Default. Wer die Logs auf Deutsch moechte, setzt in der
+# Crontab MIDEA_IECO_LANG=de.
+# ---------------------------------------------------------------------------
+def resolve_lang() -> str:
+    """Ermittelt die Ausgabesprache ('de' oder 'en'). Reihenfolge:
+    MIDEA_IECO_LANG > LC_ALL > LC_MESSAGES > LANG > 'en'."""
+    raw = os.environ.get("MIDEA_IECO_LANG") or ""
+    if not raw:
+        raw = (os.environ.get("LC_ALL") or os.environ.get("LC_MESSAGES")
+               or os.environ.get("LANG") or "")
+    raw = raw.strip().lower()
+    if raw in ("de", "german", "deutsch") or raw.startswith(("de_", "de-", "de.")):
+        return "de"
+    return "en"
+
+
+# Katalog: key -> (englisch, deutsch). Platzhalter im printf-Stil (%s), damit
+# beide Sprachfassungen strukturell identisch bleiben und ein fehlender
+# Platzhalter beim Testen sofort auffaellt.
+_MESSAGES: dict[str, tuple[str, str]] = {
+    # --- Konfiguration -----------------------------------------------------
+    "cfg_unreadable": (
+        "ERROR: %s could not be read (%s: %s).",
+        "FEHLER: %s konnte nicht gelesen werden (%s: %s)."),
+    "cfg_bad_shape": (
+        'ERROR: %s does not have the expected form {"devices": [...]}.',
+        'FEHLER: %s hat nicht die erwartete Form {"devices": [...]}.'),
+    # --- Geraeteaktualisierung ---------------------------------------------
+    "dev_no_ip": (
+        "[%s] ERROR: No IP address configured for this device in devices.json.",
+        "[%s] FEHLER: Keine IP-Adresse in devices.json fuer dieses Geraet hinterlegt."),
+    "dev_fetching": (
+        "[%s] Fetching token/key candidates via %s ...",
+        "[%s] Hole Token/Key-Kandidaten ueber %s ..."),
+    "dev_fetch_failed": (
+        "[%s] ERROR while fetching tokens: %s",
+        "[%s] FEHLER beim Token-Abruf: %s"),
+    "dev_id_mismatch": (
+        "[%s] WARNING: devices.json says id=%s, but the cloud reports id=%s. "
+        "Existing value NOT overwritten.",
+        "[%s] WARNUNG: In devices.json steht id=%s, aber die Cloud meldet id=%s. "
+        "Bestehenden Wert NICHT ueberschrieben."),
+    "dev_no_id": (
+        "[%s] ERROR: No device ID available (neither in devices.json nor reported "
+        "by the cloud). Entry will NOT be saved.",
+        "[%s] FEHLER: Keine Geraete-ID verfuegbar (weder in devices.json noch von der "
+        "Cloud gemeldet). Eintrag wird NICHT gespeichert."),
+    "dev_candidates_found": (
+        "[%s] %s candidate(s) found, verifying one by one ...",
+        "[%s] %s Kandidat(en) gefunden, verifiziere der Reihe nach ..."),
+    "dev_candidate_ok": (
+        "[%s] Candidate %s/%s verified successfully and saved.",
+        "[%s] Kandidat %s/%s erfolgreich verifiziert und gespeichert."),
+    "dev_candidate_rejected": (
+        "[%s] Candidate %s/%s rejected: %s%s",
+        "[%s] Kandidat %s/%s abgelehnt: %s%s"),
+    "dev_try_next": (
+        ", trying the next one ...",
+        ", versuche naechsten ..."),
+    "dev_all_failed": (
+        "[%s] ERROR: None of the %s candidates was accepted. Existing values in "
+        "devices.json remain unchanged.",
+        "[%s] FEHLER: Keiner der %s Kandidaten wurde akzeptiert. Bestehende Werte "
+        "in devices.json bleiben unveraendert."),
+    "dev_hint": (
+        "[%s] Hint: %s",
+        "[%s] Hinweis: %s"),
+    # --- Diagnose eines fehlgeschlagenen Versuchs --------------------------
+    "diag_cap": (
+        "Time limit reached (%ss) - device is responding unusually slowly",
+        "Zeitlimit erreicht (%ss) - Geraet reagiert ungewoehnlich langsam"),
+    "diag_rejected": (
+        "device actively rejected the token (device replied with ERROR)",
+        "Geraet hat den Token aktiv abgelehnt (ERROR-Antwort des Geraets)"),
+    "diag_silent": (
+        "device accepts the connection but does not answer",
+        "Geraet nimmt die Verbindung an, antwortet aber nicht"),
+    "diag_reset": (
+        "connection was dropped by the device",
+        "Verbindung wurde vom Geraet abgebrochen"),
+    "diag_unreachable": (
+        "could not connect (is the port reachable?)",
+        "Verbindungsaufbau fehlgeschlagen (Port erreichbar?)"),
+    "diag_no_detail": (
+        "no further detail",
+        "keine naehere Angabe"),
+    # --- Gesamthinweise ----------------------------------------------------
+    "hint_all_rejected": (
+        "The device was reachable and actively rejected EVERY token. Network and "
+        "reachability are therefore fine - the tokens do not match this device. "
+        "Known causes: firmware that handles local login differently, or a udpId "
+        "variant the cloud lookup does not cover.",
+        "Das Geraet war erreichbar und hat JEDEN Token aktiv abgelehnt. Netzwerk "
+        "und Erreichbarkeit sind damit in Ordnung - die Tokens passen nicht zu "
+        "diesem Geraet. Bekannte Ursachen: eine Firmware, die lokale Anmeldung "
+        "anders handhabt, oder eine udpId-Variante, die die Cloud-Abfrage nicht "
+        "abdeckt."),
+    "hint_all_silent": (
+        "The device accepts connections but answers none of the attempts. Most "
+        "common cause: it holds only ONE local connection and is temporarily "
+        "blocked after rapid access - the Midea app on your phone occupies that "
+        "same connection. Please close the app, wait a few minutes and retry.",
+        "Das Geraet nimmt Verbindungen an, antwortet aber auf keinen Versuch. "
+        "Haeufigste Ursache: Es haelt nur EINE lokale Verbindung und ist nach "
+        "dichten Zugriffen voruebergehend blockiert - auch die Midea-App auf dem "
+        "Handy belegt diese Verbindung. Bitte die App schliessen, einige Minuten "
+        "warten und erneut versuchen."),
+    "hint_all_unreachable": (
+        "No connection could be established. Please check the IP address in "
+        "devices.json and whether port 6444 is reachable "
+        "(e.g. 'nc -zv <IP> 6444').",
+        "Kein Verbindungsaufbau moeglich. Bitte IP-Adresse in devices.json sowie "
+        "die Erreichbarkeit von Port 6444 pruefen (z.B. 'nc -zv <IP> 6444')."),
+    "hint_mixed": (
+        "Notable pattern: at least one token was actively rejected, after which "
+        "the device stopped answering. Most likely it accepted no further "
+        "connection after the rejection - the later candidates are therefore NOT "
+        "meaningful. Please wait a few minutes and retry.",
+        "Auffaelliges Muster: mindestens ein Token wurde aktiv abgelehnt, danach "
+        "antwortete das Geraet nicht mehr. Sehr wahrscheinlich hat es nach der "
+        "Ablehnung keine weitere Verbindung mehr angenommen - die spaeteren "
+        "Kandidaten sind dann NICHT aussagekraeftig. Bitte einige Minuten warten "
+        "und erneut versuchen."),
+    # --- main() ------------------------------------------------------------
+    "main_msmart_missing": (
+        "ERROR: msmart-ng is not installed in the active Python interpreter. "
+        "Is the venv active? Install it e.g. with: venv/bin/pip install msmart-ng",
+        "FEHLER: msmart-ng ist im aktiven Python-Interpreter nicht installiert. "
+        "Ist die venv aktiv? Installation z.B. mit: venv/bin/pip install msmart-ng"),
+    "main_skipped_entries": (
+        "WARNING: %s unexpected entry/entries in %s skipped (not an object).",
+        "WARNUNG: %s unerwartete(r) Eintrag/Eintraege in %s uebersprungen "
+        "(kein Objekt)."),
+    "main_no_devices": (
+        "devices.json does not contain any devices yet. Use --name/--host for a "
+        "new device.",
+        "devices.json enthaelt noch keine Geraete. Nutze --name/--host fuer ein "
+        "neues Geraet."),
+    "main_new_needs_host": (
+        "Device '%s' is new. Please also pass --host.",
+        "Geraet '%s' ist neu. Bitte zusaetzlich --host angeben."),
+    "main_new_not_saved": (
+        "New device '%s' was NOT saved because the lookup failed.",
+        "Neues Geraet '%s' wurde NICHT gespeichert, da der Abruf fehlgeschlagen ist."),
+    "main_write_failed": (
+        "ERROR: devices.json could not be written (%s: %s).",
+        "FEHLER: devices.json konnte nicht geschrieben werden (%s: %s)."),
+    "main_updated": (
+        "devices.json updated: %s",
+        "devices.json aktualisiert: %s"),
+}
+
+
+def t(key: str, *args: object) -> str:
+    """Liefert den Katalogtext zu ``key`` in der aktiven Sprache.
+
+    Die Sprache wird bei JEDEM Aufruf neu ermittelt (nicht beim Import
+    zwischengespeichert): das haelt die Funktion frei von verstecktem Zustand
+    und macht sie in Tests ohne Modul-Reload umschaltbar. Ein unbekannter
+    Schluessel wuerde einen KeyError ausloesen - das ist beabsichtigt, ein
+    Tippfehler soll im Test auffallen und nicht als leere Zeile im Log landen."""
+    english, german = _MESSAGES[key]
+    text = german if resolve_lang() == "de" else english
+    return text % args if args else text
 
 # Extraktion der (key, token)-Paare aus der rohen --debug-Ausgabe der Cloud.
 # Beispielformat (einzeilig):
@@ -93,12 +291,11 @@ def load_config() -> dict:
         with open(CONFIG_PATH, encoding="utf-8") as f:
             data = json.load(f)
     except (OSError, ValueError) as exc:  # ValueError deckt JSONDecodeError UND UnicodeDecodeError (nicht-UTF-8-Datei) ab
-        print(f"FEHLER: {CONFIG_PATH} konnte nicht gelesen werden "
-              f"({type(exc).__name__}: {exc}).", file=sys.stderr)
+        print(t("cfg_unreadable", CONFIG_PATH, type(exc).__name__, exc),
+              file=sys.stderr)
         sys.exit(1)
     if not isinstance(data, dict) or not isinstance(data.get("devices"), list):
-        print(f"FEHLER: {CONFIG_PATH} hat nicht die erwartete Form "
-              '{"devices": [...]}.', file=sys.stderr)
+        print(t("cfg_bad_shape", CONFIG_PATH), file=sys.stderr)
         sys.exit(1)
     return data
 
@@ -234,11 +431,106 @@ def fetch_candidate_credentials(host: str) -> tuple[list[tuple[str, str]], str |
     return _parse_discover_output(result)
 
 
-async def verify_credentials(ip: str, port: int, device_id: int, key: str, token: str) -> bool:
+# ---------------------------------------------------------------------------
+# Diagnose eines fehlgeschlagenen Verifikationsversuchs
+#
+# msmart-ng meldet JEDEN dieser Faelle als denselben Typ (msmart.lan.
+# AuthenticationError) - unterscheidbar sind sie ausschliesslich am
+# Meldungstext. Die folgenden Textmarken wurden gegen msmart-ng 2026.7.0 real
+# gemessen (Fake-Geraet je Fall):
+#   'Error packet received.'          <- Geraet sendet einen ERROR-Frame (0x8370.. type 0xF)
+#   'No response from host.'          <- Geraet nimmt an, antwortet aber nicht
+#   'Transport is closing or closed.' <- Verbindung abgebrochen/zurueckgesetzt
+#   'Connect failed.'                 <- Port nicht erreichbar
+# Aendert msmart-ng die Formulierung, greift der Rueckfall VERIFY_OTHER, der
+# den Originaltext ungekuerzt weiterreicht - es geht dann Einordnung verloren,
+# aber nie Information.
+# ---------------------------------------------------------------------------
+VERIFY_REJECTED = "rejected"        # Geraet lehnt den Token aktiv ab
+VERIFY_SILENT = "silent"            # Verbindung steht, keine Antwort
+VERIFY_RESET = "reset"              # Verbindung abgebrochen
+VERIFY_UNREACHABLE = "unreachable"  # Port/Host nicht erreichbar
+VERIFY_CAP = "cap"                  # unser eigenes VERIFY_TIMEOUT hat gegriffen
+VERIFY_OTHER = "other"              # nicht eingeordnet - Originaltext bleibt erhalten
+
+# Textmarke -> (Diagnose-Code, Katalog-Schluessel). Bewusst der SCHLUESSEL und
+# nicht der fertige Text: so wird die Sprache erst beim Aufruf aufgeloest.
+_FAILURE_MARKERS = (
+    ("error packet", VERIFY_REJECTED, "diag_rejected"),
+    ("no response from host", VERIFY_SILENT, "diag_silent"),
+    ("transport is closing", VERIFY_RESET, "diag_reset"),
+    ("connect failed", VERIFY_UNREACHABLE, "diag_unreachable"),
+)
+
+
+def classify_verify_failure(exc: BaseException) -> tuple[str, str]:
+    """Ordnet eine Ausnahme aus verify_credentials einem Diagnose-Code und einem
+    kurzen Klartext zu. Rueckgabe: (code, text).
+
+    Wichtig fuer die Fehlersuche: 'Token abgelehnt' und 'Geraet antwortet nicht'
+    sind voellig verschiedene Ursachen (falsche Zugangsdaten vs. Netzwerk bzw.
+    voruebergehende Geraeteblockade), sehen fuer den Nutzer aber identisch aus,
+    wenn man - wie bisher - nur 'hat nicht funktioniert' ausgibt. Sie sind
+    zusaetzlich am Zeitverhalten unterscheidbar: eine ERROR-Antwort scheitert
+    praktisch sofort, ein stummes Geraet erst nach mehreren Sekunden.
+
+    Ein bereits von uns gesetztes Zeitlimit (asyncio.wait_for -> TimeoutError)
+    wird bewusst getrennt ausgewiesen, damit es nicht mit einem stummen Geraet
+    verwechselt wird."""
+    # Zuerst der eigene Deckel: asyncio.wait_for wirft einen nackten
+    # TimeoutError. msmart-ngs eigene Fehler sind AuthenticationError (kein
+    # TimeoutError), diese Klausel greift also nicht faelschlich fuer sie.
+    if isinstance(exc, TimeoutError):
+        return VERIFY_CAP, t("diag_cap", VERIFY_TIMEOUT)
+
+    text = str(exc).strip()
+    haystack = text.lower()
+    for marker, code, message_key in _FAILURE_MARKERS:
+        if marker in haystack:
+            return code, t(message_key)
+
+    # Rueckfall: der Originaltext von msmart-ng bleibt unveraendert erhalten -
+    # er ist ohnehin englisch und wird daher NICHT uebersetzt.
+    detail = text or t("diag_no_detail")
+    return VERIFY_OTHER, f"{type(exc).__name__}: {detail}"
+
+
+def summarize_failure_hint(codes: list[str]) -> str | None:
+    """Leitet aus den Diagnose-Codes ALLER gescheiterten Kandidaten einen
+    handlungsleitenden Hinweis ab, oder None, wenn sich nichts Belastbares
+    sagen laesst. Bewusst zurueckhaltend formuliert: der Hinweis benennt die
+    wahrscheinlichste Ursache, behauptet sie aber nicht als gesichert."""
+    if not codes:
+        return None
+    unique = set(codes)
+
+    if unique == {VERIFY_REJECTED}:
+        return t("hint_all_rejected")
+
+    if unique == {VERIFY_SILENT}:
+        return t("hint_all_silent")
+
+    if unique == {VERIFY_UNREACHABLE}:
+        return t("hint_all_unreachable")
+
+    if VERIFY_REJECTED in unique and (VERIFY_SILENT in unique or VERIFY_RESET in unique):
+        return t("hint_mixed")
+
+    return None
+
+
+async def verify_credentials(ip: str, port: int, device_id: int, key: str,
+                             token: str) -> tuple[bool, str, str]:
     """Testet ein Token/Key-Paar mit einer echten, minimalen Verbindung,
     BEVOR es in devices.json gespeichert wird. Verhindert, dass ein
     falscher Kandidat (z.B. 'method 2' statt 'method 1') unbemerkt
-    gespeichert wird."""
+    gespeichert wird.
+
+    Rueckgabe: (ok, code, text). Bei Erfolg ("", "") als Diagnose. Im
+    Fehlerfall liefern code/text die Einordnung aus classify_verify_failure -
+    frueher ging der Grund hier ersatzlos verloren (nur True/False), sodass
+    'falscher Token' und 'Geraet nicht erreichbar' fuer den Nutzer
+    ununterscheidbar waren."""
     # Lazy-Import: haelt das Modul auch ohne installiertes msmart importierbar
     # (z.B. fuer isolierte Unit-Tests der Zugangsdaten-Logik).
     from msmart.device.AC.device import AirConditioner as AC
@@ -247,9 +539,10 @@ async def verify_credentials(ip: str, port: int, device_id: int, key: str, token
     try:
         await asyncio.wait_for(device.authenticate(token, key), timeout=VERIFY_TIMEOUT)
         await asyncio.wait_for(device.refresh(), timeout=VERIFY_TIMEOUT)
-        return True
-    except Exception:
-        return False
+        return True, "", ""
+    except Exception as exc:
+        code, text = classify_verify_failure(exc)
+        return False, code, text
     finally:
         for method_name in ("close", "disconnect", "stop"):
             method = getattr(device, method_name, None)
@@ -273,46 +566,56 @@ def update_device(dev_conf: dict) -> bool:
     name = dev_conf.get("name", "unbekannt")
     host = dev_conf.get("ip")
     if not host:
-        print(f"[{name}] FEHLER: Keine IP-Adresse in devices.json fuer dieses Geraet hinterlegt.")
+        print(t("dev_no_ip", name))
         return False
 
-    print(f"[{name}] Hole Token/Key-Kandidaten ueber {host} ...")
+    print(t("dev_fetching", name, host))
     try:
         candidates, appliance_id = fetch_candidate_credentials(host)
     except RuntimeError as exc:
-        print(f"[{name}] FEHLER beim Token-Abruf: {exc}")
+        print(t("dev_fetch_failed", name, exc))
         return False
 
     existing_id = str(dev_conf.get("id", "")).strip()
     if appliance_id is not None:
         if existing_id and existing_id != appliance_id:
-            print(f"[{name}] WARNUNG: In devices.json steht id={existing_id}, "
-                  f"aber die Cloud meldet id={appliance_id}. Bestehenden Wert NICHT ueberschrieben.")
+            print(t("dev_id_mismatch", name, existing_id, appliance_id))
         elif not existing_id:
             dev_conf["id"] = int(appliance_id)
 
     device_id_str = str(dev_conf.get("id", "")).strip()
     if not device_id_str:
-        print(f"[{name}] FEHLER: Keine Geraete-ID verfuegbar (weder in devices.json noch von der "
-              f"Cloud gemeldet). Eintrag wird NICHT gespeichert.")
+        print(t("dev_no_id", name))
         return False
     device_id = int(device_id_str)
     port = int(dev_conf.get("port", 6444))
 
-    print(f"[{name}] {len(candidates)} Kandidat(en) gefunden, verifiziere der Reihe nach ...")
+    total = len(candidates)
+    print(t("dev_candidates_found", name, total))
+    failure_codes: list[str] = []
     for idx, (key, token) in enumerate(candidates, start=1):
-        ok = asyncio.run(verify_credentials(host, port, device_id, key, token))
+        # Entzerrung VOR jedem weiteren Versuch (siehe CANDIDATE_DELAY): das
+        # Geraet vertraegt nur eine Verbindung und blockiert nach dichten
+        # Zugriffen voruebergehend. Ohne die Pause koennte der Pruefablauf die
+        # spaeteren Kandidaten selbst um ihre Aussagekraft bringen.
+        if idx > 1:
+            time.sleep(CANDIDATE_DELAY)
+        ok, code, detail = asyncio.run(
+            verify_credentials(host, port, device_id, key, token))
         if ok:
             dev_conf["token"] = token
             dev_conf["key"] = key
             dev_conf.setdefault("port", 6444)
-            print(f"[{name}] Kandidat {idx}/{len(candidates)} erfolgreich verifiziert und gespeichert.")
+            print(t("dev_candidate_ok", name, idx, total))
             return True
-        print(f"[{name}] Kandidat {idx}/{len(candidates)} lieferte keine gueltige Verbindung, "
-              f"versuche naechsten ...")
+        failure_codes.append(code)
+        suffix = t("dev_try_next") if idx < total else ""
+        print(t("dev_candidate_rejected", name, idx, total, detail, suffix))
 
-    print(f"[{name}] FEHLER: Keiner der {len(candidates)} Kandidaten liess sich verbinden. "
-          f"Bestehende Werte in devices.json bleiben unveraendert.")
+    print(t("dev_all_failed", name, total))
+    hint = summarize_failure_hint(failure_codes)
+    if hint:
+        print(t("dev_hint", name, hint))
     return False
 
 
@@ -340,9 +643,7 @@ def main() -> None:
     try:
         import msmart  # noqa: F401  (reine Verfuegbarkeitspruefung)
     except ImportError:
-        print("FEHLER: msmart-ng ist im aktiven Python-Interpreter nicht "
-              "installiert. Ist die venv aktiv? Installation z.B. mit: "
-              "venv/bin/pip install msmart-ng", file=sys.stderr)
+        print(t("main_msmart_missing"), file=sys.stderr)
         sys.exit(1)
 
     config = load_config()
@@ -355,12 +656,11 @@ def main() -> None:
     valid_devices = [d for d in devices if isinstance(d, dict)]
     skipped = len(devices) - len(valid_devices)
     if skipped:
-        print(f"WARNUNG: {skipped} unerwartete(r) Eintrag/Eintraege in "
-              f"{CONFIG_PATH.name} uebersprungen (kein Objekt).")
+        print(t("main_skipped_entries", skipped, CONFIG_PATH.name))
 
     if args.all:
         if not valid_devices:
-            print("devices.json enthaelt noch keine Geraete. Nutze --name/--host fuer ein neues Geraet.")
+            print(t("main_no_devices"))
             sys.exit(1)
         targets = valid_devices
         new_entry = None
@@ -369,14 +669,21 @@ def main() -> None:
         new_entry = None
         if not targets:
             if not args.host:
-                print(f"Geraet '{args.name}' ist neu. Bitte zusaetzlich --host angeben.")
+                print(t("main_new_needs_host", args.name))
                 sys.exit(1)
             new_entry = {"name": args.name, "ip": args.host, "port": 6444, "id": "", "token": "", "key": ""}
             targets = [new_entry]
 
     ok = True
     successful_new_entry = False
-    for dev in targets:
+    for idx, dev in enumerate(targets):
+        # Auch zwischen zwei GERAETEN kurz entzerren (siehe DEVICE_DELAY).
+        # Geraete desselben Modells haengen oft am selben Access Point; eine
+        # ununterbrochene Folge von Verbindungsaufbauten belastet den unnoetig.
+        # midea_ieco_ensure.py haelt aus demselben Grund eine Pause zwischen
+        # den Geraeten ein.
+        if idx > 0:
+            time.sleep(DEVICE_DELAY)
         success = update_device(dev)
         ok = ok and success
         if dev is new_entry and success:
@@ -388,16 +695,15 @@ def main() -> None:
     if new_entry is not None and successful_new_entry:
         devices.append(new_entry)
     elif new_entry is not None and not successful_new_entry:
-        print(f"Neues Geraet '{args.name}' wurde NICHT gespeichert, da der Abruf fehlgeschlagen ist.")
+        print(t("main_new_not_saved", args.name))
 
     if new_entry is None or successful_new_entry:
         try:
             save_config(config)
         except OSError as exc:
-            print(f"FEHLER: devices.json konnte nicht geschrieben werden "
-                  f"({type(exc).__name__}: {exc}).", file=sys.stderr)
+            print(t("main_write_failed", type(exc).__name__, exc), file=sys.stderr)
             sys.exit(1)
-        print(f"devices.json aktualisiert: {CONFIG_PATH}")
+        print(t("main_updated", CONFIG_PATH))
 
     sys.exit(0 if ok else 2)
 

@@ -398,6 +398,20 @@ Erscheinen bei jeder Anfrage Meldungen wie `No response from host`, liegen die h
 - **Gerät befindet sich im WLAN-Energiesparmodus / Schlafmodus** — Erreichbarkeit prüfen mit `ping 192.168.x.x` und `nc -zv 192.168.x.x 6444`
 - **Firewall auf dem Server** blockiert ausgehende Verbindungen zu Port 6444 — prüfen mit `iptables -L` oder `ufw status`
 
+### Wenn die Token-Verifikation fehlschlägt
+
+`midea_refresh_tokens.py` nennt für jeden abgelehnten Kandidaten den Grund. Die Ausgabe erfolgt **standardmäßig auf Englisch** und auf Deutsch, sobald die Locale das hergibt — mit `MIDEA_IECO_LANG=de` (oder `en`) lässt sich die Sprache erzwingen. Für Cron-Jobs lohnt sich dieser Eintrag, da Cron meist ohne gesetzte Locale läuft und die Logs sonst englisch wären.
+
+Die Unterscheidung der Ursachen ist wichtig, denn sie haben nichts miteinander zu tun:
+
+| Meldung | Bedeutung | Wo ansetzen |
+|---|---|---|
+| *Gerät hat den Token aktiv abgelehnt (ERROR-Antwort)* | Das Gerät ist erreichbar und hat geantwortet — es weist nur diesen Token zurück. Netzwerk und Firewall sind in Ordnung. | Der Token passt nicht zu diesem Gerät. Mögliche Ursachen: eine Firmware, die die lokale Anmeldung anders handhabt, oder eine udpId-Variante, die die Cloud-Abfrage nicht abdeckt |
+| *Gerät nimmt die Verbindung an, antwortet aber nicht* | TCP-Verbindung steht, es kommt aber nichts zurück | Meist die Einzelverbindungs-Grenze unten. Midea-App schließen, einige Minuten warten, erneut versuchen |
+| *Verbindungsaufbau fehlgeschlagen* | Gar keine Verbindung möglich | Falsche IP in `devices.json`, oder Port 6444 blockiert — prüfen mit `nc -zv <IP> 6444` |
+
+Ein Muster sollte man kennen: **Eine Midea-Anlage hält nur eine einzige lokale Verbindung** und antwortet nach schnell aufeinanderfolgenden Versuchen eine Weile gar nicht mehr — auch die Midea-App auf dem Handy belegt genau diese Verbindung. Wird der erste Kandidat aktiv abgelehnt und laufen alle folgenden dann in einen Timeout, wurden die späteren gar nicht mehr wirklich geprüft. Genau deshalb entzerrt das Werkzeug seine Versuche und weist auf dieses Muster hin, wenn es auftritt. Vor einem Urteil also einige Minuten warten, mit geschlossener App.
+
 ## Bekannte Midea-App-/Firmware-Eigenheiten
 
 Von einigen frühen PortaSplit-Geräten wird berichtet, dass sie sich **selbst ein-/ausschalten oder eigenständig den Modus wechseln** — Ursache ist ein Fehler in Midea-App/Cloud, nicht die Hardware ([connect.de](https://www.connect.de/news/midea-portasplit-probleme-stoerung-schaltet-sich-automatisch-ein-und-aus-app-fehler-loesung-3209868.html)). Mideas eigener Workaround ist, dem Gerät **am Router den Internetzugang zu sperren** — genau der Betrieb, für den dieses Projekt gemacht ist: Ist die Cloud gekappt, funktioniert die lokale LAN-Steuerung normal weiter.
