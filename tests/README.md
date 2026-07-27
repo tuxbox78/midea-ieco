@@ -28,3 +28,16 @@ Contents:
   for all three generated wrappers, rejection of the reserved device names
   `all`/`list`, the obsolete-`credentials.json` hint that never deletes, and the
   i18n catalog check in both directions). The installer itself is never executed.
+- `KNOWN_GAPS.md` — behaviour that still survives deliberate mutation, with the
+  cost of each gap and the cheapest way to close it. Read it before assuming a
+  green run means a behaviour is covered, and update it whenever you close one.
+
+## Verifying that a test actually protects something
+
+A green suite is not evidence on its own. The habit this project uses: copy the
+repo to `/tmp`, break the behaviour in the source, and confirm the suite goes red.
+Several tests here exist because that exercise found assertions that could no
+longer fail — for example one checking for German wording in a subprocess that had
+since switched to English. Text assertions are therefore derived from the message
+catalogue (`_longest_literal`) rather than retyped, so a reworded message moves the
+assertion with it instead of quietly voiding it.

@@ -338,6 +338,50 @@ rc=0; { [ ! -s "$WORK/ieco.log" ] && [ ! -s "$WORK/refresh.log" ]; } || rc=1
 assert "$rc" "truncate -s 0 mit zwei Operanden leert beide Dateien"
 
 # ---------------------------------------------------------------------------
+echo "== Cron-Zeile: --only-if-on und Sprachweitergabe (Produktionspfad) =="
+# ---------------------------------------------------------------------------
+# WICHTIG: Die erzeugte Crontab-Zeile ist die EINZIGE Stelle, an der
+# --only-if-on produktiv verwendet wird. Die Python-Tests sichern nur, dass das
+# Flag von main() bis ensure_ieco durchgereicht wird - faellt es hier aus der
+# Zeile, bleibt die gesamte Suite gruen, und der Cron schaltet ab dann alle 20
+# Minuten JEDE bewusst ausgeschaltete Anlage ein. Genau diese Luecke bestand,
+# bis eine Fremdpruefung sie fand.
+IECO_CRON_LINE="$(grep '^CRON_LINE_IECO=' "$INSTALL")"
+rc=0; case "$IECO_CRON_LINE" in *'--only-if-on'*) : ;; *) rc=1 ;; esac
+assert "$rc" "Cron-Zeile enthaelt --only-if-on (schaltet nichts ungefragt ein)"
+
+rc=0; case "$IECO_CRON_LINE" in *'midea_ieco_ensure.py all --only-if-on'*) : ;; *) rc=1 ;; esac
+assert "$rc" "--only-if-on steht direkt hinter dem Ziel 'all' (wird nicht als Geraetename gelesen)"
+
+# Sprachweitergabe: cron laeuft ohne Locale, ohne diese Variable kippen die Logs
+# eines deutschen Nutzers stillschweigend auf Englisch.
+# Die Muster enthalten absichtlich das LITERAL '$LANG_CHOICE': geprueft wird der
+# Quelltext von install.sh, nicht ein expandierter Wert. SC2016 ist hier daher
+# gewollt und fuer diesen Block abgeschaltet.
+# shellcheck disable=SC2016
+for line_var in CRON_LINE_IECO CRON_LINE_REFRESH; do
+    line="$(grep "^${line_var}=" "$INSTALL")"
+    rc=0; case "$line" in *'MIDEA_IECO_LANG=$LANG_CHOICE'*) : ;; *) rc=1 ;; esac
+    assert "$rc" "$line_var reicht MIDEA_IECO_LANG an den Cron-Lauf weiter"
+done
+
+# Die Zuweisung muss VOR dem Interpreter stehen, sonst ist sie ein Argument.
+# rc-Initialisierung bewusst in eigener Zeile: eine shellcheck-Direktive bindet
+# an das NAECHSTE Kommando - stuende 'rc=0;' davor, gaelte sie fuer die
+# Zuweisung statt fuer das case, und SC2016 bliebe bestehen.
+rc=0
+# shellcheck disable=SC2016
+case "$IECO_CRON_LINE" in *'MIDEA_IECO_LANG=$LANG_CHOICE venv/bin/python3'*) : ;; *) rc=1 ;; esac
+assert "$rc" "Sprachvariable steht als Kommando-Praefix, nicht als Argument"
+
+# Auch die interaktiven Aufrufe des Installers muessen die Sprache mitgeben.
+for py_call in midea_refresh_tokens.py midea_ieco_ensure.py; do
+    rc=0
+    grep -qE "MIDEA_IECO_LANG=\"\\\$LANG_CHOICE\" python3 $py_call" "$INSTALL" || rc=1
+    assert "$rc" "Installer ruft $py_call mit MIDEA_IECO_LANG auf"
+done
+
+# ---------------------------------------------------------------------------
 echo "== install_bin_wrapper: shell-sicher gequotet, beide Wrapper (#15 + Update) =="
 # ---------------------------------------------------------------------------
 # Testet die ECHTE Funktion install_bin_wrapper (statt das Muster nachzubauen).

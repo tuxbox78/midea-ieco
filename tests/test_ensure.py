@@ -179,6 +179,16 @@ class RetryHardeningTests(unittest.TestCase):
         self.assertTrue(self._run([d_init, d1, d2, d_verify]))
         self.assertEqual([d_init.apply_calls, d1.apply_calls, d2.apply_calls],
                          [1, 1, 1])
+        # Am HANDELNDEN Objekt pruefen, nicht am vorkonfigurierten
+        # Verifikationsgeraet: jedes per Reconnect frisch aufgebaute Geraet muss
+        # den gewuenschten Zustand auch wirklich gesetzt bekommen. Ohne diese
+        # Zusicherung liess sich 'device.ieco = True' aus dem Reconnect-Zweig
+        # ersatzlos entfernen - die Wiederholungen haetten dann erfolgreich
+        # ausgesehen, ohne iECO je zu setzen (dasselbe Anti-Muster, das
+        # StateChangeTests fuer den Normalpfad bereits beseitigt hat).
+        for reconnected in (d1, d2):
+            self.assertIs(reconnected.ieco, True)
+            self.assertIs(reconnected.power_state, True)
 
     def test_reconnect_failure_no_apply_on_dead_object(self):
         d_init = FakeDevice(apply_raises=RuntimeError("apply fail"))
@@ -724,6 +734,227 @@ class DeviceConfigProblemTests(unittest.TestCase):
         for bad in ("abc", "", None, [1]):
             self.assertIn("port", mie._device_config_problem(
                 {"name": "W", "ip": "1.2.3.4", "id": 1, "port": bad}))
+
+
+class _RecordingAC:
+    """Aufzeichnendes Ersatz-Geraet fuer connect_and_refresh (siehe dortigen
+    Testkommentar). Ersetzt msmart-ngs AirConditioner im Stub-Modul."""
+
+    instances: list["_RecordingAC"] = []
+
+    def __init__(self, *, ip=None, port=None, device_id=None):
+        self.init_args = (ip, port, device_id)
+        self.auth_args = None
+        self.calls: list[str] = []
+        self.online = True
+        self.power_state = True
+        self.ieco = True
+        self.eco = False
+        self.operational_mode = _OpMode.COOL
+        self.supports_ieco = True
+        self.auth_raises = None
+        _RecordingAC.instances.append(self)
+
+    async def authenticate(self, token, key):
+        self.auth_args = (token, key)
+        self.calls.append("authenticate")
+        if self.auth_raises is not None:
+            raise self.auth_raises
+
+    async def get_capabilities(self):
+        self.calls.append("get_capabilities")
+
+    async def refresh(self):
+        self.calls.append("refresh")
+
+    async def close(self):
+        self.calls.append("close")
+
+
+class ConnectAndRefreshBodyTests(unittest.TestCase):
+    """Direkter Test von connect_and_refresh - bisher in JEDEM Test ersetzt.
+
+    Der Rumpf war dadurch voellig ungeprueft: ein vertauschtes Argumentpaar in
+    authenticate(token, key) haette jede Geraeteverbindung fuer jeden Nutzer
+    zerstoert, ohne dass ein Test rot wurde."""
+
+    DEV = {"name": "W", "ip": "1.2.3.4", "port": 6444, "id": 42,
+           "token": "MEIN_TOKEN", "key": "MEIN_KEY"}
+
+    def setUp(self):
+        _RecordingAC.instances = []
+        module = sys.modules["msmart.device.AC.device"]
+        original = module.AirConditioner
+        module.AirConditioner = _RecordingAC
+        self.addCleanup(lambda: setattr(module, "AirConditioner", original))
+
+    def _connect(self, dev=None, **kwargs):
+        with ExitStack() as es:
+            es.enter_context(mock.patch.object(mie.asyncio, "sleep", _anoop))
+            es.enter_context(redirect_stdout(io.StringIO()))
+            return asyncio.run(mie.connect_and_refresh(dict(dev or self.DEV), **kwargs))
+
+    def test_authenticate_receives_token_first_then_key(self):
+        self._connect()
+        self.assertEqual(_RecordingAC.instances[0].auth_args,
+                         ("MEIN_TOKEN", "MEIN_KEY"))
+
+    def test_device_is_constructed_with_ip_port_and_id(self):
+        self._connect()
+        self.assertEqual(_RecordingAC.instances[0].init_args, ("1.2.3.4", 6444, 42))
+
+    def test_missing_port_defaults_to_6444(self):
+        dev = {k: v for k, v in self.DEV.items() if k != "port"}
+        self._connect(dev)
+        self.assertEqual(_RecordingAC.instances[0].init_args[1], 6444)
+
+    def test_without_capabilities_only_refresh_runs(self):
+        self._connect()
+        self.assertEqual(_RecordingAC.instances[0].calls, ["authenticate", "refresh"])
+
+    def test_with_capabilities_queries_them_before_refresh(self):
+        # Reihenfolge ist wesentlich: refresh() pollt die IECO-Property nur,
+        # wenn get_capabilities() sie zuvor in _supported_properties eingetragen
+        # hat. Andersherum laese device.ieco immer den Default False.
+        self._connect(with_capabilities=True)
+        self.assertEqual(_RecordingAC.instances[0].calls,
+                         ["authenticate", "get_capabilities", "refresh"])
+
+    def test_every_retry_uses_a_brand_new_device_object(self):
+        # Ein fehlgeschlagener Versuch hinterlaesst einen defekten Socket-
+        # Zustand; deshalb muss je Versuch ein FRISCHES Objekt entstehen.
+        with mock.patch.object(_RecordingAC, "authenticate",
+                               side_effect=RuntimeError("nope"), autospec=True):
+            with self.assertRaises(RuntimeError):
+                self._connect(retries=3)
+        self.assertEqual(len(_RecordingAC.instances), 3)
+
+    def test_gives_up_with_runtimeerror_after_the_configured_retries(self):
+        with mock.patch.object(_RecordingAC, "authenticate",
+                               side_effect=RuntimeError("nope"), autospec=True):
+            with self.assertRaises(RuntimeError):
+                self._connect(retries=2)
+        self.assertEqual(len(_RecordingAC.instances), 2)
+
+    def test_default_retry_count_is_used_when_not_given(self):
+        with mock.patch.object(_RecordingAC, "authenticate",
+                               side_effect=RuntimeError("nope"), autospec=True):
+            with self.assertRaises(RuntimeError):
+                self._connect()
+        self.assertEqual(len(_RecordingAC.instances), mie.CONNECT_RETRIES)
+
+
+class DeviceGuardTests(unittest.TestCase):
+    """online- und supports_ieco-Guard: beide Parameter von FakeDevice existierten,
+    wurden aber von KEINEM Test je auf False gesetzt - die Guards waren tot."""
+
+    def _run(self, device):
+        connect = _scripted_connect([device])
+        with ExitStack() as es:
+            es.enter_context(mock.patch.object(mie, "connect_and_refresh", connect))
+            es.enter_context(mock.patch.object(mie.asyncio, "sleep", _anoop))
+            out = es.enter_context(redirect_stdout(io.StringIO()))
+            result = asyncio.run(mie.ensure_ieco(
+                {"name": "X", "ip": "1", "id": "1"}, only_if_on=False))
+        return result, out.getvalue(), device
+
+    def test_offline_device_is_a_failure_and_nothing_is_applied(self):
+        ok, out, dev = self._run(FakeDevice(online=False, power_state=True))
+        self.assertFalse(ok)
+        self.assertEqual(dev.apply_calls, 0)
+        self.assertIn("not report itself as online", out)
+
+    def test_device_without_ieco_capability_is_a_failure(self):
+        ok, out, dev = self._run(
+            FakeDevice(online=True, power_state=True, supports_ieco=False))
+        self.assertFalse(ok)
+        self.assertEqual(dev.apply_calls, 0)
+        self.assertIn("no iECO capability", out)
+
+
+class ExitCodeTests(unittest.TestCase):
+    """Exit-Codes sind die Schnittstelle zu Cron und Monitoring.
+
+    Das Schwestermodul hat diese Absicherung bereits; hier fehlte sie noch, und
+    'sys.exit(2)' liess sich bei einem Geraetefehler zu 'sys.exit(0)' aendern,
+    ohne dass ein Test rot wurde - ein stiller Fehlschlag im 20-Minuten-Cron,
+    den keine Ueberwachung je bemerkt haette."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "devices.json"
+        orig = mie.CONFIG_PATH
+        mie.CONFIG_PATH = self.path
+        self.addCleanup(lambda: setattr(mie, "CONFIG_PATH", orig))
+
+    def _run(self, argv, devices, ensure_result=True):
+        self.path.write_text(json.dumps({"devices": devices}), encoding="utf-8")
+
+        async def _ensure(dev_conf, only_if_on):
+            return ensure_result
+
+        with ExitStack() as es:
+            es.enter_context(mock.patch.object(mie, "ensure_ieco", _ensure))
+            es.enter_context(mock.patch.object(mie.asyncio, "sleep", _anoop))
+            es.enter_context(mock.patch.object(mie.sys, "argv", ["midea-ieco"] + argv))
+            es.enter_context(redirect_stdout(io.StringIO()))
+            with self.assertRaises(SystemExit) as cm:
+                asyncio.run(mie.main())
+        return cm.exception.code
+
+    DEV = [{"name": "W", "ip": "1.2.3.4", "id": 1, "token": "t", "key": "k"}]
+
+    def test_success_is_zero(self):
+        self.assertEqual(self._run(["all"], self.DEV), 0)
+
+    def test_device_failure_is_two(self):
+        self.assertEqual(self._run(["all"], self.DEV, ensure_result=False), 2)
+
+    def test_named_device_failure_is_two(self):
+        self.assertEqual(self._run(["W"], self.DEV, ensure_result=False), 2)
+
+    def test_one_failure_among_several_is_still_two(self):
+        # all() ueber gemischte Ergebnisse: ein einziges kaputtes Geraet muss
+        # den Gesamtlauf als Fehler ausweisen.
+        devices = self.DEV + [{"name": "X", "ip": "1.2.3.5", "id": 2,
+                               "token": "t", "key": "k"}]
+        results = iter([True, False])
+
+        async def _ensure(dev_conf, only_if_on):
+            return next(results)
+
+        self.path.write_text(json.dumps({"devices": devices}), encoding="utf-8")
+        with ExitStack() as es:
+            es.enter_context(mock.patch.object(mie, "ensure_ieco", _ensure))
+            es.enter_context(mock.patch.object(mie.asyncio, "sleep", _anoop))
+            es.enter_context(mock.patch.object(mie.sys, "argv", ["midea-ieco", "all"]))
+            es.enter_context(redirect_stdout(io.StringIO()))
+            with self.assertRaises(SystemExit) as cm:
+                asyncio.run(mie.main())
+        self.assertEqual(cm.exception.code, 2)
+
+    def test_unknown_device_is_one(self):
+        self.assertEqual(self._run(["Nichtvorhanden"], self.DEV), 1)
+
+    def test_empty_all_is_one(self):
+        self.assertEqual(self._run(["all"], []), 1)
+
+    def test_overview_is_zero(self):
+        self.assertEqual(self._run(["list"], self.DEV), 0)
+
+
+class PacingBoundsTests(unittest.TestCase):
+    """Die Wartezeiten in midea_ieco_ensure.py sind wegen der Einzelverbindungs-
+    Grenze der Firmware tragend, waren aber - anders als beim Schwestermodul -
+    an keine Untergrenze gebunden und liessen sich auf 0 setzen."""
+
+    def test_retry_delay_is_long_enough_to_decompress(self):
+        self.assertGreaterEqual(mie.RETRY_DELAY, 2.0)
+
+    def test_retry_budget_is_not_a_single_shot(self):
+        self.assertGreaterEqual(mie.CONNECT_RETRIES, 2)
+        self.assertGreaterEqual(mie.ACTION_RETRIES, 2)
 
 
 class OnlyIfOnWiringTests(unittest.TestCase):

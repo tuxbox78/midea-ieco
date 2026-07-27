@@ -7,6 +7,53 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
+- **A wrong hint is worse than no hint: the "rejected first, silent afterwards"
+  pattern was order-blind.** `summarize_failure_hint` reduced its input to a set,
+  so `[unreachable, rejected]` produced the same advice as `[rejected,
+  unreachable]` — telling the user "the device stopped answering after the
+  rejection" when the rejection had in fact been the *last* event, suppressing the
+  correct "your tokens do not match this unit" conclusion and sending them off to
+  wait and retry instead. Before that hint existed the case produced silence; the
+  set-based check turned silence into misinformation. The hint now requires the
+  device's answer to genuinely come first, and says nothing when it does not.
+- **`connection was refused` claimed more than the signal supports.** `msmart-ng`
+  raises `Connect failed.` for *every* `OSError` out of `create_connection` — a
+  refused connection, but equally a DNS failure, an unreachable network or an
+  unreachable host. Asserting "something answered, but not on this port" was wrong
+  for most of them (reproduced with a DNS failure and `ENETUNREACH`). The wording
+  is neutral again, still distinct from the connect-timeout case. A test now pins
+  the *neutrality* rather than the exact phrasing.
+- `hint_all_cap` removed: it cannot be reached. Our verification cap sits above
+  `msmart-ng`'s own worst case (`authenticate` ≈ 12 s; `refresh` ≈ 6 s and it does
+  not propagate network errors at all), so an all-timeout run does not occur in
+  practice. Inventing advice for a state that cannot happen is worse than saying
+  nothing; `VERIFY_CAP` still classifies correctly should it ever fire.
+- `tests/run_all.sh` clears the bytecode caches after the run as well as before.
+  The previous change moved the cleanup to the front and claimed the run no longer
+  writes a cache — but `py_compile` writes `.pyc` regardless of
+  `PYTHONDONTWRITEBYTECODE`, so a direct `python3 -m unittest …` afterwards could
+  still be served stale bytecode. Both ends are cleaned now.
+
+### Added
+- **Two failure causes that used to fall through unclassified.** A wrong *key*
+  (`msmart-ng` reports a SHA256 digest mismatch — the device answered the
+  handshake, but the reply cannot be decrypted) is now named as exactly that, with
+  a hint pointing at a token refresh; it is the clearest evidence the stored
+  credentials are stale, and it previously produced no hint at all. A real TCP
+  reset (`Connection reset by peer`, errno 54 on macOS / 104 on Linux) now
+  classifies as a dropped connection instead of falling through.
+- **`install.sh` points out cron jobs that predate the language pass-through.**
+  It never rewrites them: the crontab belongs to the user, and `--update`
+  explicitly promises not to touch it. It reports that the existing lines log in
+  English (cron runs without a locale) and prints the corrected lines to copy.
+  The previous entry's claim that this case was fixed was too broad — only *new*
+  cron installations were covered.
+- `tests/KNOWN_GAPS.md` — the behaviours that still survive deliberate mutation,
+  each with its user cost and the cheapest way to close it, plus how to re-run the
+  exercise. A green suite is not evidence on its own; this records where it is
+  thin instead of leaving it to be re-derived.
+
+### Fixed
 - **The most common real-world failure got no hint at all.** When a unit is
   switched off, its IP has changed, or a firewall drops the packets, `msmart-ng`
   reports `Connect timeout.` — a wording the failure classification did not know,
@@ -67,6 +114,37 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   documents each one. All ordinary cases agree.
 
 ### Testing
+- **The most safety-critical string in the project was unguarded.** Four tests
+  were added proving `--only-if-on` reaches `ensure_ieco` from `main()` — but the
+  only place that flag is used in production is the crontab line `install.sh`
+  writes, and `tests/test_install.sh` did not mention it once. Deleting it there
+  left the entire suite green while every switched-off unit would be powered on
+  every 20 minutes. The generated cron lines are now asserted directly, including
+  that the flag follows the `all` target rather than being read as a device name.
+- **Untested core promises now have tests**, each verified by a mutation that
+  previously survived: `devices.json` is left byte-identical when every candidate
+  fails (the module's headline guarantee, which printed "remain unchanged" while
+  a one-line change made it destroy the last working credentials); `save_config`
+  is actually called; exit codes 0/1/2 in both tools; and the bodies of
+  `verify_credentials` and `connect_and_refresh` — until now replaced by a mock in
+  *every* test, so swapping `authenticate(token, key)` would have broken every
+  device connection for every user unnoticed.
+- Further gaps closed: the `online` and `supports_ieco` guards (their `FakeDevice`
+  parameters existed but no test ever set them to `False`), the reconnect path
+  losing `device.ieco = True` (the same "assert against a pre-configured
+  verification stand-in" anti-pattern that was fixed elsewhere but left in
+  `RetryHardeningTests`), the *placement* of the candidate pause (a count-based
+  test cannot tell "pause before" from "pause after" — the event order is now
+  asserted), and the four `resolve_lang` edge cases documented in the previous
+  commit but never exercised.
+- The `t()` call-site check now also samples argument *order* — a swap passes an
+  arity check while rendering "did not respond within 1.2.3.4s (is the device at
+  60 reachable?)" — and its self-guard threshold scales with the catalogue instead
+  of being a fixed number.
+- The earlier "17 of 17 mutations are caught" was accurate for the six areas it
+  named but reads as a completeness claim, which it was not: an independent review
+  ran 165 mutations and 51 survived. The top ten by user damage are closed here;
+  the rest are written down in `tests/KNOWN_GAPS.md` rather than left implicit.
 - The test suite was re-examined by an independent review, which mutated the
   source in a scratch copy to check that the tests actually go red. Everything
   below was a mutation that previously survived a fully green suite:

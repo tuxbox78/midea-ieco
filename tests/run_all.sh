@@ -9,14 +9,23 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO" || exit 1
 fail=0
 
-# Bytecode-Caches ZUERST raeumen, nicht erst am Ende. Python entscheidet anhand
-# von Groesse und mtime-Sekunde, ob ein .pyc noch gueltig ist - eine Aenderung,
-# die die Dateigroesse nicht veraendert (z.B. sys.exit(0) -> sys.exit(1)) und
-# innerhalb derselben Sekunde erfolgt, kann sonst aus einem veralteten Cache
-# bedient werden. Genau das hat bei der Mutationspruefung dieser Suite kurzzeitig
-# echte Fehler verdeckt. Zusaetzlich schreibt der Lauf selbst keinen Cache mehr.
+# Bytecode-Caches VOR dem Lauf raeumen: Python entscheidet anhand von Groesse und
+# mtime-Sekunde, ob ein .pyc noch gueltig ist - eine Aenderung, die die
+# Dateigroesse nicht veraendert (z.B. sys.exit(0) -> sys.exit(1)) und innerhalb
+# derselben Sekunde erfolgt, kann sonst aus einem veralteten Cache bedient
+# werden. Genau das hat bei einer Mutationspruefung dieser Suite kurzzeitig echte
+# Fehler verdeckt.
+#
+# PYTHONDONTWRITEBYTECODE deckt das NICHT vollstaendig ab: py_compile (unten)
+# schreibt .pyc bewusst und unabhaengig von dieser Variablen - das ist genau
+# seine Aufgabe. Deshalb wird am Ende des Laufs ein zweites Mal geraeumt, damit
+# ein spaeterer DIREKTER Aufruf (python3 -m unittest ..., python3 skript.py)
+# nicht doch auf einem veralteten Cache aufsetzt.
 export PYTHONDONTWRITEBYTECODE=1
-rm -rf "$REPO/__pycache__" "$REPO/tests/__pycache__" "$REPO/tools/__pycache__"
+clear_pycache() {
+    rm -rf "$REPO/__pycache__" "$REPO/tests/__pycache__" "$REPO/tools/__pycache__"
+}
+clear_pycache
 
 echo "### shellcheck + bash -n ###"
 for f in install.sh midea_ieco_ensure.sh tests/test_install.sh tests/run_all.sh; do
@@ -36,6 +45,7 @@ python3 -m unittest discover -s tests -p 'test_*.py' || fail=1
 echo "### install.sh function tests ###"
 bash tests/test_install.sh || fail=1
 
+clear_pycache
 echo ""
 if [ "$fail" -eq 0 ]; then echo "ALL GREEN"; else echo "FAILURES ABOVE"; fi
 exit "$fail"

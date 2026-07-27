@@ -410,8 +410,7 @@ The distinction between these causes matters, because they have nothing to do wi
 | *device actively rejected the token* | The unit is reachable and answered — it just refuses this token. Network and firewall are fine. | The token does not match this unit. Possible causes: firmware that handles local login differently, or a udpId variant the cloud lookup does not cover |
 | *device accepts the connection but does not answer* | TCP connects, but nothing comes back | Most often the single-connection limit below. Close the Midea app, wait a few minutes, retry |
 | *no answer at all while connecting* | Nothing responded at that address | Wrong IP in `devices.json`, unit switched off, or a firewall dropping the packets — check with `ping <IP>` and `nc -zv <IP> 6444` |
-| *connection was refused* | Something answered, but nothing is listening on that port | Right host, wrong port or a service that isn't the AC — verify the IP belongs to the unit |
-| *time limit reached* | The unit is reachable but reacting very slowly | Usually weak Wi-Fi or a busy network; retry later rather than changing the configuration |
+| *no connection could be established* | Nothing reachable at that address and port at all | Wrong IP in `devices.json`, unit off the network, DNS/routing problem, or port 6444 closed |
 
 There is one pattern worth knowing: **a Midea unit holds only a single local connection**, and after rapid repeated attempts it stops answering for a while — the Midea app on your phone occupies that same connection. If the first candidate is actively rejected and every later one then times out, the later ones were never meaningfully tested. The tool spaces its attempts out for exactly this reason and points the pattern out when it sees it. Wait a few minutes with the app closed before drawing conclusions.
 

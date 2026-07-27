@@ -315,6 +315,8 @@ Verzeichnisse ueber Umgebungsvariablen ueberschreibbar:
                            de='midea-ieco-Cron-Jobs sind bereits eingetragen. Ueberspringe, um Duplikate zu vermeiden.' ;;
         cron_added)        en='Cron jobs installed for user %s.'
                            de='Cron-Jobs eingetragen fuer Benutzer %s.' ;;
+        cron_lang_missing) en='Your existing cron jobs do not set MIDEA_IECO_LANG, so they log in English (cron runs without a locale). Your crontab is left untouched - to switch them to "%s", replace the midea-ieco lines with:'
+                           de='Deine bestehenden Cron-Jobs setzen MIDEA_IECO_LANG nicht und protokollieren daher auf Englisch (Cron laeuft ohne Locale). Deine Crontab bleibt unangetastet - um sie auf "%s" umzustellen, ersetze die midea-ieco-Zeilen durch:' ;;
         cron_no_crontab)   en="No 'crontab' command found. Cron jobs must be set up manually."
                            de="Kein 'crontab'-Kommando gefunden. Cron-Jobs muessen manuell eingerichtet werden." ;;
         banner_install_done) en='Installation complete!';  de='Installation abgeschlossen!' ;;
@@ -1347,6 +1349,17 @@ if command -v crontab &>/dev/null; then
         EXISTING_CRON=$(crontab -l 2>/dev/null || true)
         if echo "$EXISTING_CRON" | grep -qF "$CRON_MARKER"; then
             warn "$(t cron_already)"
+            # Bestehende verwaltete Zeilen werden BEWUSST nicht umgeschrieben -
+            # die Crontab gehoert dem Nutzer, und '--update' sagt ausdruecklich
+            # zu, sie nicht anzufassen. Fehlt dort aber die Sprachvariable
+            # (Installationen vor deren Einfuehrung), laufen die Cron-Jobs ohne
+            # Locale und damit auf Englisch. Darauf wird hingewiesen, samt der
+            # fertigen Zeile zum Uebernehmen - entscheiden soll der Nutzer.
+            if ! echo "$EXISTING_CRON" | grep -F "$CRON_MARKER" | grep -q "MIDEA_IECO_LANG="; then
+                warn "$(t cron_lang_missing "$LANG_CHOICE")"
+                echo "$CRON_LINE_IECO"
+                echo "$CRON_LINE_REFRESH"
+            fi
         else
             { echo "$EXISTING_CRON"
               echo "$CRON_LINE_IECO"

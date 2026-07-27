@@ -33,6 +33,14 @@ Nutzung:
     python3 midea_refresh_tokens.py --all
 """
 
+# Wie in midea_ieco_ensure.py und midea_i18n.py: erlaubt PEP-604-Typangaben
+# ("str | None") auch dort, wo sie zur Laufzeit ausgewertet wuerden. Ohne diesen
+# Import war dieses Modul als einziges der drei nicht importierbar, sobald es
+# mit einem aelteren Interpreter angefasst wurde (z.B. Apples System-Python 3.9),
+# was eine Fehlersuche unnoetig in die Irre fuehrt. Das Projekt setzt 3.11+
+# voraus - die Einheitlichkeit kostet nichts und nimmt die Stolperfalle weg.
+from __future__ import annotations
+
 import argparse
 import asyncio
 import json
@@ -142,15 +150,26 @@ _MESSAGES: dict[str, tuple[str, str]] = {
     "diag_reset": (
         "connection was dropped by the device",
         "Verbindung wurde vom Geraet abgebrochen"),
+    # Bewusst NEUTRAL gehalten. msmart-ng wirft 'Connect failed.' fuer JEDEN
+    # OSError aus create_connection (lan.py) - also fuer eine abgewiesene
+    # Verbindung ebenso wie fuer einen DNS-Fehler, ein nicht erreichbares Netz
+    # oder einen nicht erreichbaren Host. Eine bestimmtere Formulierung (etwa
+    # "die Verbindung wurde abgewiesen, es hat also etwas geantwortet") waere fuer
+    # die Mehrzahl dieser Faelle schlicht falsch - real geprueft mit DNS-Fehler
+    # und ENETUNREACH, beide liefern genau diese Meldung.
     "diag_unreachable": (
-        "connection was refused - something answered, but not on this port",
-        "Verbindung wurde abgewiesen - es hat etwas geantwortet, aber nicht auf "
-        "diesem Port"),
+        "no connection could be established (address and port reachable?)",
+        "es kam keine Verbindung zustande (Adresse und Port erreichbar?)"),
     "diag_unreachable_timeout": (
         "no answer at all while connecting - wrong IP, device switched off, or "
         "blocked by a firewall",
         "keine Antwort beim Verbindungsaufbau - falsche IP, Geraet aus, oder von "
         "einer Firewall verworfen"),
+    "diag_bad_key": (
+        "device answered, but the key does not decrypt its reply "
+        "(token accepted, key wrong)",
+        "Geraet hat geantwortet, aber der Key entschluesselt die Antwort nicht "
+        "(Token angenommen, Key falsch)"),
     "diag_no_detail": (
         "no further detail",
         "keine naehere Angabe"),
@@ -184,6 +203,17 @@ _MESSAGES: dict[str, tuple[str, str]] = {
         "nicht erst geprueft werden. Bitte IP-Adresse in devices.json pruefen, ob "
         "die Anlage mit Strom und im Netz ist, und ob Port 6444 erreichbar ist "
         "(z.B. 'ping <IP>' und 'nc -zv <IP> 6444')."),
+    "hint_all_bad_key": (
+        "The device answered every handshake, but none of the keys could decrypt "
+        "its reply. Network and reachability are fine and the unit is the right "
+        "one - the key half of each pair simply does not belong to it. This is "
+        "the clearest sign that the stored credentials are stale: re-running the "
+        "token retrieval is the right next step.",
+        "Das Geraet hat jeden Handshake beantwortet, aber keiner der Keys konnte "
+        "die Antwort entschluesseln. Netzwerk und Erreichbarkeit sind in Ordnung, "
+        "und es ist auch die richtige Anlage - nur der Key-Teil des jeweiligen "
+        "Paares gehoert nicht dazu. Das ist das deutlichste Zeichen fuer veraltete "
+        "Zugangsdaten: der Token-Abruf sollte erneut laufen."),
     "hint_all_reset": (
         "The device dropped every connection. Most often this is the "
         "single-connection limit: it holds only ONE local connection at a time, "
@@ -193,16 +223,6 @@ _MESSAGES: dict[str, tuple[str, str]] = {
         "Einzelverbindungs-Grenze dahinter: Es haelt nur EINE lokale Verbindung "
         "gleichzeitig, und die Midea-App auf dem Handy belegt genau diese. Bitte "
         "die App schliessen, einige Minuten warten und erneut versuchen."),
-    "hint_all_cap": (
-        "Every attempt ran into the time limit without a clear answer. The device "
-        "is reachable but reacting unusually slowly - typically a weak Wi-Fi "
-        "signal or a busy network. Retrying later, or improving reception, is "
-        "usually more effective than changing anything here.",
-        "Jeder Versuch lief ohne klare Antwort ins Zeitlimit. Das Geraet ist "
-        "erreichbar, reagiert aber ungewoehnlich langsam - typischerweise bei "
-        "schwachem WLAN-Signal oder ausgelastetem Netz. Ein spaeterer Versuch "
-        "oder besserer Empfang hilft hier meist mehr als eine Aenderung an der "
-        "Konfiguration."),
     "hint_mixed": (
         "Notable pattern: at least one token was actively rejected, after which "
         "the device stopped answering. Most likely it accepted no further "
@@ -493,6 +513,7 @@ def fetch_candidate_credentials(host: str) -> tuple[list[tuple[str, str]], str |
 # aber nie Information.
 # ---------------------------------------------------------------------------
 VERIFY_REJECTED = "rejected"        # Geraet lehnt den Token aktiv ab
+VERIFY_BAD_KEY = "bad_key"          # Geraet antwortet, aber der KEY entschluesselt nicht
 VERIFY_SILENT = "silent"            # Verbindung steht, keine Antwort
 VERIFY_RESET = "reset"              # Verbindung abgebrochen
 VERIFY_UNREACHABLE = "unreachable"  # Host/Port gar nicht erreichbar
@@ -511,8 +532,18 @@ VERIFY_OTHER = "other"              # nicht eingeordnet - Originaltext bleibt er
 # Reihenfolge dieser Tabelle ist daher nicht bedeutungstragend.
 _FAILURE_MARKERS = (
     ("error packet", VERIFY_REJECTED, "diag_rejected"),
+    # Der Handshake kam zurueck, liess sich mit diesem Key aber nicht
+    # entschluesseln (msmart-ng vergleicht den SHA256 der entschluesselten
+    # Antwort). Das ist die praeziseste Aussage, die das Protokoll hergibt:
+    # Geraet erreichbar, Token angenommen, KEY falsch. Fiel bisher stumm auf
+    # VERIFY_OTHER und damit ganz ohne Hinweis durch.
+    ("digest do not match", VERIFY_BAD_KEY, "diag_bad_key"),
     ("no response from host", VERIFY_SILENT, "diag_silent"),
     ("transport is closing", VERIFY_RESET, "diag_reset"),
+    # Ein echtes TCP-RST kommt nicht als 'Transport is closing', sondern als
+    # durchgereichter OSError-Text an ('[Errno 54] Connection reset by peer' auf
+    # macOS, Errno 104 auf Linux - der Wortlaut ist auf beiden gleich).
+    ("connection reset by peer", VERIFY_RESET, "diag_reset"),
     ("connect failed", VERIFY_UNREACHABLE, "diag_unreachable"),
     ("connect timeout", VERIFY_UNREACHABLE, "diag_unreachable_timeout"),
 )
@@ -548,7 +579,15 @@ def classify_verify_failure(exc: BaseException) -> tuple[str, str]:
 
     # Erst jetzt der eigene Deckel: asyncio.wait_for wirft einen TimeoutError
     # OHNE Meldungstext, der oben folglich auf keine Marke passt.
-    if isinstance(exc, TimeoutError):
+    #
+    # asyncio.TimeoutError wird ausdruecklich MIT aufgefuehrt, obwohl es ab
+    # Python 3.11 nur ein Alias des eingebauten TimeoutError ist (und das Projekt
+    # 3.11+ voraussetzt): auf aelteren Interpretern sind es zwei verschiedene
+    # Klassen, und dann liefe genau dieser Zweig ins Leere - der Abbruch waere
+    # dort als "unklassifiziert" gemeldet worden statt als unser Zeitlimit.
+    # Die Nennung kostet nichts und nimmt eine stille Versionsannahme aus einer
+    # Funktion, deren einzige Aufgabe das korrekte Einordnen ist.
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
         return VERIFY_CAP, t("diag_cap", VERIFY_TIMEOUT)
 
     # Rueckfall: der Originaltext von msmart-ng bleibt unveraendert erhalten -
@@ -557,17 +596,35 @@ def classify_verify_failure(exc: BaseException) -> tuple[str, str]:
     return VERIFY_OTHER, f"{type(exc).__name__}: {detail}"
 
 
+# Fehlerarten, bei denen das Geraet nachweislich GEANTWORTET hat - die
+# Zugangsdaten stimmen dann nicht, das Netz ist in Ordnung.
+_ANSWERED_CODES = frozenset({VERIFY_REJECTED, VERIFY_BAD_KEY})
+
+# Fehlerarten, die bedeuten "das Geraet hat auf diesen Versuch nicht mehr
+# brauchbar reagiert" - im Unterschied zu _ANSWERED_CODES. Nur diese koennen ein
+# Verstummen NACH einer Antwort sein.
+_BLOCKING_CODES = frozenset({VERIFY_SILENT, VERIFY_RESET, VERIFY_UNREACHABLE,
+                             VERIFY_CAP})
+
+
 def summarize_failure_hint(codes: list[str]) -> str | None:
     """Leitet aus den Diagnose-Codes ALLER gescheiterten Kandidaten einen
     handlungsleitenden Hinweis ab, oder None, wenn sich nichts Belastbares
     sagen laesst. Bewusst zurueckhaltend formuliert: der Hinweis benennt die
-    wahrscheinlichste Ursache, behauptet sie aber nicht als gesichert."""
+    wahrscheinlichste Ursache, behauptet sie aber nicht als gesichert.
+
+    ``codes`` ist eine REIHENFOLGETREUE Liste in Kandidatenreihenfolge - das ist
+    fuer den gemischten Fall wesentlich und darf nicht zu einer Menge
+    zusammengefasst werden (siehe unten)."""
     if not codes:
         return None
     unique = set(codes)
 
     if unique == {VERIFY_REJECTED}:
         return t("hint_all_rejected")
+
+    if unique == {VERIFY_BAD_KEY}:
+        return t("hint_all_bad_key")
 
     if unique == {VERIFY_SILENT}:
         return t("hint_all_silent")
@@ -578,19 +635,27 @@ def summarize_failure_hint(codes: list[str]) -> str | None:
     if unique == {VERIFY_RESET}:
         return t("hint_all_reset")
 
-    if unique == {VERIFY_CAP}:
-        return t("hint_all_cap")
-
-    # "Erst abgelehnt, danach nicht mehr erreichbar": VERIFY_UNREACHABLE gehoert
-    # hier ausdruecklich dazu. Ein blockiertes Geraet nimmt die Verbindung
-    # irgendwann gar nicht mehr an, was als 'Connect timeout.' ankommt - also als
-    # UNREACHABLE. Eine falsche IP scheidet als Erklaerung aus: alle Kandidaten
-    # laufen gegen DIESELBE Adresse, und der erste hat dort nachweislich jemanden
-    # erreicht (er wurde ja aktiv abgelehnt). Die spaeteren Fehlschlaege koennen
-    # also nur am Geraet liegen, nicht an der Konfiguration.
-    if VERIFY_REJECTED in unique and unique & {VERIFY_SILENT, VERIFY_RESET,
-                                               VERIFY_UNREACHABLE, VERIFY_CAP}:
-        return t("hint_mixed")
+    # Bewusst KEIN Sammelhinweis fuer lauter VERIFY_CAP: unser Zeitlimit liegt
+    # oberhalb von msmart-ngs eigenem Worst Case (authenticate ~12s, refresh
+    # ~6s - refresh meldet Netzwerkfehler ohnehin nicht nach oben), es kann
+    # praktisch also gar nicht greifen. Fuer einen Zustand, der nicht eintritt,
+    # wird kein Ratschlag erfunden; die Einzelmeldung je Kandidat bleibt korrekt.
+    #
+    # Gemischter Fall "erst abgelehnt, DANACH verstummt": nur dann aussagekraeftig,
+    # wenn die Ablehnung TATSAECHLICH ZUERST kam. Sonst dreht sich die Aussage um -
+    # bei [nicht erreichbar, abgelehnt] hat das Geraet am Ende sehr wohl
+    # geantwortet, und ein Hinweis "es hat danach nicht mehr geantwortet" waere in
+    # jeder Teilaussage falsch. Eine reine Mengenbetrachtung kann das nicht
+    # unterscheiden und behauptete beides gleichermassen. Trifft die Reihenfolge
+    # nicht zu, wird bewusst NICHTS gesagt: die Einzelzeilen pro Kandidat nennen
+    # den jeweiligen Grund ohnehin praezise.
+    answered_present = unique & _ANSWERED_CODES
+    blocking_present = unique & _BLOCKING_CODES
+    if answered_present and blocking_present:
+        first_answer = min(codes.index(code) for code in answered_present)
+        first_blocking = min(codes.index(code) for code in blocking_present)
+        if first_answer < first_blocking:
+            return t("hint_mixed")
 
     return None
 
