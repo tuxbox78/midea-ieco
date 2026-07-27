@@ -28,7 +28,7 @@ clear_pycache() {
 clear_pycache
 
 echo "### shellcheck + bash -n ###"
-for f in install.sh midea_ieco_ensure.sh tests/test_install.sh tests/run_all.sh; do
+for f in install.sh midea_ieco_ensure.sh tests/test_install.sh tests/test_wrapper.sh tests/run_all.sh; do
     bash -n "$f" || fail=1
     shellcheck "$f" || fail=1
 done
@@ -41,6 +41,9 @@ python3 -m py_compile midea_ieco_ensure.py midea_refresh_tokens.py midea_i18n.py
 
 echo "### python unit tests ###"
 python3 -m unittest discover -s tests -p 'test_*.py' || fail=1
+
+echo "### midea_ieco_ensure.sh wrapper tests ###"
+bash tests/test_wrapper.sh || fail=1
 
 echo "### install.sh function tests ###"
 bash tests/test_install.sh || fail=1

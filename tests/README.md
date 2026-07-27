@@ -26,8 +26,18 @@ Contents:
   triplet device write, the directory-ownership safety of `ensure_install_dir`,
   the pipefail-safe version extraction, the shell-safe wrapper-heredoc quoting
   for all three generated wrappers, rejection of the reserved device names
-  `all`/`list`, the obsolete-`credentials.json` hint that never deletes, and the
-  i18n catalog check in both directions). The installer itself is never executed.
+  `all`/`list`, the obsolete-`credentials.json` hint that never deletes, the
+  per-line cron language check, and the i18n catalog check in both directions).
+  It also runs the **real installer end-to-end** in a fully stubbed sandbox —
+  `--update`, and onboarding both with and without discovered devices — and
+  asserts what actually reaches `crontab -`. Nothing leaves the sandbox: `python3`,
+  `pip`, `git` and `crontab` are PATH stubs, `HOME` and the install/bin directories
+  point into a temp dir, and no network is touched.
+- `test_wrapper.sh` — functional tests for `midea_ieco_ensure.sh`, the wrapper
+  behind the Siri shortcuts and SSH calls: that every argument (especially
+  `--only-if-on`) reaches Python unchanged, that the exit code is passed through,
+  and that a missing venv produces a clear error instead of a cryptic `exec`
+  failure. The wrapper runs as a copy in a sandbox against a fake venv Python.
 - `KNOWN_GAPS.md` — behaviour that still survives deliberate mutation, with the
   cost of each gap and the cheapest way to close it. Read it before assuming a
   green run means a behaviour is covered, and update it whenever you close one.

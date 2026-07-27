@@ -7,6 +7,54 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
+- **The mixed-failure hint claimed things that had not happened.** When
+  `VERIFY_BAD_KEY` joined the set of "the device answered" codes, the hint text was
+  not revisited: for `[wrong key, silent]` it asserted a rejection that never took
+  place. Its second claim was wrong in a different way — the check only looked at
+  whether an answer came *first*, while the text says the device *stopped*
+  answering, so `[rejected, silent, rejected]` produced "the later candidates are
+  NOT meaningful" about a candidate the device had just answered. Both halves are
+  now required: the first answer must precede the first blockade, **and** nothing
+  after the last answer may be anything but a blockade. Worked out against a truth
+  table over all 2801 code sequences up to length four before any code changed;
+  the implementation was then re-checked against that table.
+- **`[rejected, wrong key]` gave no hint at all** — the case where the device
+  answered *every* single attempt, which is the strongest evidence the tool can
+  produce that the stored credentials no longer belong to the unit. It now says so
+  and points at the token retrieval (`hint_all_answered`, EN/DE).
+- **The installer's "your cron jobs log in English" notice was wrong in both
+  directions.** It grepped across the whole crontab, so it went quiet as soon as
+  *one* of the two managed lines had been migrated, and it warned even when a
+  standalone `MIDEA_IECO_LANG=` environment line — the usual way to set a variable
+  for all cron jobs — had already set the language. It now checks each managed tool
+  line separately, recognises the environment line, ignores the logrotate line
+  (which runs no tool), and prints only the lines that actually need changing.
+  It is also reachable now: a plain re-run on a configured system exits before the
+  cron section, so the notice was previously almost impossible to see.
+
+### Added
+- `tests/test_wrapper.sh`: functional tests for `midea_ieco_ensure.sh`. The wrapper
+  is the second production path for `--only-if-on` (Siri shortcuts, SSH) and had no
+  functional test at all — `bash -n` and `shellcheck` both stay green when `"$@"`
+  is replaced by `"${1:-}"`, which is exactly the bug this project started with and
+  would switch on every deliberately-off unit every 20 minutes.
+- End-to-end installer tests that run the real `install.sh` in a stubbed sandbox and
+  assert what actually reaches `crontab -`: both jobs present, the `*/20` schedule,
+  `--only-if-on` behind the `all` target, `--all` on the refresh line, the log
+  redirection, `truncate` rather than `rm`, the marker on every written line, and no
+  second write on a re-run. Previously only the *contents of the shell variables*
+  were checked — deleting the `echo` that writes the iECO job left the suite green
+  while the product silently did nothing.
+
+### Changed
+- `SETTLE_DELAY` and `DEVICE_DELAY` are named constants in `midea_ieco_ensure.py`
+  instead of inline literals, so their lower bounds can be asserted the way the
+  sister module already does. Timing behaviour is unchanged.
+- `summarize_failure_hint` checks the answered-codes subset after all single-cause
+  branches. Behaviour is identical today; the previous order quietly assumed every
+  member of `_ANSWERED_CODES` already had its own branch above it.
+
+### Fixed
 - **A wrong hint is worse than no hint: the "rejected first, silent afterwards"
   pattern was order-blind.** `summarize_failure_hint` reduced its input to a set,
   so `[unreachable, rejected]` produced the same advice as `[rejected,
@@ -51,7 +99,13 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `tests/KNOWN_GAPS.md` — the behaviours that still survive deliberate mutation,
   each with its user cost and the cheapest way to close it, plus how to re-run the
   exercise. A green suite is not evidence on its own; this records where it is
-  thin instead of leaving it to be re-derived.
+  thin instead of leaving it to be re-derived. (Its own accuracy has since been
+  corrected in place: the header arithmetic did not add up, `refused` was listed as
+  a covered classification although the same commit removed that word from the code
+  for being wrong, and the table of unclassified `msmart-ng` wordings was
+  incomplete. The corrections are recorded in the file itself. The commit message of
+  `f97a025` also states "228 Python (was 180)" — the correct previous number is
+  166, verified by running the suite at `f97a025^`.)
 
 ### Fixed
 - **The most common real-world failure got no hint at all.** When a unit is

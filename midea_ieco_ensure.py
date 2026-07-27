@@ -47,6 +47,21 @@ CONNECT_RETRIES = 3
 ACTION_RETRIES = 3
 RETRY_DELAY = 3.0
 
+# Nachlauf zwischen apply() und der Verifikation. Das Geraet uebernimmt den
+# gesetzten Zustand nicht sofort; wird zu frueh nachgelesen, meldet es noch den
+# alten Wert und der Lauf gaelte faelschlich als fehlgeschlagen. Ausserdem faellt
+# in diese Zeit das Schliessen und der erneute Verbindungsaufbau - bei einem
+# Geraet, das nur EINE lokale Verbindung vertraegt, ist das kein Detail.
+SETTLE_DELAY = 2.0
+
+# Pause nach jedem Geraet. Anders als im Schwestermodul (dort CANDIDATE_DELAY/
+# DEVICE_DELAY jeweils VOR dem naechsten Zugriff) liegt sie hier bewusst NACH
+# jedem Geraet, also auch nach dem letzten: der Lauf endet damit nicht unmittelbar
+# auf einem geschlossenen Socket, was dem naechsten Cron-Durchgang bzw. einem
+# direkt folgenden manuellen Aufruf zugutekommt. Als Konstante benannt, damit
+# sich der Wert - wie im Schwestermodul - gegen eine Untergrenze pruefen laesst.
+DEVICE_DELAY = 1.0
+
 # Reservierte Ziel-Woerter: das sind keine Geraetenamen, sondern Sonderbefehle.
 # 'all' -> alle Geraete; 'list' -> nur die Uebersicht anzeigen (kein Netz).
 # WICHTIG: in Sync halten mit is_valid_device_name() in install.sh, das
@@ -582,7 +597,7 @@ async def ensure_ieco(dev_conf: dict, only_if_on: bool) -> bool:
             print(t("dev_apply_failed", name, last_exc))
             return False
 
-        await asyncio.sleep(2.0)
+        await asyncio.sleep(SETTLE_DELAY)
         await close_device(device)
         try:
             # with_capabilities=True ist hier zwingend: sonst pollt refresh() die
@@ -705,7 +720,9 @@ async def main() -> None:
     results = []
     for d in devices:
         results.append(await ensure_ieco(d, only_if_on=args.only_if_on))
-        await asyncio.sleep(1.0)
+        # Entzerrung nach JEDEM Geraet (siehe DEVICE_DELAY) - auch nach dem
+        # letzten, bewusst.
+        await asyncio.sleep(DEVICE_DELAY)
 
     if all(results):
         print(t("main_result_ok"))

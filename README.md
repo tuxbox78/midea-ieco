@@ -408,11 +408,14 @@ The distinction between these causes matters, because they have nothing to do wi
 | Message | What it means | Where to look |
 |---|---|---|
 | *device actively rejected the token* | The unit is reachable and answered — it just refuses this token. Network and firewall are fine. | The token does not match this unit. Possible causes: firmware that handles local login differently, or a udpId variant the cloud lookup does not cover |
+| *device answered, but the key does not decrypt its reply* | The handshake came back and the unit is the right one — only the key half of the pair does not belong to it | The clearest sign that the stored credentials are stale. Re-run the token retrieval |
 | *device accepts the connection but does not answer* | TCP connects, but nothing comes back | Most often the single-connection limit below. Close the Midea app, wait a few minutes, retry |
 | *no answer at all while connecting* | Nothing responded at that address | Wrong IP in `devices.json`, unit switched off, or a firewall dropping the packets — check with `ping <IP>` and `nc -zv <IP> 6444` |
 | *no connection could be established* | Nothing reachable at that address and port at all | Wrong IP in `devices.json`, unit off the network, DNS/routing problem, or port 6444 closed |
 
-There is one pattern worth knowing: **a Midea unit holds only a single local connection**, and after rapid repeated attempts it stops answering for a while — the Midea app on your phone occupies that same connection. If the first candidate is actively rejected and every later one then times out, the later ones were never meaningfully tested. The tool spaces its attempts out for exactly this reason and points the pattern out when it sees it. Wait a few minutes with the app closed before drawing conclusions.
+The first two rows are both *answers*: the unit is there and talking. If **every** attempt ends that way, network and reachability are fine and the stored credentials simply do not belong to this unit — the tool says so and points at the token retrieval.
+
+There is one more pattern worth knowing: **a Midea unit holds only a single local connection**, and after rapid repeated attempts it stops answering for a while — the Midea app on your phone occupies that same connection. If the unit answers the first candidates and then goes quiet for all the remaining ones, those later attempts were never meaningfully tested. The tool spaces its attempts out for exactly this reason and points the pattern out when it sees it — but only when the answers really did come first and nothing was answered afterwards; otherwise it stays silent rather than guessing. Wait a few minutes with the app closed before drawing conclusions.
 
 ## Known Midea app/firmware quirks
 

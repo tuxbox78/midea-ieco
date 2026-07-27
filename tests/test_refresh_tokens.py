@@ -17,7 +17,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -142,6 +142,54 @@ class MsmartMissingProbeTests(unittest.TestCase):
             marker = _longest_literal(template)
             # Selbstschutz: eine leere oder zu kurze Marke waere eine Zusicherung,
             # die nicht fehlschlagen KANN - lieber hier auffallen als still passieren.
+            self.assertGreater(len(marker), 10, template)
+            self.assertNotIn(marker, combined)
+
+
+def _run_script_without_msmart(testcase, script, argv):
+    """Faehrt eines der Werkzeuge in einem Unterprozess OHNE msmart.
+
+    Warum nicht einfach die Umgebung nutzen: MsmartMissingProbeTests (hier) und
+    OverviewWithoutMsmartTests (test_ensure.py) ueberspringen sich selbst,
+    sobald msmart importierbar ist - auf jedem Entwicklerrechner mit
+    installierter Bibliothek sind diese Pfade damit unbewacht, und im CI haengt
+    ihre Ausfuehrung an einer Zufaelligkeit der Umgebung. 'sys.modules[...] =
+    None' laesst 'import msmart' zuverlaessig mit ImportError scheitern, also
+    laeuft der Pfad ueberall.
+
+    Die Skripte werden in ein leeres Verzeichnis kopiert: CONFIG_PATH haengt am
+    Modulverzeichnis, der Lauf sieht dort also garantiert keine echte
+    devices.json."""
+    work = tempfile.mkdtemp()
+    testcase.addCleanup(lambda: shutil.rmtree(work, ignore_errors=True))
+    for name in ("midea_ieco_ensure.py", "midea_refresh_tokens.py",
+                 "midea_i18n.py"):
+        shutil.copy(REPO_DIR / name, work)
+    target = os.path.join(work, script)
+    code = (
+        "import runpy, sys\n"
+        f"sys.path.insert(0, {work!r})\n"
+        "sys.modules['msmart'] = None\n"
+        f"sys.argv = {argv!r}\n"
+        f"runpy.run_path({target!r}, run_name='__main__')\n"
+    )
+    return subprocess.run([sys.executable, "-c", code], capture_output=True,
+                          text=True, cwd=work,
+                          env={**os.environ, "MIDEA_IECO_LANG": "en"})
+
+
+class RefreshWithoutMsmartTests(unittest.TestCase):
+    """Ohne msmart bricht der Token-Abruf ab, BEVOR Cloud-Kontakt entsteht -
+    ueberall pruefbar, nicht nur wo msmart zufaellig fehlt."""
+
+    def test_refresh_exits_1_before_any_cloud_contact(self):
+        result = _run_script_without_msmart(
+            self, "midea_refresh_tokens.py", ["midea_refresh_tokens.py", "--all"])
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("msmart-ng", result.stderr)
+        combined = result.stdout + result.stderr
+        for template in mrt._MESSAGES["dev_fetching"]:
+            marker = _longest_literal(template)
             self.assertGreater(len(marker), 10, template)
             self.assertNotIn(marker, combined)
 
@@ -570,10 +618,15 @@ class ResolveLangTests(unittest.TestCase):
             with self.subTest(env=env):
                 self.assertEqual(self._resolve(**env), "de")
 
-    def test_denmark_locale_is_not_mistaken_for_german(self):
-        # Gegenprobe zum Praefix-Vergleich: 'da_DK' beginnt nicht mit 'de',
-        # darf also nicht als Deutsch durchgehen.
-        self.assertEqual(self._resolve(LANG="da_DK.UTF-8"), "en")
+    def test_locales_that_are_not_german_stay_english(self):
+        # 'da_DK' faengt nur den Fall ab, dass der Vergleich ganz entfaellt. Die
+        # eigentliche Gefahr ist eine Aufweitung der Praefixliste auf ein blosses
+        # 'de' am Wortanfang - dagegen braucht es einen Wert, der MIT 'de'
+        # beginnt und trotzdem kein Deutsch ist. Genau das begruendet der
+        # Modulkommentar von midea_i18n.py, ohne dass es geprueft war.
+        for value in ("da_DK.UTF-8", "default", "dev_DEV", "des_ES"):
+            with self.subTest(value=value):
+                self.assertEqual(self._resolve(LANG=value), "en")
 
 
 class CatalogTests(unittest.TestCase):
@@ -664,15 +717,16 @@ class CatalogTests(unittest.TestCase):
                 f"nur {checked} t()-Aufrufe in {path.name} erkannt - die Analyse "
                 f"greift offenbar nicht mehr")
 
-    def test_multi_placeholder_call_sites_pass_arguments_in_a_stable_order(self):
-        """Bei mehreren %s zaehlt nicht nur die ANZAHL, sondern die Reihenfolge.
+    def test_multi_placeholder_templates_put_their_values_in_place(self):
+        """Die VORLAGEN setzen ihre Werte an der erwarteten Stelle ein.
 
-        Ein vertauschtes Paar ergibt eine syntaktisch einwandfreie, inhaltlich
-        unsinnige Meldung ('did not respond within 1.2.3.4s (is the device at 60
-        reachable?)') und wuerde von einer reinen Aritaetspruefung nicht bemerkt.
-        Statisch laesst sich die Semantik nicht pruefen - deshalb wird hier
-        stichprobenartig gerendert und auf die Plausibilitaet der EINGESETZTEN
-        Werte geschaut."""
+        Achtung, was dieser Test NICHT leistet: er ruft t() mit von Hand
+        uebergebenen Argumenten auf und kann daher nur fehlschlagen, wenn sich
+        die Katalogvorlage aendert - ueber die Aufrufstellen im Code sagt er
+        nichts. Sein frueherer Name behauptete genau das ('..._call_sites_...')
+        und liess die Luecke wie geschlossen aussehen. Die Aufrufstellen selbst
+        pruefen RenderedMessageOrderTests (hier) und die gleichnamige Klasse in
+        test_ensure.py, indem sie die tatsaechlich ERZEUGTE Meldung ansehen."""
         rendered = mrt.t("err_discover_timeout", mrt.SUBPROCESS_TIMEOUT, "1.2.3.4")
         # Die Sekundenzahl gehoert an die Zeitangabe, die IP an den Geraeteteil.
         self.assertIn(f"{mrt.SUBPROCESS_TIMEOUT}s", rendered)
@@ -760,28 +814,6 @@ class ClassifyVerifyFailureTests(_LangMixin):
         # Ohne Meldungstext bleibt es korrekt unser eigener Deckel.
         self.assertEqual(mrt.classify_verify_failure(TimeoutError())[0], mrt.VERIFY_CAP)
 
-    def test_unreachable_text_claims_no_specific_cause(self):
-        """'Connect failed.' buendelt in msmart-ng VIELE Ursachen - der Text darf
-        daher keine einzelne davon behaupten.
-
-        msmart-ng wirft diese Meldung fuer JEDEN OSError aus create_connection:
-        abgewiesene Verbindung, DNS-Fehler, nicht erreichbares Netz, nicht
-        erreichbarer Host. Eine Formulierung wie 'die Verbindung wurde abgewiesen,
-        es hat also etwas geantwortet' war real fuer die Mehrzahl der Faelle falsch
-        (mit DNS-Fehler und ENETUNREACH nachgestellt). Dieser Test haelt die
-        Neutralitaet fest, nicht den genauen Wortlaut."""
-        forbidden = {
-            "en": ("refused", "answered", "responded", "listening"),
-            "de": ("abgewiesen", "geantwortet", "lauscht"),
-        }
-        for lang, words in forbidden.items():
-            with mock.patch.dict(os.environ, {"MIDEA_IECO_LANG": lang}):
-                text = mrt.t("diag_unreachable").lower()
-            for word in words:
-                self.assertNotIn(word, text,
-                                 f"[{lang}] '{word}' behauptet eine Ursache, die "
-                                 f"'Connect failed.' nicht hergibt: {text}")
-
     def test_wrong_key_is_named_instead_of_falling_through(self):
         # msmart-ngs praeziseste Aussage: der Handshake kam zurueck, liess sich
         # aber nicht entschluesseln -> Geraet erreichbar, Token angenommen, KEY
@@ -823,8 +855,120 @@ class ClassifyVerifyFailureTests(_LangMixin):
         self.assertEqual(code, mrt.VERIFY_OTHER)
         self.assertTrue(text.strip())
 
+    def test_a_whitespace_only_message_falls_back_to_the_no_detail_text(self):
+        # Ohne das .strip() in classify_verify_failure gilt "   " als Inhalt:
+        # der Nutzer bekaeme "AuthenticationError:" mit einer Handvoll
+        # Leerzeichen dahinter statt der Angabe, dass es keine naehere Auskunft
+        # gibt. Der bestehende Leerstring-Test sieht das nicht.
+        code, text = self._classify("   \n  ")
+        self.assertEqual(code, mrt.VERIFY_OTHER)
+        self.assertIn(mrt.t("diag_no_detail"), text)
+
     def test_marker_match_is_case_insensitive(self):
         self.assertEqual(self._classify("ERROR PACKET RECEIVED.")[0], mrt.VERIFY_REJECTED)
+
+
+# Woerter, die eine BESTIMMTE Ursache behaupten. msmart-ng wirft 'Connect
+# failed.' fuer JEDEN OSError aus create_connection (lan.py): abgewiesene
+# Verbindung, DNS-Fehler, nicht erreichbares Netz, nicht erreichbarer Host -
+# real nachgestellt mit DNS-Fehler und ENETUNREACH. Der Text darf daher keine
+# einzelne davon benennen.
+_CAUSE_CLAIM_WORDS = {
+    "en": ("refused", "answered", "responded", "listening", "switched off",
+           "unplugged", "firewall", "wrong ip"),
+    "de": ("abgewiesen", "geantwortet", "lauscht", "ausgeschaltet",
+           "firewall", "falsche ip"),
+}
+
+# Woerter, die den Text OFFEN halten muessen: er soll die zu pruefenden
+# Moeglichkeiten nebeneinander nennen, statt sich fuer eine zu entscheiden.
+# Ohne diese Haelfte waere die Pruefung eine blosse Sperrliste - ein beliebiger
+# neuer Falschtext ohne die verbotenen Woerter kaeme glatt durch.
+_OPEN_QUESTION_WORDS = {
+    "en": ("address", "port"),
+    "de": ("adresse", "port"),
+}
+
+
+def _cause_claim_problems(text: str, lang: str) -> list[str]:
+    """Alle Gruende, aus denen ``text`` als Ursachenbehauptung durchgeht."""
+    problems = []
+    low = text.lower()
+    for word in _CAUSE_CLAIM_WORDS[lang]:
+        if word in low:
+            problems.append(f"behauptet '{word}'")
+    for word in _OPEN_QUESTION_WORDS[lang]:
+        if word not in low:
+            problems.append(f"nennt '{word}' nicht")
+    return problems
+
+
+class UnreachableNeutralityTests(unittest.TestCase):
+    """Der 'keine Verbindung'-Text darf keine einzelne Ursache behaupten.
+
+    Die frueherer Fassung dieses Tests war eine reine SPERRLISTE und damit
+    wirkungslos: ein voellig neuer Falschtext ('the unit is switched off -
+    nothing is there at that address') bestand ihn anstandslos, und das Leeren
+    der Wortliste ebenfalls - nichts sicherte die Liste selbst ab. Hier wird
+    daher in beide Richtungen geprueft: der Katalogtext muss sauber sein, UND
+    die Pruefung muss bekannte Falschtexte tatsaechlich zurueckweisen."""
+
+    # Jeder dieser Texte MUSS beanstandet werden. Der dritte je Sprache
+    # enthaelt bewusst kein einziges verbotenes Wort - er faellt nur ueber die
+    # fehlende Offenheit auf und haelt damit diese Haelfte der Pruefung wach.
+    BAD_TEXTS = {
+        "en": ("connection was refused - something answered on that port",
+               "the unit is switched off - nothing is there at that address",
+               "nothing is there at that address"),
+        "de": ("die Verbindung wurde abgewiesen, es hat also etwas geantwortet",
+               "die Anlage ist ausgeschaltet - unter der Adresse ist nichts",
+               "unter der Adresse ist nichts"),
+    }
+
+    def test_the_catalog_text_is_neutral_in_both_languages(self):
+        for lang in ("en", "de"):
+            with self.subTest(lang=lang), \
+                    mock.patch.dict(os.environ, {"MIDEA_IECO_LANG": lang}):
+                text = mrt.t("diag_unreachable")
+                self.assertEqual(_cause_claim_problems(text, lang), [], text)
+
+    def test_the_check_rejects_known_wrong_texts(self):
+        for lang, texts in self.BAD_TEXTS.items():
+            for text in texts:
+                with self.subTest(lang=lang, text=text):
+                    self.assertNotEqual(
+                        _cause_claim_problems(text, lang), [],
+                        f"[{lang}] Falschtext wurde nicht beanstandet: {text}")
+
+    def test_the_word_lists_themselves_are_intact(self):
+        # Selbstschutz: leert jemand die Listen, prueft oben nichts mehr - und
+        # genau das ueberlebte bisher unbemerkt.
+        for lang in ("en", "de"):
+            with self.subTest(lang=lang):
+                self.assertGreaterEqual(len(_CAUSE_CLAIM_WORDS[lang]), 4)
+                self.assertGreaterEqual(len(_OPEN_QUESTION_WORDS[lang]), 2)
+        # Die beiden Woerter, um die es historisch ging, muessen drin bleiben.
+        self.assertIn("refused", _CAUSE_CLAIM_WORDS["en"])
+        self.assertIn("answered", _CAUSE_CLAIM_WORDS["en"])
+        self.assertIn("abgewiesen", _CAUSE_CLAIM_WORDS["de"])
+        self.assertIn("geantwortet", _CAUSE_CLAIM_WORDS["de"])
+
+    def test_the_timeout_text_offers_alternatives_instead_of_one_cause(self):
+        """Der Zeitueberschreitungs-Text DARF Ursachen nennen - aber mehrere.
+
+        'Connect timeout.' heisst 'unter der Adresse hat niemand geantwortet';
+        das laesst mehrere Erklaerungen zu, und der Text nennt sie bewusst
+        nebeneinander. Genau deshalb faellt er nicht unter die Neutralitaets-
+        pruefung oben - wohl aber unter die Auflage, sich nicht auf eine
+        einzelne festzulegen."""
+        cases = {"en": (" or ", "IP", "firewall"),
+                 "de": (" oder ", "IP", "Firewall")}
+        for lang, parts in cases.items():
+            with self.subTest(lang=lang), \
+                    mock.patch.dict(os.environ, {"MIDEA_IECO_LANG": lang}):
+                text = mrt.t("diag_unreachable_timeout")
+                for part in parts:
+                    self.assertIn(part, text)
 
 
 class ClassifyVerifyFailureGermanTests(ClassifyVerifyFailureTests):
@@ -936,6 +1080,118 @@ class MixedHintOrderTests(_LangMixin):
     def test_unclassified_companion_yields_nothing(self):
         # 'other' gehoert nicht zu den Verstummens-Codes -> nichts behaupten.
         self.assertIsNone(mrt.summarize_failure_hint([self.R, mrt.VERIFY_OTHER]))
+
+
+class HintTruthTableTests(_LangMixin):
+    """Punktweise Festlegung der Hinweis-Semantik, abgeleitet aus einer
+    Wahrheitstabelle ueber ALLE Code-Folgen bis Laenge 4 (2801 Stueck).
+
+    Jeder Fall hier ist ein Punkt, an dem sich zwei plausible Fassungen der
+    Funktion unterscheiden - anders gesagt: jeder faengt eine Mutation, die
+    zuvor ueberlebt hat. Geprueft wird der KATALOG-SCHLUESSEL des Hinweises und
+    nicht nur 'irgendein Hinweis', damit eine Verwechslung zweier Hinweise
+    ebenfalls auffaellt."""
+
+    R = mrt.VERIFY_REJECTED
+    K = mrt.VERIFY_BAD_KEY
+    S = mrt.VERIFY_SILENT
+    RES = mrt.VERIFY_RESET
+    U = mrt.VERIFY_UNREACHABLE
+    C = mrt.VERIFY_CAP
+    O = mrt.VERIFY_OTHER  # noqa: E741  (Kuerzel wie die uebrigen Codes)
+
+    # Sprachabhaengige Marke fuer 'die Antwort liess sich nicht entschluesseln'.
+    DECRYPT_MARKER = "decrypt"
+
+    _HINT_KEYS = ("hint_all_rejected", "hint_all_bad_key", "hint_all_answered",
+                  "hint_all_silent", "hint_all_unreachable", "hint_all_reset",
+                  "hint_mixed")
+
+    def _label(self, codes):
+        """Katalog-Schluessel des erzeugten Hinweises, oder None."""
+        hint = mrt.summarize_failure_hint(list(codes))
+        if hint is None:
+            return None
+        for key in self._HINT_KEYS:
+            if hint == mrt.t(key):
+                return key
+        self.fail(f"unbekannter Hinweis fuer {codes}: {hint!r}")
+
+    def test_pure_classes_keep_their_own_hint(self):
+        for codes, key in (((self.R, self.R), "hint_all_rejected"),
+                           ((self.K, self.K), "hint_all_bad_key"),
+                           ((self.S, self.S), "hint_all_silent"),
+                           ((self.U, self.U), "hint_all_unreachable"),
+                           ((self.RES, self.RES), "hint_all_reset")):
+            with self.subTest(codes=codes):
+                self.assertEqual(self._label(codes), key)
+
+    def test_answered_mixture_points_at_stale_credentials(self):
+        """[abgelehnt, Key falsch]: das Geraet hat JEDEN Versuch beantwortet.
+
+        Der klarste Befund, den dieses Werkzeug ueberhaupt liefern kann - und
+        bis hierher der einzige, der ganz ohne Hinweis blieb, weil er keiner der
+        reinen Mengen gleicht."""
+        for codes in ((self.R, self.K), (self.K, self.R),
+                      (self.R, self.R, self.K), (self.K, self.K, self.R)):
+            with self.subTest(codes=codes):
+                self.assertEqual(self._label(codes), "hint_all_answered")
+
+    def test_a_wrong_key_counts_as_an_answer_for_the_mixed_hint(self):
+        """Der gemischte Hinweis gilt fuer BEIDE Antwortarten.
+
+        Faellt VERIFY_BAD_KEY aus _ANSWERED_CODES heraus, ist [Key falsch,
+        stumm] wieder hinweislos - und der Kern der letzten Erweiterung damit
+        stillschweigend zurueckgenommen."""
+        self.assertEqual(self._label((self.K, self.S)), "hint_mixed")
+        self.assertEqual(self._label((self.K, self.U)), "hint_mixed")
+
+    def test_the_first_answer_must_precede_the_first_blockade(self):
+        # Die ERSTE Antwort zaehlt, nicht irgendeine: bei [stumm, abgelehnt,
+        # stumm] war die Blockade zuerst da, das Geraet hat also nicht
+        # 'aufgehoert' zu antworten - es hat mittendrin geantwortet.
+        self.assertEqual(self._label((self.S, self.R, self.S)), None)
+        self.assertEqual(self._label((self.K, self.S, self.R, self.S)),
+                         "hint_mixed")
+
+    def test_nothing_answered_may_follow_the_last_answer(self):
+        # Der Text behauptet ein ENDE ('danach nicht mehr'). Bei
+        # [abgelehnt, stumm, abgelehnt] hat Kandidat 3 sehr wohl geantwortet -
+        # eine Pruefung, die nur den Anfang betrachtet, sieht das nicht.
+        self.assertEqual(self._label((self.R, self.S, self.R)), None)
+        self.assertEqual(self._label((self.R, self.S, self.K)), None)
+        # Gegenprobe: endet die Folge blockierend, bleibt der Hinweis richtig -
+        # auch wenn zwischendrin erneut geantwortet wurde.
+        self.assertEqual(self._label((self.R, self.S, self.R, self.S)),
+                         "hint_mixed")
+
+    def test_an_unclassified_code_in_the_tail_keeps_us_quiet(self):
+        # Ueber VERIFY_OTHER ist per Definition nichts bekannt - er kann ein
+        # Verstummen weder belegen noch widerlegen.
+        self.assertEqual(self._label((self.R, self.O, self.S)), None)
+        self.assertEqual(self._label((self.R, self.S, self.O)), None)
+
+    def test_empty_and_unclassifiable_stay_silent(self):
+        self.assertEqual(self._label(()), None)
+        self.assertEqual(self._label((self.O, self.O)), None)
+        self.assertEqual(self._label((self.C, self.C)), None)
+
+    def test_mixed_hint_names_both_kinds_of_answer(self):
+        """Der Text muss zur Menge passen.
+
+        _ANSWERED_CODES umfasst Ablehnung UND nicht entschluesselbare Antwort;
+        eine Formulierung, die nur von einer Ablehnung spricht, behauptet bei
+        [Key falsch, stumm] etwas, das nie geschehen ist."""
+        for key in ("hint_mixed", "hint_all_answered"):
+            with self.subTest(key=key):
+                self.assertIn(self.DECRYPT_MARKER, mrt.t(key).lower())
+
+
+class HintTruthTableGermanTests(HintTruthTableTests):
+    """Dieselbe Tabelle auf Deutsch: die Semantik ist sprachunabhaengig."""
+
+    LANG = "de"
+    DECRYPT_MARKER = "entschluessel"
 
 
 class SummarizeFailureHintGermanTests(SummarizeFailureHintTests):
@@ -1075,12 +1331,18 @@ class _RecordingAC:
 
     instances: list["_RecordingAC"] = []
 
+    # Als KLASSEN-Vorgaben, nicht als Instanzattribute: verify_credentials legt
+    # sein AC-Objekt selbst an, ein Test kommt also nicht an die Instanz heran,
+    # bevor sie benutzt wird. Ueber die Klasse laesst sich das Verhalten per
+    # mock.patch.object trotzdem umstellen.
+    auth_delay = 0.0
+    refresh_delay = 0.0
+
     def __init__(self, *, ip=None, port=None, device_id=None):
         self.init_args = (ip, port, device_id)
         self.auth_args = None
         self.refresh_calls = 0
         self.closed = False
-        self.auth_delay = 0.0
         self.auth_raises = None
         _RecordingAC.instances.append(self)
 
@@ -1093,6 +1355,8 @@ class _RecordingAC:
 
     async def refresh(self):
         self.refresh_calls += 1
+        if self.refresh_delay:
+            await asyncio.sleep(self.refresh_delay)
 
     async def close(self):
         self.closed = True
@@ -1170,6 +1434,290 @@ class VerifyCredentialsBodyTests(_LangMixin):
             await asyncio.sleep(5)
         with mock.patch.object(_RecordingAC, "authenticate", _slow):
             return self._call()
+
+    def test_a_hanging_refresh_is_capped_as_well(self):
+        # Der Deckel um refresh() war ungetestet - nur der um authenticate.
+        # Ohne ihn blockierte ein Geraet, das den Handshake annimmt und dann
+        # verstummt, den gesamten Lauf (im Wochen-Cron unbemerkt).
+        _RecordingAC.instances = []
+        with mock.patch.object(mrt, "VERIFY_TIMEOUT", 0.05), \
+                mock.patch.object(_RecordingAC, "refresh_delay", 0.5):
+            ok, code, _ = self._call()
+        self.assertFalse(ok)
+        self.assertEqual(code, mrt.VERIFY_CAP)
+        # Der Handshake war erfolgreich - nur das Nachlesen haengt.
+        self.assertIsNotNone(_RecordingAC.instances[0].auth_args)
+
+
+class DiscoverRobustnessTests(_LangMixin):
+    """Details, die darueber entscheiden, ob ein echter Fehlschlag lesbar ist -
+    und ob ein haengender discover-Aufruf den Wochen-Cron blockiert."""
+
+    @staticmethod
+    def _ns(rc=0, out="", err=""):
+        return SimpleNamespace(returncode=rc, stdout=out, stderr=err)
+
+    def test_the_subprocess_call_carries_a_timeout(self):
+        # test_timeout_becomes_runtimeerror mockt subprocess.run und wirft
+        # unbedingt - ein FEHLENDES timeout=-Argument sieht dieser Test also
+        # nicht. Hier wird das Argument selbst geprueft.
+        seen = {}
+
+        def fake_run(cmd, **kw):
+            seen.update(kw)
+            return self._ns(out='{"tokenlist": [{"key": "aa", "token": "bb"}]}')
+
+        with mock.patch("midea_refresh_tokens.subprocess.run", side_effect=fake_run):
+            mrt.fetch_candidate_credentials("1.2.3.4")
+        self.assertEqual(seen.get("timeout"), mrt.SUBPROCESS_TIMEOUT)
+
+    def test_the_subprocess_timeout_has_headroom_for_the_cloud(self):
+        # Anker wie bei VERIFY_TIMEOUT, gemessen an midea-local 6.6.1: jeder
+        # Cloud-Request wird bis zu DREIMAL mit je 10s Zeitlimit versucht
+        # (cloud.py: 'for _ in range(3)' um 'ClientTimeout(10)'), und der
+        # Token-Abruf braucht mindestens zwei Requests (Login und Token).
+        self.assertGreaterEqual(mrt.SUBPROCESS_TIMEOUT, 2 * 3 * 10)
+
+    def test_a_signal_killed_discover_counts_as_a_failure(self):
+        # Ein per Signal beendeter Prozess meldet einen NEGATIVEN Rueckgabewert.
+        # Mit '> 0' statt '!= 0' gaelte das als Erfolg - und der Lauf scheiterte
+        # anschliessend an der fehlenden tokenlist, mit irrefuehrender Meldung.
+        with self.assertRaises(RuntimeError) as cm:
+            mrt._parse_discover_output(self._ns(rc=-9, err="killed"))
+        self.assertIn("-9", str(cm.exception))
+
+    def test_the_failure_tail_shows_the_end_of_the_output(self):
+        # Die Debug-Ausgabe ist lang; der FEHLER steht am Ende, das Setup-
+        # Rauschen am Anfang. Mit '[:800]' saehe der Nutzer genau das Rauschen.
+        noisy = "ANFANGSMARKE " + ("setup-rauschen " * 100) + "ECHTER-FEHLER"
+        with self.assertRaises(RuntimeError) as cm:
+            mrt._parse_discover_output(self._ns(rc=1, out=noisy))
+        message = str(cm.exception)
+        self.assertIn("ECHTER-FEHLER", message)
+        self.assertNotIn("ANFANGSMARKE", message)
+
+    def test_the_missing_tokenlist_tail_also_shows_the_end(self):
+        noisy = "ANFANGSMARKE " + ("setup-rauschen " * 100) + "LETZTE-ZEILE"
+        with self.assertRaises(RuntimeError) as cm:
+            mrt._parse_discover_output(self._ns(rc=0, out=noisy))
+        message = str(cm.exception)
+        self.assertIn("LETZTE-ZEILE", message)
+        self.assertNotIn("ANFANGSMARKE", message)
+
+    def test_output_on_stderr_is_evaluated_too(self):
+        # Die --debug-Ausgabe der CLI (und damit die tokenlist) landet auf
+        # stderr. Wertet man nur stdout aus, findet der Abruf nie einen
+        # Kandidaten - bei voellig unauffaelliger Fehlermeldung.
+        matches, _ = mrt._parse_discover_output(
+            self._ns(err='{"tokenlist": [{"key": "aa", "token": "bb"}]}'))
+        self.assertEqual(matches, [("aa", "bb")])
+
+    def test_the_first_reported_appliance_id_is_used(self):
+        # Mehrere Treffer: der erste gehoert zum abgefragten Host. Mit '[-1]'
+        # landete die ID eines anderen Geraets im Eintrag.
+        _, appliance_id = mrt._parse_discover_output(self._ns(
+            out='applianceCodes: 111 ... applianceCodes: 222 ... '
+                '"tokenlist": [{"key": "aa", "token": "bb"}]'))
+        self.assertEqual(appliance_id, "111")
+
+
+class AtomicWriteDetailTests(_ConfigPathMixin):
+    """Die beiden Zusagen von _atomic_write_json, die noch ungeprueft waren."""
+
+    def test_the_data_is_forced_to_disk_before_the_rename(self):
+        # Ohne fsync kann ein Stromausfall zwischen Schreiben und Umbenennen
+        # eine leere devices.json hinterlassen - der Totalverlust aller Tokens.
+        with mock.patch("midea_refresh_tokens.os.fsync") as fsync:
+            mrt.save_config({"devices": []})
+        fsync.assert_called()
+
+    def test_the_temp_file_is_created_in_the_target_directory(self):
+        # Nur im SELBEN Verzeichnis ist os.replace atomar (gleiches Dateisystem).
+        # Ein Wechsel nach /tmp naehme der Funktion genau ihre Zusage.
+        seen = {}
+        real_mkstemp = tempfile.mkstemp
+
+        def spy(*args, **kwargs):
+            seen.update(kwargs)
+            return real_mkstemp(*args, **kwargs)
+
+        with mock.patch("midea_refresh_tokens.tempfile.mkstemp", side_effect=spy):
+            mrt.save_config({"devices": []})
+        self.assertEqual(seen.get("dir"), str(self.path.parent))
+
+
+class UpdateDeviceCallSiteTests(_LangMixin):
+    """Die AUFRUFSTELLE von verify_credentials - die einzige Stelle im Projekt,
+    an der das (key, token)-Paar positional ausgepackt wird.
+
+    Der RUMPF von verify_credentials ist seit der letzten Runde getestet
+    (authenticate(token, key) wird gefangen), die Aufrufstelle war es nicht:
+    vertauschte man dort key und token, blieb die gesamte Suite gruen - waehrend
+    jeder Kandidat fuer jeden Nutzer dauerhaft scheiterte und sich die Tokens nie
+    wieder erneuerten. Deshalb laeuft verify_credentials hier ECHT; ersetzt ist
+    nur das AC-Objekt."""
+
+    def setUp(self):
+        super().setUp()
+        _RecordingAC.instances = []
+        module = sys.modules["msmart.device.AC.device"]
+        original = module.AirConditioner
+        module.AirConditioner = _RecordingAC
+        self.addCleanup(lambda: setattr(module, "AirConditioner", original))
+
+    # Port bewusst NICHT der Default 6444: sonst uebersteht ein hartkodierter
+    # Wert an der Aufrufstelle den Test unbemerkt.
+    DEV = {"name": "W", "ip": "10.0.0.9", "id": 42, "port": 6445}
+
+    def _update(self, dev):
+        with mock.patch.object(mrt, "fetch_candidate_credentials",
+                               lambda host: ([("K_SENTINEL", "T_SENTINEL")], None)), \
+                mock.patch.object(mrt.time, "sleep", lambda s: None), \
+                redirect_stdout(io.StringIO()):
+            return mrt.update_device(dev)
+
+    def test_key_and_token_reach_authenticate_in_the_documented_order(self):
+        dev = dict(self.DEV)
+        self.assertTrue(self._update(dev))
+        self.assertEqual(_RecordingAC.instances[0].auth_args,
+                         ("T_SENTINEL", "K_SENTINEL"))
+
+    def test_the_verified_pair_is_stored_on_the_right_side(self):
+        # Gegenprobe zur Aufrufstelle: ein Tausch, der sich in BEIDEN Richtungen
+        # aufhoebe, waere unsichtbar - also auch die Speicherseite pruefen.
+        dev = dict(self.DEV)
+        self._update(dev)
+        self.assertEqual((dev["key"], dev["token"]), ("K_SENTINEL", "T_SENTINEL"))
+
+    def test_address_port_and_id_of_the_entry_are_used(self):
+        self._update(dict(self.DEV))
+        self.assertEqual(_RecordingAC.instances[0].init_args,
+                         ("10.0.0.9", 6445, 42))
+
+
+class RenderedMessageOrderTests(_LangMixin):
+    """Mehr-Platzhalter-Meldungen an ihren ECHTEN Aufrufstellen.
+
+    Eine Aritaetspruefung sieht nur die ANZAHL der Argumente. Vertauscht man
+    zwei, entsteht eine syntaktisch einwandfreie, inhaltlich unsinnige Meldung -
+    und genau das ueberlebte bislang an neun von zehn Aufrufstellen. Wirksam ist
+    nur das Muster, das die ERZEUGTE Meldung ansieht; die frueher hier stehende
+    Pruefung rief t() mit von Hand uebergebenen Werten auf und konnte deshalb
+    ueber die Aufrufstellen gar nichts aussagen."""
+
+    DEV = {"name": "Wohnzimmer", "ip": "192.168.0.5", "id": 42, "port": 6444}
+
+    def _run_update(self, candidates, results, dev=None, appliance_id=None):
+        out = io.StringIO()
+        with mock.patch.object(mrt, "fetch_candidate_credentials",
+                               lambda host: (candidates, appliance_id)), \
+                mock.patch.object(mrt, "verify_credentials", _fake_verify(results)), \
+                mock.patch.object(mrt.time, "sleep", lambda s: None), \
+                redirect_stdout(out):
+            mrt.update_device(dict(dev) if dev else dict(self.DEV))
+        return out.getvalue()
+
+    def _assert_order(self, text, first, second):
+        self.assertIn(first, text)
+        self.assertIn(second, text)
+        self.assertLess(text.index(first), text.index(second),
+                        f"{first!r} muss vor {second!r} stehen: {text!r}")
+
+    def test_fetching_line_names_the_device_then_the_address(self):
+        out = self._run_update([("k", "t")], [(True, "", "")])
+        self._assert_order(out, "[Wohnzimmer]", "192.168.0.5")
+
+    def test_candidate_counter_reads_index_of_total(self):
+        out = self._run_update(
+            [("k1", "t1"), ("k2", "t2"), ("k3", "t3")],
+            [(False, mrt.VERIFY_SILENT, "A"), (False, mrt.VERIFY_SILENT, "B"),
+             (False, mrt.VERIFY_SILENT, "C")])
+        # Vertauscht ergaebe der erste Kandidat "3/1" statt "1/3".
+        self.assertIn("1/3", out)
+        self.assertIn("3/3", out)
+        self.assertNotIn("3/1", out)
+
+    def test_failed_candidate_puts_the_reason_before_the_try_next_suffix(self):
+        out = self._run_update(
+            [("k1", "t1"), ("k2", "t2")],
+            [(False, mrt.VERIFY_SILENT, "GRUND_EINS"),
+             (False, mrt.VERIFY_SILENT, "GRUND_ZWEI")])
+        self.assertIn(f"GRUND_EINS{mrt.t('dev_try_next')}", out)
+        # Nach dem LETZTEN Kandidaten gibt es kein "versuche naechsten".
+        self._assert_order(out, "GRUND_EINS", "GRUND_ZWEI")
+        self.assertEqual(out.count(mrt.t("dev_try_next")), 1)
+
+    def test_successful_candidate_reports_index_of_total(self):
+        out = self._run_update(
+            [("k1", "t1"), ("k2", "t2"), ("k3", "t3")],
+            [(False, mrt.VERIFY_SILENT, "x"), (True, "", "")])
+        self.assertIn("2/3", out)
+
+    def test_id_mismatch_shows_the_stored_value_before_the_cloud_value(self):
+        # Ein Tausch kehrte die Aussage um und schickte den Nutzer die falsche
+        # ID korrigieren.
+        out = self._run_update([("k", "t")], [(True, "", "")],
+                               dev=dict(self.DEV, id=111), appliance_id="222")
+        self._assert_order(out, "id=111", "id=222")
+
+    def test_total_failure_line_names_the_device_then_the_count(self):
+        out = self._run_update(
+            [("k1", "t1"), ("k2", "t2")],
+            [(False, mrt.VERIFY_SILENT, "x"), (False, mrt.VERIFY_SILENT, "y")])
+        self._assert_order(out, "[Wohnzimmer]", " 2 ")
+
+    def test_hint_line_names_the_device_then_the_hint(self):
+        out = self._run_update(
+            [("k1", "t1"), ("k2", "t2")],
+            [(False, mrt.VERIFY_REJECTED, "x"), (False, mrt.VERIFY_REJECTED, "y")])
+        hint_start = mrt.t("hint_all_rejected")[:30]
+        self._assert_order(out, "[Wohnzimmer] Hint:", hint_start)
+
+    def test_fetch_failure_line_names_the_device_then_the_error(self):
+        out = io.StringIO()
+        with mock.patch.object(mrt, "fetch_candidate_credentials",
+                               side_effect=RuntimeError("FEHLERTEXT")), \
+                redirect_stdout(out):
+            mrt.update_device(dict(self.DEV))
+        self._assert_order(out.getvalue(), "[Wohnzimmer]", "FEHLERTEXT")
+
+    def test_discover_exit_message_shows_the_code_then_the_output(self):
+        # Vertauscht: "exited with code <Ausgabe>. Last output: 3".
+        result = SimpleNamespace(returncode=3, stdout="", stderr="BOOMTAIL")
+        with self.assertRaises(RuntimeError) as cm:
+            mrt._parse_discover_output(result)
+        self._assert_order(str(cm.exception), "3", "BOOMTAIL")
+
+
+class ConfigMessageOrderTests(_ConfigPathMixin):
+    """Dieselbe Pruefung fuer die Meldungen aus load_config und main()."""
+
+    def test_unreadable_config_names_path_then_exception_then_detail(self):
+        self.path.write_bytes(b'{"devices": [{"name": "K\xfcche"}]}')
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            mrt.load_config()
+        text = err.getvalue()
+        self.assertIn(str(self.path), text)
+        self.assertIn("UnicodeDecodeError", text)
+        self.assertLess(text.index(str(self.path)), text.index("UnicodeDecodeError"))
+
+    def test_skipped_entries_line_counts_first_and_names_the_file_second(self):
+        self.path.write_text(json.dumps({"devices": [
+            "oops", 123, {"name": "W", "ip": "1.2.3.4", "id": 1}]}), encoding="utf-8")
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"MIDEA_IECO_LANG": "en"}), \
+                mock.patch.dict(sys.modules, {"msmart": mock.MagicMock()}), \
+                mock.patch.object(mrt, "update_device", lambda dev: True), \
+                mock.patch.object(mrt, "save_config", lambda cfg: None), \
+                mock.patch.object(mrt.sys, "argv", ["x", "--all"]), \
+                redirect_stdout(out):
+            with self.assertRaises(SystemExit):
+                mrt.main()
+        text = out.getvalue()
+        # Vertauscht: "devices.json unexpected entry/entries in 2 skipped".
+        self.assertIn("2 unexpected", text)
+        self.assertLess(text.index("2 unexpected"), text.index("devices.json"))
 
 
 class NoWriteWithoutVerificationTests(_LangMixin):
@@ -1294,6 +1842,83 @@ class SaveConfigIsCalledTests(_ConfigPathMixin):
         saver.assert_not_called()
 
 
+class UpdateDeviceFailureReturnsTests(_LangMixin):
+    """Die drei Fehlerpfade von update_device muessen False liefern.
+
+    ExitCodeTests und SaveConfigIsCalledTests ersetzen update_device
+    vollstaendig durch eine Attrappe: sie sichern die Abbildung des ERGEBNISSES
+    auf den Exit-Code, nie dessen Zustandekommen. 'return False' -> 'return
+    True' ueberlebte hier deshalb an drei Stellen - der Cron-Lauf haette Erfolg
+    gemeldet, obwohl nichts erreicht wurde, und keine Ueberwachung der Welt
+    haette es bemerkt.
+
+    Die benachbarten Fehlerpfade (alle Kandidaten gescheitert) sind laengst
+    abgedeckt - das ist derselbe Zwillingsfall: was gerade bearbeitet wurde, ist
+    abgesichert, der strukturell gleiche Nachbar nicht."""
+
+    def _update(self, dev, **patches):
+        out = io.StringIO()
+        with ExitStack() as es:
+            for name, replacement in patches.items():
+                es.enter_context(mock.patch.object(mrt, name, replacement))
+            es.enter_context(mock.patch.object(mrt.time, "sleep", lambda s: None))
+            es.enter_context(redirect_stdout(out))
+            result = mrt.update_device(dev)
+        return result, out.getvalue()
+
+    def test_missing_ip_is_a_failure(self):
+        result, out = self._update({"name": "W"})
+        self.assertFalse(result)
+        self.assertIn("No IP address", out)
+
+    def test_failed_token_fetch_is_a_failure(self):
+        def _boom(host):
+            raise RuntimeError("cloud down")
+
+        result, out = self._update({"name": "W", "ip": "1.2.3.4", "id": 1},
+                                   fetch_candidate_credentials=_boom)
+        self.assertFalse(result)
+        self.assertIn("cloud down", out)
+
+    def test_missing_device_id_is_a_failure(self):
+        # Kandidaten da, aber weder in devices.json noch von der Cloud eine ID:
+        # ohne ID laesst sich keine Verbindung aufbauen, es darf also kein
+        # Erfolg gemeldet und nichts gespeichert werden.
+        dev = {"name": "W", "ip": "1.2.3.4"}
+        result, out = self._update(
+            dev, fetch_candidate_credentials=lambda host: ([("k", "t")], None))
+        self.assertFalse(result)
+        self.assertIn("No device ID", out)
+        self.assertNotIn("token", dev)
+
+
+class ExitCodeFromTheRealUpdateTests(_ConfigPathMixin):
+    """Exit-Code 2 EINMAL mit der echten update_device statt einer Attrappe.
+
+    Erst diese Kombination belegt, dass ein Geraetefehler tatsaechlich bis zum
+    Exit-Code durchschlaegt: die uebrigen Exit-Code-Tests geben das Ergebnis
+    selbst vor."""
+
+    def test_a_real_device_failure_yields_exit_2(self):
+        self.path.write_text(
+            json.dumps({"devices": [{"name": "W", "ip": "1.2.3.4", "id": 1}]}),
+            encoding="utf-8")
+
+        def _boom(host):
+            raise RuntimeError("cloud down")
+
+        with mock.patch.dict(os.environ, {"MIDEA_IECO_LANG": "en"}), \
+                mock.patch.dict(sys.modules, {"msmart": mock.MagicMock()}), \
+                mock.patch.object(mrt, "fetch_candidate_credentials", _boom), \
+                mock.patch.object(mrt, "save_config", lambda cfg: None), \
+                mock.patch.object(mrt.time, "sleep", lambda s: None), \
+                mock.patch.object(mrt.sys, "argv", ["x", "--all"]), \
+                redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as cm:
+                mrt.main()
+        self.assertEqual(cm.exception.code, 2)
+
+
 class ExitCodeTests(_ConfigPathMixin):
     """Exit-Codes sind die Schnittstelle zu Cron und Monitoring - ein stiller
     Erfolg bei kaputtem Geraet macht jede Ueberwachung wertlos. Sie waren in
@@ -1375,6 +2000,47 @@ class CandidatePacingOrderTests(_LangMixin):
         self.assertEqual(events, ["versuch", "pause", "versuch"])
 
 
+class DevicePacingOrderTests(_ConfigPathMixin):
+    """Zwilling zu CandidatePacingOrderTests: auch die Pause ZWISCHEN GERAETEN
+    muss VOR dem naechsten Zugriff liegen.
+
+    DeviceDelayTests unten zaehlt nur (slept == [DEVICE_DELAY] * 2) - verschiebt
+    man den sleep HINTER den Aufruf, bleibt das gruen, obwohl Geraet 2 dann
+    unmittelbar auf Geraet 1 folgt und die Entzerrung damit wirkungslos ist.
+    Genau dieser Unterschied war fuer die Kandidatenpause bereits geloest; der
+    Zwilling hier blieb zurueck."""
+
+    def _events(self, count):
+        self.path.write_text(json.dumps({"devices": [
+            {"name": f"D{i}", "ip": f"1.2.3.{i}", "id": i} for i in range(count)
+        ]}), encoding="utf-8")
+        events = []
+
+        with mock.patch.dict(os.environ, {"MIDEA_IECO_LANG": "en"}), \
+                mock.patch.dict(sys.modules, {"msmart": mock.MagicMock()}), \
+                mock.patch.object(mrt, "update_device",
+                                  lambda dev: events.append(f"geraet {dev['name']}")
+                                  or True), \
+                mock.patch.object(mrt, "save_config", lambda cfg: None), \
+                mock.patch.object(mrt.time, "sleep",
+                                  lambda s: events.append(f"pause {s}")), \
+                mock.patch.object(mrt.sys, "argv", ["x", "--all"]), \
+                redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                mrt.main()
+        return events
+
+    def test_the_pause_sits_between_two_devices(self):
+        pause = f"pause {mrt.DEVICE_DELAY}"
+        self.assertEqual(self._events(3),
+                         ["geraet D0", pause, "geraet D1", pause, "geraet D2"])
+
+    def test_no_pause_before_the_first_or_after_the_last(self):
+        events = self._events(2)
+        self.assertEqual(events[0], "geraet D0")
+        self.assertEqual(events[-1], "geraet D1")
+
+
 class DeviceDelayTests(_ConfigPathMixin):
     """Die Pause ZWISCHEN GERAETEN (DEVICE_DELAY) war bisher voellig ungetestet -
     sie liess sich ersatzlos entfernen, ohne dass die Suite es bemerkt haette."""
@@ -1405,6 +2071,88 @@ class DeviceDelayTests(_ConfigPathMixin):
         code, slept = self._run_main(1)
         self.assertEqual(code, 0)
         self.assertEqual(slept, [])
+
+
+class ConfigPathAnchorTests(unittest.TestCase):
+    """devices.json wird am MODULVERZEICHNIS aufgehaengt, nicht am cwd.
+
+    Beide Werkzeuge laufen aus Cron und aus dem Wrapper heraus mit voellig
+    beliebigem Arbeitsverzeichnis. Ein relativer Pfad liesse den Cron-Lauf eine
+    leere Konfiguration lesen - und im Fall des Token-Abrufs sogar eine ZWEITE
+    devices.json irgendwo anlegen, waehrend die echte veraltet."""
+
+    def test_both_tools_anchor_the_config_at_their_own_directory(self):
+        for module in (mrt, mie):
+            with self.subTest(module=module.__name__):
+                # Die Mixins pinnen CONFIG_PATH auf ein Temp-Verzeichnis; hier
+                # zaehlt der Wert aus dem Quelltext, also der beim Import.
+                path = Path(module.__file__).resolve().parent / "devices.json"
+                self.assertTrue(path.is_absolute())
+                self.assertEqual(
+                    (REPO_DIR / "devices.json").resolve(), path,
+                    f"{module.__name__}: CONFIG_PATH muss am Modulverzeichnis haengen")
+
+    def test_the_config_path_constant_itself_is_absolute(self):
+        # Gegenprobe auf die Konstante selbst, ohne den Umweg ueber __file__.
+        for source in ("midea_refresh_tokens.py", "midea_ieco_ensure.py"):
+            with self.subTest(source=source):
+                text = (REPO_DIR / source).read_text(encoding="utf-8")
+                self.assertIn('CONFIG_PATH = Path(__file__).parent / "devices.json"',
+                              text)
+
+
+class NewDeviceAndInputTests(_ConfigPathMixin):
+    """Kleinere, aber verifizierte Luecken rund um main() und die Extraktion."""
+
+    def test_the_host_argument_lands_in_the_new_entry(self):
+        # Ohne --host-Uebernahme entstuende ein Eintrag ohne IP - update_device
+        # braeche sofort ab, und der Nutzer saehe nicht, warum.
+        self.path.write_text('{"devices": []}', encoding="utf-8")
+        seen = []
+        with mock.patch.dict(os.environ, {"MIDEA_IECO_LANG": "en"}), \
+                mock.patch.dict(sys.modules, {"msmart": mock.MagicMock()}), \
+                mock.patch.object(mrt, "update_device",
+                                  lambda dev: seen.append(dict(dev)) or True), \
+                mock.patch.object(mrt, "save_config", lambda cfg: None), \
+                mock.patch.object(mrt.sys, "argv",
+                                  ["x", "--name", "Neu", "--host", "9.9.9.9"]), \
+                redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as cm:
+                mrt.main()
+        self.assertEqual(cm.exception.code, 0)
+        self.assertEqual(seen[0]["ip"], "9.9.9.9")
+        self.assertEqual(seen[0]["name"], "Neu")
+
+    def test_calling_without_a_target_is_a_usage_error(self):
+        # Die argparse-Gruppe ist required=True: ohne --all/--name soll das
+        # Werkzeug NICHT stillschweigend nichts tun, sondern die Nutzung zeigen.
+        result = subprocess.run(
+            [sys.executable, str(REPO_DIR / "midea_refresh_tokens.py")],
+            capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("usage", (result.stdout + result.stderr).lower())
+
+    def test_a_non_hex_key_is_not_accepted_as_a_candidate(self):
+        # key/token sind Hex-Strings. Eine laxere Regex uebernaehme Platzhalter
+        # wie "null" aus der Cloud-Antwort und liefe in eine Verifikation, die
+        # nur scheitern kann.
+        self.assertEqual(mrt.extract_token_key_pairs(
+            '"tokenlist": [{"key": "zzzz", "token": "aabb"}]'), [])
+        self.assertEqual(mrt.extract_token_key_pairs(
+            '"tokenlist": [{"key": "aabb", "token": "nono"}]'), [])
+
+    def test_an_id_mismatch_never_overwrites_the_stored_value(self):
+        # Die Meldung sagt "Existing value NOT overwritten" - das muss auch
+        # stimmen: eine falsche ID macht das Geraet dauerhaft unerreichbar.
+        dev = {"name": "W", "ip": "1.2.3.4", "id": 111}
+        with mock.patch.object(mrt, "fetch_candidate_credentials",
+                               lambda host: ([("k", "t")], "222")), \
+                mock.patch.object(mrt, "verify_credentials",
+                                  _fake_verify([(True, "", "")])), \
+                mock.patch.object(mrt.time, "sleep", lambda s: None), \
+                redirect_stdout(io.StringIO()):
+            mrt.update_device(dev)
+        self.assertEqual(dev["id"], 111)
 
 
 class VerifyTimeoutHeadroomTests(unittest.TestCase):

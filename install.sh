@@ -516,6 +516,52 @@ shell_quote_for_cron() {
     printf '%s' "${s//%/\\%}"   # unescaptes % wuerde cron zu Newline machen
 }
 
+# Marker, an dem bereits eingetragene midea-ieco-Cron-Jobs wiedererkannt werden
+# (Idempotenz) und den der Nutzer leicht wiederfindet bzw. entfernt. Bewusst hier
+# bei den uebrigen Cron-Helfern statt erst im Cron-Abschnitt: die Sprachpruefung
+# direkt darunter braucht ihn ebenfalls, und sie laeuft frueher.
+CRON_MARKER="# midea-ieco-managed"
+
+# Eine EIGENSTAENDIGE Env-Zeile in der Crontab (MIDEA_IECO_LANG=de) gilt fuer
+# alle darunter stehenden Jobs - das ist der uebliche Weg, eine Variable fuer
+# saemtliche Cron-Jobs zu setzen, und cron wertet sie selbst aus. Wer das getan
+# hat, braucht keinen Hinweis, auch wenn die Kommandozeilen selbst nichts setzen.
+# Eine auskommentierte Zeile zaehlt nicht.
+cron_sets_lang_globally() {   # $1 = bestehende Crontab
+    printf '%s\n' "$1" | grep -qE '^[[:space:]]*MIDEA_IECO_LANG[[:space:]]*='
+}
+
+# Prueft die verwalteten Zeilen EINES Werkzeugs (erkannt am Skriptnamen $2):
+# fehlt dort die Sprachvariable, laeuft der Job ohne Locale und protokolliert
+# damit auf Englisch. Bewusst je Werkzeug-Zeile statt ueber die ganze Crontab -
+# ein zeilenuebergreifendes grep meldete "alles in Ordnung", sobald EINE der
+# beiden Zeilen migriert war, und liess die andere unbemerkt zurueck. Die
+# Logrotate-Zeile enthaelt keinen Skriptnamen und faellt hier korrekt heraus:
+# sie ruft kein Werkzeug auf und braucht folglich keine Sprache.
+cron_tool_line_needs_lang() {   # $1 = bestehende Crontab, $2 = Skriptname
+    printf '%s\n' "$1" | grep -F "$CRON_MARKER" | grep -F "$2" \
+        | grep -qv 'MIDEA_IECO_LANG='
+}
+
+# Weist auf verwaltete Cron-Zeilen ohne Sprachvariable hin - und zeigt GENAU die
+# betroffenen Zeilen in korrigierter Fassung, nicht pauschal beide. Die Crontab
+# selbst wird bewusst NICHT umgeschrieben: sie gehoert dem Nutzer, und '--update'
+# sagt ausdruecklich zu, sie nicht anzufassen.
+print_cron_lang_hint() {   # $1 = bestehende Crontab
+    if cron_sets_lang_globally "$1"; then
+        return 0
+    fi
+    local needs_ieco=0 needs_refresh=0
+    if cron_tool_line_needs_lang "$1" "midea_ieco_ensure.py"; then needs_ieco=1; fi
+    if cron_tool_line_needs_lang "$1" "midea_refresh_tokens.py"; then needs_refresh=1; fi
+    if [[ "$needs_ieco" -eq 0 && "$needs_refresh" -eq 0 ]]; then
+        return 0
+    fi
+    warn "$(t cron_lang_missing "$LANG_CHOICE")"
+    if [[ "$needs_ieco" -eq 1 ]]; then echo "$CRON_LINE_IECO"; fi
+    if [[ "$needs_refresh" -eq 1 ]]; then echo "$CRON_LINE_REFRESH"; fi
+}
+
 # Prueft einen Geraetenamen. Rueckgabe 0 = gueltig; sonst 1 mit einem
 # Ablehnungsgrund auf stderr. Abgelehnt werden: leer, fuehrendes '-'
 # (sonst als Option missdeutet), die reservierten Woerter 'all' (alle
@@ -1082,6 +1128,29 @@ cd "$INSTALL_DIR"
 setup_venv_and_deps
 
 # =============================================================================
+# 5a. Die drei verwalteten Cron-Zeilen bauen
+# =============================================================================
+# Bewusst HIER und nicht erst im Cron-Abschnitt (12): der konfig-sichere Re-Run
+# unten verlaesst das Skript vorher per 'exit 0', soll aber denselben Hinweis auf
+# Cron-Zeilen ohne Sprachvariable geben koennen - und dafuer dieselben Zeilen
+# zeigen. Nur EINE Quelle fuer diese drei Zeilen.
+#
+# Pfad cron-sicher quoten (Leerzeichen/Sonderzeichen/%); dieselbe gequotete Form
+# speist Anzeige, Hinweis und den crontab-Eintrag.
+IDQ="$(shell_quote_for_cron "$INSTALL_DIR")"
+# Sprachwahl in die Cron-Zeile schreiben: cron laeuft praktisch immer OHNE
+# gesetzte Locale, die Werkzeuge fielen dort also auf ihren englischen Default
+# zurueck - ein deutscher Nutzer haette nach der Einrichtung stillschweigend
+# englische Logs. Ein Wert ist hier gefahrlos einsetzbar, weil resolve_lang
+# ausschliesslich 'de' oder 'en' zurueckgibt (siehe dessen case-Verzweigung),
+# also weder Leerzeichen noch Sonderzeichen enthalten kann.
+CRON_LINE_IECO="*/20 * * * * cd $IDQ && MIDEA_IECO_LANG=$LANG_CHOICE venv/bin/python3 midea_ieco_ensure.py all --only-if-on >> $IDQ/ieco.log 2>&1 $CRON_MARKER"
+CRON_LINE_REFRESH="0 3 * * 0 cd $IDQ && MIDEA_IECO_LANG=$LANG_CHOICE venv/bin/python3 midea_refresh_tokens.py --all >> $IDQ/refresh.log 2>&1 $CRON_MARKER"
+# truncate akzeptiert mehrere Dateioperanden (GNU wie BSD/macOS) - ein Lauf
+# leert beide Logs, statt refresh.log unbegrenzt wachsen zu lassen.
+CRON_LINE_LOGROTATE="0 0 1 * * truncate -s 0 $IDQ/ieco.log $IDQ/refresh.log $CRON_MARKER"
+
+# =============================================================================
 # 5b. Konfig-sicherer Re-Run
 # =============================================================================
 # Bereits eingerichtet + kein --reconfigure -> NUR Wrapper erneuern und beenden,
@@ -1096,6 +1165,14 @@ if [[ "$RECONFIGURE" -eq 0 ]] && is_already_configured; then
     info "$(t already_configured)"
     info "$(t already_cfg_update)"
     info "$(t already_cfg_reconfigure)"
+    # Der Re-Run auf einem bereits eingerichteten System (typischerweise erneutes
+    # curl|bash) ist der haeufigste Weg zurueck in den Installer - und er erreicht
+    # den Cron-Abschnitt unten nie. Ohne diesen Aufruf war der Hinweis auf
+    # Cron-Zeilen ohne Sprachvariable praktisch nur ueber '--reconfigure' samt
+    # bejahter Cron-Frage erreichbar, also fast nie.
+    if command -v crontab &>/dev/null; then
+        print_cron_lang_hint "$(crontab -l 2>/dev/null || true)"
+    fi
     hint_obsolete_credentials
     exit 0
 fi
@@ -1319,22 +1396,8 @@ deactivate 2>/dev/null || true
 # =============================================================================
 # 12. Cron-Job-Vorschlag (idempotent - keine Duplikate bei erneutem Lauf)
 # =============================================================================
-CRON_MARKER="# midea-ieco-managed"
-# Pfad cron-sicher quoten (Leerzeichen/Sonderzeichen/%); dieselbe gequotete
-# Form speist sowohl die Anzeige als auch den crontab-Eintrag.
-IDQ="$(shell_quote_for_cron "$INSTALL_DIR")"
-# Sprachwahl in die Cron-Zeile schreiben: cron laeuft praktisch immer OHNE
-# gesetzte Locale, die Werkzeuge fielen dort also auf ihren englischen Default
-# zurueck - ein deutscher Nutzer haette nach der Einrichtung stillschweigend
-# englische Logs. Ein Wert ist hier gefahrlos einsetzbar, weil resolve_lang
-# ausschliesslich 'de' oder 'en' zurueckgibt (siehe dessen case-Verzweigung),
-# also weder Leerzeichen noch Sonderzeichen enthalten kann.
-CRON_LINE_IECO="*/20 * * * * cd $IDQ && MIDEA_IECO_LANG=$LANG_CHOICE venv/bin/python3 midea_ieco_ensure.py all --only-if-on >> $IDQ/ieco.log 2>&1 $CRON_MARKER"
-CRON_LINE_REFRESH="0 3 * * 0 cd $IDQ && MIDEA_IECO_LANG=$LANG_CHOICE venv/bin/python3 midea_refresh_tokens.py --all >> $IDQ/refresh.log 2>&1 $CRON_MARKER"
-# truncate akzeptiert mehrere Dateioperanden (GNU wie BSD/macOS) - ein Lauf
-# leert beide Logs, statt refresh.log unbegrenzt wachsen zu lassen.
-CRON_LINE_LOGROTATE="0 0 1 * * truncate -s 0 $IDQ/ieco.log $IDQ/refresh.log $CRON_MARKER"
-
+# Die drei Zeilen selbst stehen in Abschnitt 5a - sie werden auch vom
+# Re-Run-Zweig gebraucht, der hier gar nicht mehr ankommt.
 echo ""
 echo -e "${YELLOW}--- $(t hdr_cron) ---${NC}"
 echo ""
@@ -1355,11 +1418,7 @@ if command -v crontab &>/dev/null; then
             # (Installationen vor deren Einfuehrung), laufen die Cron-Jobs ohne
             # Locale und damit auf Englisch. Darauf wird hingewiesen, samt der
             # fertigen Zeile zum Uebernehmen - entscheiden soll der Nutzer.
-            if ! echo "$EXISTING_CRON" | grep -F "$CRON_MARKER" | grep -q "MIDEA_IECO_LANG="; then
-                warn "$(t cron_lang_missing "$LANG_CHOICE")"
-                echo "$CRON_LINE_IECO"
-                echo "$CRON_LINE_REFRESH"
-            fi
+            print_cron_lang_hint "$EXISTING_CRON"
         else
             { echo "$EXISTING_CRON"
               echo "$CRON_LINE_IECO"

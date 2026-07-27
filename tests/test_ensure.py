@@ -12,6 +12,7 @@ import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -580,6 +581,39 @@ class OverviewWithoutMsmartTests(unittest.TestCase):
         self.assertIn("Examples:", result.stdout)
 
 
+class OverviewWithoutMsmartAnywhereTests(unittest.TestCase):
+    """Die Uebersicht laeuft ohne msmart - ueberall pruefbar.
+
+    OverviewWithoutMsmartTests oben ueberspringt sich selbst, sobald msmart
+    installiert ist; auf einem Entwicklerrechner ist der Lazy-Import damit
+    unbewacht. Hier wird der Import im Unterprozess gezielt blockiert
+    (sys.modules['msmart'] = None -> ImportError), sodass der Pfad unabhaengig
+    von der Umgebung laeuft. Die Skripte laufen aus einer Kopie in einem leeren
+    Verzeichnis: so sieht der Lauf garantiert keine echte devices.json."""
+
+    def test_list_runs_without_msmart(self):
+        work = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(work, ignore_errors=True))
+        for name in ("midea_ieco_ensure.py", "midea_refresh_tokens.py",
+                     "midea_i18n.py"):
+            shutil.copy(REPO_DIR / name, work)
+        target = os.path.join(work, "midea_ieco_ensure.py")
+        code = (
+            "import runpy, sys\n"
+            f"sys.path.insert(0, {work!r})\n"
+            "sys.modules['msmart'] = None\n"
+            "sys.argv = ['midea_ieco_ensure.py', 'list']\n"
+            f"runpy.run_path({target!r}, run_name='__main__')\n"
+        )
+        result = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                                text=True, cwd=work,
+                                env={**os.environ, "MIDEA_IECO_LANG": "en"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Examples:", result.stdout)
+        # Ohne devices.json bleibt die Uebersicht informativ statt leer.
+        self.assertIn("install.sh", result.stdout)
+
+
 class MalformedEntryDeviceSelectionTests(unittest.TestCase):
     """Auch der Steuerungspfad (all / <name>) - nicht nur die Uebersicht - darf
     an einem Nicht-Objekt-Eintrag in devices.json NICHT mit TypeError abbrechen:
@@ -778,7 +812,11 @@ class ConnectAndRefreshBodyTests(unittest.TestCase):
     authenticate(token, key) haette jede Geraeteverbindung fuer jeden Nutzer
     zerstoert, ohne dass ein Test rot wurde."""
 
-    DEV = {"name": "W", "ip": "1.2.3.4", "port": 6444, "id": 42,
+    # Port bewusst NICHT der Default 6444: mit dem Default liesse sich ein
+    # hartkodiertes 6444 in connect_and_refresh nicht von der korrekten
+    # Auswertung des Eintrags unterscheiden - der Schwestertest im anderen
+    # Modul faengt dieselbe Mutation genau deshalb.
+    DEV = {"name": "W", "ip": "1.2.3.4", "port": 6445, "id": 42,
            "token": "MEIN_TOKEN", "key": "MEIN_KEY"}
 
     def setUp(self):
@@ -801,7 +839,7 @@ class ConnectAndRefreshBodyTests(unittest.TestCase):
 
     def test_device_is_constructed_with_ip_port_and_id(self):
         self._connect()
-        self.assertEqual(_RecordingAC.instances[0].init_args, ("1.2.3.4", 6444, 42))
+        self.assertEqual(_RecordingAC.instances[0].init_args, ("1.2.3.4", 6445, 42))
 
     def test_missing_port_defaults_to_6444(self):
         dev = {k: v for k, v in self.DEV.items() if k != "port"}
@@ -844,6 +882,120 @@ class ConnectAndRefreshBodyTests(unittest.TestCase):
         self.assertEqual(len(_RecordingAC.instances), mie.CONNECT_RETRIES)
 
 
+class RenderedMessageOrderTests(unittest.TestCase):
+    """Mehr-Platzhalter-Meldungen an ihren ECHTEN Aufrufstellen.
+
+    Die AST-Pruefung im Schwestermodul zaehlt nur die ANZAHL der Argumente; ein
+    vertauschtes Paar ergibt eine syntaktisch einwandfreie, inhaltlich falsche
+    Meldung und blieb bislang unbemerkt. Am schwersten wiegt das bei den
+    Statuszeilen: dort meldet ein Tausch den Wert von 'eco' als 'iECO' - eine
+    Falschauskunft in genau der Ausgabe, um die es diesem Projekt geht."""
+
+    def _run(self, items, only_if_on=False):
+        connect = _scripted_connect(items)
+        with ExitStack() as es:
+            es.enter_context(mock.patch.object(mie, "connect_and_refresh", connect))
+            es.enter_context(mock.patch.object(mie.asyncio, "sleep", _anoop))
+            out = es.enter_context(redirect_stdout(io.StringIO()))
+            asyncio.run(mie.ensure_ieco({"name": "Wohnzimmer", "ip": "1", "id": "1"},
+                                        only_if_on=only_if_on))
+        return out.getvalue()
+
+    def _assert_order(self, text, *parts):
+        last = -1
+        for part in parts:
+            self.assertIn(part, text)
+            index = text.index(part)
+            self.assertGreater(index, last,
+                               f"{part!r} steht an der falschen Stelle: {text!r}")
+            last = index
+
+    # Vier unterscheidbare Werte in EINER Zeile: nur so faellt jeder Tausch
+    # benachbarter Argumente auf. Insbesondere ieco=True/eco=False - waeren
+    # beide gleich, bliebe genau der gefaehrlichste Tausch unsichtbar.
+    STATUS_TAIL = "power=True, mode=COOL (2), ieco=True, eco=False"
+
+    def test_status_before_lists_power_mode_ieco_eco_in_that_order(self):
+        out = self._run([FakeDevice(power_state=True, ieco=True)])
+        self.assertIn(f"[Wohnzimmer] Status before action: {self.STATUS_TAIL}", out)
+
+    def test_status_after_lists_power_mode_ieco_eco_in_that_order(self):
+        out = self._run([FakeDevice(power_state=False, ieco=False),
+                         FakeDevice(power_state=True, ieco=True)])
+        self.assertIn(f"[Wohnzimmer] Status after action: {self.STATUS_TAIL}", out)
+
+    def test_capability_failure_names_device_then_type_then_detail(self):
+        out = self._run([FakeDevice(power_state=True,
+                                    caps_raises=TimeoutError("KAPUTT"))])
+        self._assert_order(out, "[Wohnzimmer]", "TimeoutError", "KAPUTT")
+
+    def test_apply_attempt_line_counts_attempt_of_total(self):
+        out = self._run([FakeDevice(power_state=True,
+                                    apply_raises=RuntimeError("APPLYBOOM")),
+                         RuntimeError("stop")])
+        self._assert_order(out, "[Wohnzimmer]", f"1/{mie.ACTION_RETRIES}",
+                           "RuntimeError", "APPLYBOOM")
+
+    def test_reconnect_failure_names_device_then_type_then_detail(self):
+        out = self._run([FakeDevice(power_state=True,
+                                    apply_raises=RuntimeError("x")),
+                         RuntimeError("RECONNECTBOOM")])
+        self._assert_order(out, "[Wohnzimmer]", "RuntimeError", "RECONNECTBOOM")
+
+    def test_mode_guard_names_the_actual_mode_before_the_capable_ones(self):
+        device = FakeDevice(power_state=True, ieco=False)
+        device.operational_mode = _OpMode.FAN_ONLY
+        out = self._run([device])
+        self._assert_order(out, "[Wohnzimmer]", "FAN_ONLY (5)", "COOL or HEAT")
+
+    def test_connection_attempt_line_counts_attempt_of_total(self):
+        # connect_and_refresh laeuft hier ECHT (nur das AC-Objekt ist ein Fake).
+        _RecordingAC.instances = []
+        module = sys.modules["msmart.device.AC.device"]
+        original = module.AirConditioner
+        module.AirConditioner = _RecordingAC
+        self.addCleanup(lambda: setattr(module, "AirConditioner", original))
+        out = io.StringIO()
+        with ExitStack() as es:
+            es.enter_context(mock.patch.object(_RecordingAC, "authenticate",
+                                               side_effect=RuntimeError("CONNBOOM"),
+                                               autospec=True))
+            es.enter_context(mock.patch.object(mie.asyncio, "sleep", _anoop))
+            es.enter_context(redirect_stdout(out))
+            with self.assertRaises(RuntimeError) as cm:
+                asyncio.run(mie.connect_and_refresh(
+                    {"name": "Wohnzimmer", "ip": "1.2.3.4", "port": 6445, "id": 42,
+                     "token": "t", "key": "k"}, retries=2))
+        text = out.getvalue()
+        self._assert_order(text, "[Wohnzimmer]", "1/2", "RuntimeError", "CONNBOOM")
+        # Die Aufgabemeldung nennt erst das Geraet, dann die Versuchszahl.
+        self._assert_order(str(cm.exception), "Wohnzimmer", "2")
+
+
+class IncompleteEntryMessageOrderTests(unittest.TestCase):
+    """main()-Meldung fuer unvollstaendige Eintraege: Name, Datei, Grund."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "devices.json"
+        orig = mie.CONFIG_PATH
+        mie.CONFIG_PATH = self.path
+        self.addCleanup(lambda: setattr(mie, "CONFIG_PATH", orig))
+
+    def test_incomplete_entry_names_device_then_file_then_reason(self):
+        self.path.write_text(json.dumps({"devices": [{"name": "Kueche"}]}),
+                             encoding="utf-8")
+        with mock.patch.object(mie.sys, "argv", ["midea-ieco", "all"]), \
+                redirect_stdout(io.StringIO()) as out:
+            with self.assertRaises(SystemExit):
+                asyncio.run(mie.main())
+        text = out.getvalue()
+        for part, previous in (("devices.json", "'Kueche'"), ("'ip'", "devices.json")):
+            self.assertIn(part, text)
+            self.assertLess(text.index(previous), text.index(part), text)
+
+
 class DeviceGuardTests(unittest.TestCase):
     """online- und supports_ieco-Guard: beide Parameter von FakeDevice existierten,
     wurden aber von KEINEM Test je auf False gesetzt - die Guards waren tot."""
@@ -870,6 +1022,89 @@ class DeviceGuardTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(dev.apply_calls, 0)
         self.assertIn("no iECO capability", out)
+
+
+class EnsureIecoFailureReturnsTests(unittest.TestCase):
+    """Die drei Fehlerpfade von ensure_ieco muessen False liefern.
+
+    ExitCodeTests ersetzt ensure_ieco vollstaendig durch eine Attrappe und
+    sichert damit nur die Abbildung des ERGEBNISSES auf den Exit-Code, nie
+    dessen Zustandekommen. 'return False' -> 'return True' ueberlebte hier
+    deshalb an drei Stellen: der 20-Minuten-Cron meldete Exit 0, obwohl das
+    Geraet nie erreicht wurde. Die Nachbarpfade (offline, keine iECO-Faehigkeit,
+    'weiterhin deaktiviert', apply gescheitert) sind laengst abgedeckt - genau
+    der Zwillingsfall, um den es hier geht."""
+
+    def _run(self, items, only_if_on=False):
+        connect = _scripted_connect(items)
+        with ExitStack() as es:
+            es.enter_context(mock.patch.object(mie, "connect_and_refresh", connect))
+            es.enter_context(mock.patch.object(mie.asyncio, "sleep", _anoop))
+            out = es.enter_context(redirect_stdout(io.StringIO()))
+            result = asyncio.run(mie.ensure_ieco(
+                {"name": "X", "ip": "1", "id": "1"}, only_if_on=only_if_on))
+        return result, out.getvalue()
+
+    def test_connection_failure_is_a_failure(self):
+        result, out = self._run([RuntimeError("nicht erreichbar")])
+        self.assertFalse(result)
+        self.assertIn("nicht erreichbar", out)
+
+    def test_capability_failure_is_a_failure(self):
+        # Der ERSTE get_capabilities()-Aufruf (nicht der im Reconnect-Zweig):
+        # ohne Capabilities ist der wahre iECO-Zustand unbekannt, ein 'OK' waere
+        # geraten.
+        device = FakeDevice(power_state=True, caps_raises=TimeoutError("caps"))
+        result, out = self._run([device])
+        self.assertFalse(result)
+        self.assertEqual(device.apply_calls, 0)
+        self.assertIn("get_capabilities", out)
+
+    def test_verification_reconnect_failure_is_a_failure(self):
+        # apply() hat geklappt, aber die abschliessende Verifikation kommt nicht
+        # mehr zustande: unbestaetigt ist nicht bestaetigt.
+        acting = FakeDevice(power_state=True, ieco=False)
+        result, out = self._run([acting, RuntimeError("verify weg")])
+        self.assertFalse(result)
+        self.assertEqual(acting.apply_calls, 1)
+        self.assertIn("verify weg", out)
+
+    def test_only_if_on_with_an_off_device_stays_a_success(self):
+        # Gegenprobe zur Richtung: der einzige Pfad, der hier bewusst True
+        # liefert, muss True bleiben - sonst meldete der Cron fuer jede bewusst
+        # ausgeschaltete Anlage einen Fehler.
+        result, _ = self._run([FakeDevice(power_state=False)], only_if_on=True)
+        self.assertTrue(result)
+
+
+class ExitCodeFromTheRealEnsureTests(unittest.TestCase):
+    """Exit-Code 2 EINMAL mit der echten ensure_ieco statt einer Attrappe."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "devices.json"
+        orig = mie.CONFIG_PATH
+        mie.CONFIG_PATH = self.path
+        self.addCleanup(lambda: setattr(mie, "CONFIG_PATH", orig))
+
+    def test_a_real_device_failure_yields_exit_2(self):
+        self.path.write_text(json.dumps({"devices": [
+            {"name": "W", "ip": "1.2.3.4", "id": 1, "token": "t", "key": "k"}]}),
+            encoding="utf-8")
+
+        async def _boom(*a, **k):
+            raise RuntimeError("Geraet nicht erreichbar")
+
+        with ExitStack() as es:
+            es.enter_context(mock.patch.object(mie, "connect_and_refresh", _boom))
+            es.enter_context(mock.patch.object(mie.asyncio, "sleep", _anoop))
+            es.enter_context(mock.patch.object(mie.sys, "argv", ["midea-ieco", "all"]))
+            out = es.enter_context(redirect_stdout(io.StringIO()))
+            with self.assertRaises(SystemExit) as cm:
+                asyncio.run(mie.main())
+        self.assertEqual(cm.exception.code, 2)
+        self.assertIn("Geraet nicht erreichbar", out.getvalue())
 
 
 class ExitCodeTests(unittest.TestCase):
@@ -952,9 +1187,155 @@ class PacingBoundsTests(unittest.TestCase):
     def test_retry_delay_is_long_enough_to_decompress(self):
         self.assertGreaterEqual(mie.RETRY_DELAY, 2.0)
 
+    def test_settle_and_device_delays_are_long_enough_to_matter(self):
+        # Untergrenzen wie bei RETRY_DELAY: unterhalb eines Sekundenbruchteils
+        # entzerrt nichts mehr, und der Wert waere nur noch Dekoration. Die
+        # PLATZIERUNG der Pausen sichert PacingOrderTests.
+        self.assertGreaterEqual(mie.SETTLE_DELAY, 1.0)
+        self.assertGreaterEqual(mie.DEVICE_DELAY, 0.5)
+
     def test_retry_budget_is_not_a_single_shot(self):
         self.assertGreaterEqual(mie.CONNECT_RETRIES, 2)
         self.assertGreaterEqual(mie.ACTION_RETRIES, 2)
+
+
+class _EventDevice(FakeDevice):
+    """FakeDevice, das apply() und close() in eine gemeinsame Ereignisliste
+    protokolliert - damit laesst sich die REIHENFOLGE pruefen statt nur die
+    Anzahl."""
+
+    def __init__(self, events, **kwargs):
+        super().__init__(**kwargs)
+        self._events = events
+
+    async def apply(self):
+        self._events.append("apply")
+        await super().apply()
+
+    async def close(self):
+        self._events.append("close")
+
+
+class PacingOrderTests(unittest.TestCase):
+    """Pausen und Schliessen muessen an der richtigen STELLE liegen.
+
+    Ein Zaehltest kann 'Pause vor dem naechsten Zugriff' nicht von 'Pause
+    danach' unterscheiden - und genau darauf kommt es an: eine Pause hinter dem
+    letzten Zugriff entzerrt gar nichts. Fuer die Kandidatenpause des
+    Schwestermoduls wurde das bereits geloest (CandidatePacingOrderTests); hier
+    fehlte der Zwilling, weshalb sich saemtliche sleep- und close-Aufrufe
+    ersatzlos entfernen liessen. Bei einem Geraet, das genau EINE lokale
+    Verbindung vertraegt, erzeugt das die Stoerung, die das Werkzeug hinterher
+    meldet."""
+
+    def _events(self, events, items):
+        """Faehrt ensure_ieco und liefert die gemeinsame Ereignisliste zurueck.
+
+        ``events`` wird vom Aufrufer angelegt und auch an die _EventDevice-
+        Instanzen gegeben - nur so landen Geraete- und Ablaufereignisse in
+        DERSELBEN Liste und ihre Reihenfolge wird vergleichbar."""
+        seq = list(items)
+
+        async def _connect(dev_conf, retries=mie.CONNECT_RETRIES,
+                           with_capabilities=False):
+            events.append("connect")
+            item = seq.pop(0)
+            if isinstance(item, BaseException):
+                raise item
+            if with_capabilities:
+                await item.get_capabilities()
+                await item.refresh()
+            return item
+
+        async def _sleep(seconds):
+            events.append(f"sleep {seconds}")
+
+        with ExitStack() as es:
+            es.enter_context(mock.patch.object(mie, "connect_and_refresh", _connect))
+            es.enter_context(mock.patch.object(mie.asyncio, "sleep", _sleep))
+            es.enter_context(redirect_stdout(io.StringIO()))
+            asyncio.run(mie.ensure_ieco({"name": "X", "ip": "1", "id": "1"},
+                                        only_if_on=False))
+        return events
+
+    def test_settle_pause_sits_between_apply_and_the_verification(self):
+        # Ohne die Pause laese die Verifikation den Zustand, bevor das Geraet
+        # ihn uebernommen hat - der Lauf gaelte faelschlich als gescheitert.
+        # Und das Schliessen muss VOR dem erneuten Verbinden liegen.
+        events = []
+        self.assertEqual(
+            self._events(events,
+                         [_EventDevice(events, power_state=True, ieco=False),
+                          _EventDevice(events, power_state=True, ieco=True)]),
+            ["connect", "apply", f"sleep {mie.SETTLE_DELAY}", "close",
+             "connect", "close"])
+
+    def test_retry_pause_sits_before_the_reconnect(self):
+        events = []
+        self.assertEqual(
+            self._events(events, [
+                _EventDevice(events, power_state=True, ieco=False,
+                             apply_raises=RuntimeError("erster Versuch")),
+                _EventDevice(events, power_state=True, ieco=False),
+                _EventDevice(events, power_state=True, ieco=True)]),
+            ["connect", "apply", f"sleep {mie.RETRY_DELAY}", "close", "connect",
+             "apply", f"sleep {mie.SETTLE_DELAY}", "close", "connect", "close"])
+
+    def test_the_device_is_closed_even_when_the_run_fails(self):
+        # Der finally-Block ist die einzige Zusage, dass eine Verbindung auch im
+        # Fehlerfall freigegeben wird.
+        events = []
+        device = _EventDevice(events, online=False, power_state=True)
+        self.assertEqual(self._events(events, [device]), ["connect", "close"])
+
+
+class DevicePacingOrderTests(unittest.TestCase):
+    """Die Pause ZWISCHEN den Geraeten, ebenfalls reihenfolgegenau.
+
+    Sie liegt hier bewusst NACH jedem Geraet (auch nach dem letzten) - anders
+    als im Schwestermodul, das VOR jedem weiteren Zugriff pausiert. Dieser Test
+    haelt die bestehende Platzierung fest; ohne ihn liess sich der Aufruf
+    ersatzlos entfernen."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "devices.json"
+        orig = mie.CONFIG_PATH
+        mie.CONFIG_PATH = self.path
+        self.addCleanup(lambda: setattr(mie, "CONFIG_PATH", orig))
+
+    def _events(self, count):
+        self.path.write_text(json.dumps({"devices": [
+            {"name": f"D{i}", "ip": f"1.2.3.{i}", "id": i, "token": "t", "key": "k"}
+            for i in range(count)]}), encoding="utf-8")
+        events = []
+
+        async def _ensure(dev_conf, only_if_on):
+            events.append(f"geraet {dev_conf['name']}")
+            return True
+
+        async def _sleep(seconds):
+            events.append(f"pause {seconds}")
+
+        with ExitStack() as es:
+            es.enter_context(mock.patch.object(mie, "ensure_ieco", _ensure))
+            es.enter_context(mock.patch.object(mie.asyncio, "sleep", _sleep))
+            es.enter_context(mock.patch.object(mie.sys, "argv", ["midea-ieco", "all"]))
+            es.enter_context(redirect_stdout(io.StringIO()))
+            with self.assertRaises(SystemExit):
+                asyncio.run(mie.main())
+        return events
+
+    def test_a_pause_follows_every_device(self):
+        pause = f"pause {mie.DEVICE_DELAY}"
+        self.assertEqual(self._events(3),
+                         ["geraet D0", pause, "geraet D1", pause,
+                          "geraet D2", pause])
+
+    def test_a_single_device_is_also_followed_by_a_pause(self):
+        self.assertEqual(self._events(1),
+                         ["geraet D0", f"pause {mie.DEVICE_DELAY}"])
 
 
 class OnlyIfOnWiringTests(unittest.TestCase):
@@ -1054,6 +1435,18 @@ class StateChangeTests(unittest.TestCase):
                             FakeDevice(power_state=True, ieco=False))
         self.assertFalse(ok)
         self.assertIn("still disabled", out)
+
+    def test_a_switched_off_device_with_a_stale_ieco_flag_is_still_powered_on(self):
+        # Der Kurzschluss lautet 'is_on AND ieco'. Faellt die is_on-Bedingung
+        # weg, gilt ein AUSGESCHALTETES Geraet, das den iECO-Schalter noch
+        # gesetzt meldet, als 'bereits im gewuenschten Zustand' - es wird nie
+        # eingeschaltet, und der Lauf meldet trotzdem Erfolg.
+        d_action = FakeDevice(power_state=False, ieco=True)
+        ok, out = self._run(d_action, FakeDevice(power_state=True, ieco=True))
+        self.assertTrue(ok)
+        self.assertIs(d_action.power_state, True)
+        self.assertEqual(d_action.apply_calls, 1)
+        self.assertNotIn("Already in the desired state", out)
 
     def test_only_if_on_never_powers_on_a_switched_off_device(self):
         # Die Kernzusage des Flags, am Objekt belegt statt am Rueckgabewert.

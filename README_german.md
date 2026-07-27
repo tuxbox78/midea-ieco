@@ -407,11 +407,14 @@ Die Unterscheidung der Ursachen ist wichtig, denn sie haben nichts miteinander z
 | Meldung | Bedeutung | Wo ansetzen |
 |---|---|---|
 | *Gerät hat den Token aktiv abgelehnt (ERROR-Antwort des Geräts)* | Das Gerät ist erreichbar und hat geantwortet — es weist nur diesen Token zurück. Netzwerk und Firewall sind in Ordnung. | Der Token passt nicht zu diesem Gerät. Mögliche Ursachen: eine Firmware, die die lokale Anmeldung anders handhabt, oder eine udpId-Variante, die die Cloud-Abfrage nicht abdeckt |
+| *Gerät hat geantwortet, aber der Key entschlüsselt die Antwort nicht* | Der Handshake kam zurück, es ist auch die richtige Anlage — nur der Key-Teil des Paares gehört nicht dazu | Das deutlichste Zeichen für veraltete Zugangsdaten. Token-Abruf erneut laufen lassen |
 | *Gerät nimmt die Verbindung an, antwortet aber nicht* | TCP-Verbindung steht, es kommt aber nichts zurück | Meist die Einzelverbindungs-Grenze unten. Midea-App schließen, einige Minuten warten, erneut versuchen |
 | *keine Antwort beim Verbindungsaufbau* | Unter dieser Adresse hat gar nichts geantwortet | Falsche IP in `devices.json`, Anlage aus, oder eine Firewall verwirft die Pakete — prüfen mit `ping <IP>` und `nc -zv <IP> 6444` |
 | *es kam keine Verbindung zustande* | Unter Adresse und Port ist überhaupt nichts erreichbar | Falsche IP in `devices.json`, Anlage nicht im Netz, DNS-/Routing-Problem, oder Port 6444 zu |
 
-Ein Muster sollte man kennen: **Eine Midea-Anlage hält nur eine einzige lokale Verbindung** und antwortet nach schnell aufeinanderfolgenden Versuchen eine Weile gar nicht mehr — auch die Midea-App auf dem Handy belegt genau diese Verbindung. Wird der erste Kandidat aktiv abgelehnt und laufen alle folgenden dann in einen Timeout, wurden die späteren gar nicht mehr wirklich geprüft. Genau deshalb entzerrt das Werkzeug seine Versuche und weist auf dieses Muster hin, wenn es auftritt. Vor einem Urteil also einige Minuten warten, mit geschlossener App.
+Die ersten beiden Zeilen sind beides *Antworten*: die Anlage ist da und redet. Endet **jeder** Versuch so, sind Netzwerk und Erreichbarkeit in Ordnung, und die gespeicherten Zugangsdaten gehören schlicht nicht zu dieser Anlage — das Werkzeug sagt das und verweist auf den Token-Abruf.
+
+Ein weiteres Muster sollte man kennen: **Eine Midea-Anlage hält nur eine einzige lokale Verbindung** und antwortet nach schnell aufeinanderfolgenden Versuchen eine Weile gar nicht mehr — auch die Midea-App auf dem Handy belegt genau diese Verbindung. Antwortet die Anlage auf die ersten Kandidaten und danach auf keinen einzigen mehr, wurden die späteren gar nicht mehr wirklich geprüft. Genau deshalb entzerrt das Werkzeug seine Versuche und weist auf dieses Muster hin, wenn es auftritt — aber nur, wenn die Antworten wirklich zuerst kamen und danach nichts mehr beantwortet wurde; sonst schweigt es lieber, statt zu raten. Vor einem Urteil also einige Minuten warten, mit geschlossener App.
 
 ## Bekannte Midea-App-/Firmware-Eigenheiten
 

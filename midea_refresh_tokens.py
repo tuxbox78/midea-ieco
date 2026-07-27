@@ -214,6 +214,23 @@ _MESSAGES: dict[str, tuple[str, str]] = {
         "und es ist auch die richtige Anlage - nur der Key-Teil des jeweiligen "
         "Paares gehoert nicht dazu. Das ist das deutlichste Zeichen fuer veraltete "
         "Zugangsdaten: der Token-Abruf sollte erneut laufen."),
+    # Gemischt "abgelehnt" UND "Key passt nicht": beides sind ANTWORTEN des
+    # Geraets, nur unterschiedlich weit gekommen. Fuer den Nutzer ist die
+    # Schlussfolgerung dieselbe wie bei den beiden reinen Faellen - und sie ist
+    # die klarste, die dieses Werkzeug ueberhaupt ziehen kann. Bis 0.2.x fiel
+    # genau diese Kombination stumm durch, obwohl sie mehr Gewissheit traegt als
+    # jeder Einzelfall.
+    "hint_all_answered": (
+        "The device answered every attempt: some tokens it rejected outright, "
+        "for others its reply could not be decrypted with the matching key. "
+        "Network and reachability are therefore fine - the stored credentials "
+        "simply do not belong to this unit. Re-running the token retrieval is "
+        "the right next step.",
+        "Das Geraet hat jeden Versuch beantwortet: einige Tokens hat es "
+        "abgelehnt, bei anderen liess sich seine Antwort nicht mit dem "
+        "zugehoerigen Key entschluesseln. Netzwerk und Erreichbarkeit sind "
+        "damit in Ordnung - die gespeicherten Zugangsdaten gehoeren schlicht "
+        "nicht zu dieser Anlage. Der Token-Abruf sollte erneut laufen."),
     "hint_all_reset": (
         "The device dropped every connection. Most often this is the "
         "single-connection limit: it holds only ONE local connection at a time, "
@@ -223,16 +240,21 @@ _MESSAGES: dict[str, tuple[str, str]] = {
         "Einzelverbindungs-Grenze dahinter: Es haelt nur EINE lokale Verbindung "
         "gleichzeitig, und die Midea-App auf dem Handy belegt genau diese. Bitte "
         "die App schliessen, einige Minuten warten und erneut versuchen."),
+    # Der Text nennt BEIDE Antwortarten (Ablehnung und nicht entschluesselbare
+    # Antwort), weil _ANSWERED_CODES beide umfasst. Die fruehere Fassung sprach
+    # nur von "actively rejected" und behauptete damit bei [bad_key, silent] eine
+    # Ablehnung, die nie stattgefunden hat.
     "hint_mixed": (
-        "Notable pattern: at least one token was actively rejected, after which "
-        "the device stopped answering. Most likely it accepted no further "
-        "connection after the rejection - the later candidates are therefore NOT "
-        "meaningful. Please wait a few minutes and retry.",
-        "Auffaelliges Muster: mindestens ein Token wurde aktiv abgelehnt, danach "
-        "antwortete das Geraet nicht mehr. Sehr wahrscheinlich hat es nach der "
-        "Ablehnung keine weitere Verbindung mehr angenommen - die spaeteren "
-        "Kandidaten sind dann NICHT aussagekraeftig. Bitte einige Minuten warten "
-        "und erneut versuchen."),
+        "Notable pattern: the device answered at first - a token was rejected, "
+        "or its reply could not be decrypted - and stopped answering "
+        "afterwards. Most likely it accepted no further connection after that, "
+        "so the later candidates are NOT meaningful. Please wait a few minutes "
+        "and retry.",
+        "Auffaelliges Muster: das Geraet hat zunaechst geantwortet - ein Token "
+        "wurde abgelehnt, oder seine Antwort liess sich nicht entschluesseln - "
+        "und danach gar nicht mehr. Sehr wahrscheinlich hat es keine weitere "
+        "Verbindung mehr angenommen; die spaeteren Kandidaten sind damit NICHT "
+        "aussagekraeftig. Bitte einige Minuten warten und erneut versuchen."),
     # --- main() ------------------------------------------------------------
     "main_msmart_missing": (
         "ERROR: msmart-ng is not installed in the active Python interpreter. "
@@ -598,6 +620,13 @@ def classify_verify_failure(exc: BaseException) -> tuple[str, str]:
 
 # Fehlerarten, bei denen das Geraet nachweislich GEANTWORTET hat - die
 # Zugangsdaten stimmen dann nicht, das Netz ist in Ordnung.
+#
+# WICHTIG bei jeder Aenderung dieser beiden Mengen: die Hinweistexte unten
+# behaupten etwas ueber ihren Inhalt ("das Geraet hat geantwortet", "danach nicht
+# mehr"). Wird hier ein Code hinzugenommen oder entfernt, muss die Wahrheitstabelle
+# von summarize_failure_hint ueber den vollstaendigen Eingaberaum NEU gerechnet und
+# der Text nachgezogen werden. Genau dieser Schritt unterblieb, als VERIFY_BAD_KEY
+# aufgenommen wurde: der Text sprach weiterhin nur von einer Ablehnung.
 _ANSWERED_CODES = frozenset({VERIFY_REJECTED, VERIFY_BAD_KEY})
 
 # Fehlerarten, die bedeuten "das Geraet hat auf diesen Versuch nicht mehr
@@ -635,26 +664,50 @@ def summarize_failure_hint(codes: list[str]) -> str | None:
     if unique == {VERIFY_RESET}:
         return t("hint_all_reset")
 
+    # Gemischt abgelehnt/Key-falsch: das Geraet hat JEDEN Versuch beantwortet -
+    # es ist erreichbar, es ist die richtige Anlage, und die Zugangsdaten passen
+    # trotzdem nicht. Diese Kombination ist der belastbarste Befund ueberhaupt,
+    # blieb aber bisher ohne Hinweis, weil sie keiner der reinen Mengen gleicht.
+    #
+    # Bewusst NACH allen Einzelmengen-Zweigen: eine Teilmengenpruefung vor ihnen
+    # haette stillschweigend vorausgesetzt, dass jedes Mitglied von
+    # _ANSWERED_CODES weiter oben schon einen eigenen Zweig hat. Diese Annahme
+    # waere bei der naechsten Erweiterung der Menge falsch geworden, ohne dass
+    # hier etwas darauf hindeutet.
+    if unique <= _ANSWERED_CODES:
+        return t("hint_all_answered")
+
     # Bewusst KEIN Sammelhinweis fuer lauter VERIFY_CAP: unser Zeitlimit liegt
     # oberhalb von msmart-ngs eigenem Worst Case (authenticate ~12s, refresh
     # ~6s - refresh meldet Netzwerkfehler ohnehin nicht nach oben), es kann
     # praktisch also gar nicht greifen. Fuer einen Zustand, der nicht eintritt,
     # wird kein Ratschlag erfunden; die Einzelmeldung je Kandidat bleibt korrekt.
     #
-    # Gemischter Fall "erst abgelehnt, DANACH verstummt": nur dann aussagekraeftig,
-    # wenn die Ablehnung TATSAECHLICH ZUERST kam. Sonst dreht sich die Aussage um -
-    # bei [nicht erreichbar, abgelehnt] hat das Geraet am Ende sehr wohl
-    # geantwortet, und ein Hinweis "es hat danach nicht mehr geantwortet" waere in
-    # jeder Teilaussage falsch. Eine reine Mengenbetrachtung kann das nicht
-    # unterscheiden und behauptete beides gleichermassen. Trifft die Reihenfolge
-    # nicht zu, wird bewusst NICHTS gesagt: die Einzelzeilen pro Kandidat nennen
-    # den jeweiligen Grund ohnehin praezise.
-    answered_present = unique & _ANSWERED_CODES
-    blocking_present = unique & _BLOCKING_CODES
-    if answered_present and blocking_present:
-        first_answer = min(codes.index(code) for code in answered_present)
-        first_blocking = min(codes.index(code) for code in blocking_present)
-        if first_answer < first_blocking:
+    # Gemischter Fall "erst geantwortet, DANACH verstummt". Der Text macht zwei
+    # Aussagen, und BEIDE muessen wahr sein, sonst schweigen wir:
+    #
+    #   (1) "zuerst hat es geantwortet" -> die erste Antwort muss vor der ersten
+    #       Blockade liegen. Bei [nicht erreichbar, abgelehnt] hat das Geraet am
+    #       Ende sehr wohl geantwortet; eine reine Mengenbetrachtung kann das
+    #       nicht unterscheiden und behauptete frueher beides gleichermassen.
+    #   (2) "danach nicht mehr" -> nach der LETZTEN Antwort darf nichts
+    #       Beantwortetes mehr folgen, und der Schwanz darf nicht leer sein.
+    #       Ohne diese Bedingung behauptete der Hinweis bei
+    #       [abgelehnt, stumm, abgelehnt] ein Verstummen, obwohl der letzte
+    #       Kandidat sehr wohl beantwortet wurde - Bedingung (1) allein sieht das
+    #       nicht, weil sie nur den Anfang prueft.
+    #
+    # Ein unklassifizierter Code (VERIFY_OTHER) im Schwanz genuegt, um zu
+    # schweigen: ueber ihn ist per Definition nichts bekannt, er kann also auch
+    # kein Verstummen belegen. Trifft eine der Bedingungen nicht zu, wird bewusst
+    # NICHTS gesagt - die Einzelzeilen pro Kandidat nennen den jeweiligen Grund
+    # ohnehin praezise.
+    answered_at = [i for i, code in enumerate(codes) if code in _ANSWERED_CODES]
+    blocking_at = [i for i, code in enumerate(codes) if code in _BLOCKING_CODES]
+    if answered_at and blocking_at and answered_at[0] < blocking_at[0]:
+        after_last_answer = codes[answered_at[-1] + 1:]
+        if after_last_answer and all(code in _BLOCKING_CODES
+                                     for code in after_last_answer):
             return t("hint_mixed")
 
     return None

@@ -721,6 +721,30 @@ rc=0; grep -qE "Anzahl der Klimaanlagen|Weiter mit der Einrichtung" "$UPD_OUT" &
 assert "$rc" "install.sh --update: KEIN Onboarding erreicht (devices.json unangetastet)"
 rc=0; { [ -f "$UPDBIN/midea-ieco" ] && [ -f "$UPDBIN/midea-ieco-update" ] && [ -f "$UPDBIN/midea-ieco-refresh-tokens" ]; } || rc=1
 assert "$rc" "install.sh --update: alle drei Wrapper erzeugt (inkl. midea-ieco-refresh-tokens)"
+
+# INHALT der tatsaechlich erzeugten Wrapper. Bis hierher pruefte die Suite nur
+# install_bin_wrapper mit test-eigenen Rumpfzeilen und die Verdrahtung per
+# Namens-grep - der Rumpf, den install_all_wrappers wirklich einsetzt, war
+# ungeprueft: das '"$@"' liess sich dort entfernen, ohne dass etwas rot wurde.
+# Das ist derselbe Fehler wie im Wrapper-Skript, nur eine Ebene hoeher: der
+# Befehl 'midea-ieco Wohnzimmer --only-if-on' bekaeme dann gar kein Argument.
+for w in midea-ieco midea-ieco-update midea-ieco-refresh-tokens; do
+    rc=0; grep -qF '"$@"' "$UPDBIN/$w" || rc=1
+    assert "$rc" "erzeugter Wrapper $w reicht alle Argumente weiter (\$@)"
+    rc=0; [ -x "$UPDBIN/$w" ] || rc=1
+    assert "$rc" "erzeugter Wrapper $w ist ausfuehrbar"
+    rc=0; bash -n "$UPDBIN/$w" 2>/dev/null || rc=1
+    assert "$rc" "erzeugter Wrapper $w ist syntaktisch valide"
+done
+
+rc=0; grep -qF 'venv/bin/python3' "$UPDBIN/midea-ieco" || rc=1
+assert "$rc" "erzeugter Wrapper midea-ieco nutzt den venv-Python"
+rc=0; grep -qF 'midea_ieco_ensure.py' "$UPDBIN/midea-ieco" || rc=1
+assert "$rc" "erzeugter Wrapper midea-ieco ruft midea_ieco_ensure.py"
+rc=0; grep -qF 'midea_refresh_tokens.py' "$UPDBIN/midea-ieco-refresh-tokens" || rc=1
+assert "$rc" "erzeugter Wrapper midea-ieco-refresh-tokens ruft midea_refresh_tokens.py"
+rc=0; grep -q -- '--update' "$UPDBIN/midea-ieco-update" || rc=1
+assert "$rc" "erzeugter Wrapper midea-ieco-update ruft install.sh --update"
 rc=0; grep -q "9.9.9" "$UPD_OUT" || rc=1
 assert "$rc" "install.sh --update: Versionsanzeige nutzt git-Ref/CHANGELOG"
 # Ziel b, direkt statt indirekt belegt: devices.json ist byte-identisch geblieben.
@@ -784,6 +808,298 @@ else
     rm -f "$_probe" 2>/dev/null || true
     echo "  [SKIP] Leak-Check: mktemp beachtet \$TMPDIR hier nicht (BSD/macOS); im Linux-CI scharf."
 fi
+
+# ---------------------------------------------------------------------------
+echo "== Onboarding End-to-End: die Cron-Jobs landen WIRKLICH in der Crontab =="
+# ---------------------------------------------------------------------------
+# Bis hierher pruefte die Suite nur den INHALT der Variablen CRON_LINE_*. Dass
+# diese Zeilen jemals bei 'crontab -' ankommen, pruefte nichts: man konnte das
+# 'echo "$CRON_LINE_IECO"' aus dem Schreibblock entfernen und die Suite blieb
+# gruen - das Produkt haette dann planmaessig gar nichts mehr getan.
+#
+# Hier laeuft daher das ECHTE install.sh im Onboarding-Modus durch, mit
+# gestubbtem python3/pip/crontab und geskripteter Eingabe. Geprueft wird, was
+# tatsaechlich bei 'crontab -' ankommt. Kein Netz, keine echte venv, keine
+# Hardware, und die Crontab des Ausfuehrenden wird NIE angefasst (der Stub
+# schreibt in eine Datei im WORK-Verzeichnis).
+CRON_REAL_PY="$(command -v python3)"
+
+# Der kanonische Marker steht hier ABSICHTLICH als Literal und wird nicht aus
+# install.sh gelesen: er ist der Schluessel, an dem ein Re-Run bereits
+# eingetragene Zeilen wiedererkennt. Wird er in install.sh geaendert, erkennt
+# eine BESTEHENDE Crontab nicht mehr - jeder Re-Run legt dann Duplikate an.
+CANONICAL_CRON_MARKER="# midea-ieco-managed"
+
+setup_onboarding_sandbox() {   # $1 = Name, $2 = Discovery-Ausgabe (leer = keine)
+    ONB="$WORK/$1"
+    DISC_FILE="$WORK/$1_discovered"
+    printf '%s' "${2:-}" > "$DISC_FILE"
+    mkdir -p "$ONB/venv/bin"
+    cp "$INSTALL" "$ONB/install.sh"
+    : > "$ONB/midea_ieco_ensure.py"
+    : > "$ONB/midea_refresh_tokens.py"
+    printf 'msmart-ng==1\n' > "$ONB/requirements.txt"
+    printf 'deactivate() { :; }\n' > "$ONB/venv/bin/activate"
+    ONB_BIN="$WORK/$1_bin"; mkdir -p "$ONB_BIN"
+    ONB_HOME="$WORK/$1_home"; mkdir -p "$ONB_HOME"
+    ONB_OUT="$WORK/$1_out.txt"
+    CRON_FILE="$WORK/$1_crontab"; : > "$CRON_FILE"
+    CRON_WRITES="$WORK/$1_writes"; : > "$CRON_WRITES"
+    ONB_STUB="$WORK/$1_stub"; mkdir -p "$ONB_STUB"
+    # python3: nur die Pruef-Aufrufe des Installers werden gestubbt. Der
+    # devices.json-Write laeuft ECHT (sonst pruefte der Test seinen eigenen Stub).
+    # Der Discovery-Aufruf ist der einzige mit '-' als EINZIGEM Argument;
+    # eine leere Ergebnisdatei bedeutet dort "kein Geraet gefunden" (Exit 1)
+    # und fuehrt in die manuelle Eingabe.
+    cat > "$ONB_STUB/python3" <<EOF
+#!/usr/bin/env bash
+case "\$*" in
+  *"version_info.major"*)    echo 3; exit 0 ;;
+  *"version_info.minor"*)    echo 12; exit 0 ;;
+  *"-m venv --help"*)        exit 0 ;;
+  *"import midealocal.cli"*) exit 0 ;;
+esac
+if [ "\$*" = "-" ]; then
+    [ -s "$DISC_FILE" ] || exit 1
+    cat "$DISC_FILE"
+    exit 0
+fi
+exec "$CRON_REAL_PY" "\$@"
+EOF
+    cat > "$ONB_STUB/pip" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in *"show"*) echo "Version: 9.9.9" ;; *) exit 0 ;; esac
+EOF
+    # crontab-Stub: '-l' liest die Sandbox-Crontab, '-' schreibt sie und
+    # protokolliert JEDEN Schreibvorgang (fuer den Idempotenz-Nachweis).
+    cat > "$ONB_STUB/crontab" <<EOF
+#!/usr/bin/env bash
+case "\${1:-}" in
+  -l) [ -s "$CRON_FILE" ] || exit 1; cat "$CRON_FILE" ;;
+  -)  cat > "$CRON_FILE"; printf 'x' >> "$CRON_WRITES" ;;
+  *)  exit 0 ;;
+esac
+EOF
+    chmod +x "$ONB_STUB/python3" "$ONB_STUB/pip" "$ONB_STUB/crontab"
+}
+
+# Faehrt das Onboarding mit geskripteter Eingabe durch ($ONB_INPUT, eine Antwort
+# je Element). Die Antworten muessen exakt zu den read-Aufrufen des Installers in
+# der jeweiligen Lage passen - eine zu wenig, und 'read' scheitert unter 'set -e'.
+run_onboarding() {   # $@ = zusaetzliche install.sh-Argumente
+    ONB_RC=0
+    printf '%s\n' "${ONB_INPUT[@]}" \
+        | ( PATH="$ONB_STUB:$PATH" HOME="$ONB_HOME" \
+            MIDEA_IECO_BIN_DIR="$ONB_BIN" MIDEA_IECO_LANG=de \
+            bash "$ONB/install.sh" "$@" ) > "$ONB_OUT" 2>&1 || ONB_RC=$?
+}
+
+# Manuelle Eingabe: weiter / Anzahl / Name / IP / ID / kein Testlauf / Cron JA.
+ONB_INPUT=("" "1" "Wohnzimmer" "192.168.0.5" "12345" "n" "j")
+
+# Sucht in der geschriebenen Crontab eine Zeile, die ALLE uebergebenen Muster
+# enthaelt. Bewusst Muster statt eines exakten Zeilenvergleichs: der Installpfad
+# ist ein Temp-Verzeichnis, und die Zeile soll auch nach einer Umformulierung
+# noch geprueft werden koennen - die tragenden Bestandteile aber genau.
+cron_line_has() {   # $1 = grep-Muster fuer die Zeilenauswahl, $2.. = geforderte Teile
+    local select="$1"; shift
+    local line part
+    line="$(grep -F "$select" "$CRON_FILE" | head -1)"
+    [ -n "$line" ] || return 1
+    for part in "$@"; do
+        case "$line" in *"$part"*) : ;; *) return 1 ;; esac
+    done
+    return 0
+}
+
+setup_onboarding_sandbox onb ""
+run_onboarding
+
+rc=0; [ "$ONB_RC" -eq 0 ] || rc=1
+assert "$rc" "Onboarding laeuft vollstaendig durch (Exit $ONB_RC)"
+
+rc=0; [ -s "$CRON_FILE" ] || rc=1
+assert "$rc" "es wurde ueberhaupt eine Crontab geschrieben"
+
+rc=0; [ "$(wc -c < "$CRON_WRITES" | tr -d ' ')" -eq 1 ] || rc=1
+assert "$rc" "genau EIN Schreibvorgang auf die Crontab"
+
+# --- die iECO-Zeile: das eigentliche Produkt -------------------------------
+rc=0; cron_line_has 'midea_ieco_ensure.py' \
+        '*/20 * * * *' \
+        'midea_ieco_ensure.py all --only-if-on' \
+        'venv/bin/python3' \
+        'MIDEA_IECO_LANG=' \
+        '/ieco.log 2>&1' \
+        "$CANONICAL_CRON_MARKER" || rc=1
+assert "$rc" "iECO-Job eingetragen: */20, 'all --only-if-on', Log-Umleitung, Marker"
+
+# --- die Refresh-Zeile ------------------------------------------------------
+rc=0; cron_line_has 'midea_refresh_tokens.py' \
+        '0 3 * * 0' \
+        'midea_refresh_tokens.py --all' \
+        'venv/bin/python3' \
+        'MIDEA_IECO_LANG=' \
+        '/refresh.log 2>&1' \
+        "$CANONICAL_CRON_MARKER" || rc=1
+assert "$rc" "Token-Refresh eingetragen: sonntags 3 Uhr, --all, Log-Umleitung, Marker"
+
+# --- die Logrotate-Zeile ----------------------------------------------------
+rc=0; cron_line_has 'truncate' \
+        '0 0 1 * *' 'truncate -s 0' '/ieco.log' '/refresh.log' \
+        "$CANONICAL_CRON_MARKER" || rc=1
+assert "$rc" "Logrotate eingetragen: monatlich, truncate (nicht rm), beide Logs"
+
+# 'rm' waere in einer Cron-Zeile ein anderer Vorgang als 'truncate': eine
+# geloeschte Datei nimmt der noch laufende Cron-Job nicht wieder auf.
+rc=0; grep -q 'rm -f' "$CRON_FILE" && rc=1
+assert "$rc" "kein 'rm' in der Crontab (Logs werden geleert, nicht geloescht)"
+
+# Jede von uns geschriebene, nicht-leere Zeile traegt den Marker - sonst findet
+# ein spaeterer Lauf sie nicht wieder und legt Duplikate an.
+unmarked=$(grep -c -v -e '^[[:space:]]*$' -e "$CANONICAL_CRON_MARKER" "$CRON_FILE" || true)
+rc=0; [ "$unmarked" -eq 0 ] || rc=1
+assert "$rc" "alle geschriebenen Zeilen tragen den Marker (n_ohne=$unmarked)"
+
+# --- Idempotenz: ein zweiter Lauf darf NICHTS anhaengen ---------------------
+CRON_SUM_BEFORE="$(cksum < "$CRON_FILE")"
+run_onboarding --reconfigure
+rc=0; [ "$ONB_RC" -eq 0 ] || rc=1
+assert "$rc" "zweiter Lauf (--reconfigure) laeuft durch (Exit $ONB_RC)"
+rc=0; [ "$(wc -c < "$CRON_WRITES" | tr -d ' ')" -eq 1 ] || rc=1
+assert "$rc" "Re-Run schreibt die Crontab NICHT erneut (keine Duplikate)"
+rc=0; [ "$(cksum < "$CRON_FILE")" = "$CRON_SUM_BEFORE" ] || rc=1
+assert "$rc" "Crontab nach dem Re-Run byte-identisch"
+
+# ---------------------------------------------------------------------------
+echo "== Onboarding End-to-End: erkannte Geraete werden richtig uebernommen =="
+# ---------------------------------------------------------------------------
+# Der Regelfall fuer echte Nutzer: die Discovery findet Geraete, der Installer
+# uebernimmt IP und ID und fragt nur noch die Namen ab. Geprueft wird, dass die
+# Zuordnung IP<->ID<->Name ueber alle Stationen (Snippet -> parse_discovered ->
+# Anzeige -> devices.json) erhalten bleibt. Ein vertauschtes Wertepaar in der
+# Anzeigezeile liesse den Nutzer die falsche Anlage benennen.
+setup_onboarding_sandbox onbdisc "192.168.0.186	153931629346858
+192.168.0.185	152832117825892"
+# weiter / erkannte uebernehmen JA / Name 1 / Name 2 / kein Testlauf / Cron NEIN
+ONB_INPUT=("" "j" "Wohnzimmer" "Kueche" "n" "n")
+run_onboarding
+
+rc=0; [ "$ONB_RC" -eq 0 ] || rc=1
+assert "$rc" "Onboarding mit erkannten Geraeten laeuft durch (Exit $ONB_RC)"
+
+# Anzeigezeile: 'Geraet 1 von 2:  IP <ip>   ID <id>' - vier Werte, jeder an
+# seinem Platz (die einzige Mehr-Platzhalter-Meldung des Installers mit vier).
+rc=0; grep -q 'Geraet 1 von 2:  IP 192.168.0.186   ID 153931629346858' "$ONB_OUT" || rc=1
+assert "$rc" "Anzeigezeile paart Nummer, Gesamtzahl, IP und ID korrekt"
+rc=0; grep -q 'Geraet 2 von 2:  IP 192.168.0.185   ID 152832117825892' "$ONB_OUT" || rc=1
+assert "$rc" "Anzeigezeile des zweiten Geraets ebenso"
+
+# devices.json: die Namen gehoeren zu DEN Geraeten, in deren Zeile sie eingegeben
+# wurden - eine vertauschte Zuordnung steuerte spaeter die falsche Anlage an.
+DJ="$ONB/devices.json"
+rc=0; [ -f "$DJ" ] || rc=1
+assert "$rc" "devices.json wurde geschrieben"
+dj_dump="$("$CRON_REAL_PY" -c 'import json, sys
+devices = json.load(open(sys.argv[1]))["devices"]
+print("|".join("%s,%s,%s,%s" % (d["name"], d["ip"], d["id"], d["port"])
+               for d in devices))' "$DJ")"
+rc=0; [ "$dj_dump" = "Wohnzimmer,192.168.0.186,153931629346858,6444|Kueche,192.168.0.185,152832117825892,6444" ] || rc=1
+assert "$rc" "devices.json paart Name/IP/ID/Port korrekt -- $dj_dump"
+
+rc=0; [ "$(mode_of "$DJ")" = "600" ] || rc=1
+assert "$rc" "devices.json des Onboardings hat Rechte 0600"
+
+# Cron-Frage verneint -> es darf NICHTS eingetragen worden sein.
+rc=0; [ ! -s "$CRON_FILE" ] || rc=1
+assert "$rc" "Cron-Frage verneint: keine Crontab geschrieben"
+
+# ---------------------------------------------------------------------------
+echo "== Cron-Sprachhinweis: je Werkzeug-Zeile, Env-Zeile anerkannt =="
+# ---------------------------------------------------------------------------
+# Die fruehere Pruefung lief ZEILENUEBERGREIFEND ('grep Marker | grep -q LANG=')
+# und war dadurch in BEIDE Richtungen falsch: sie schwieg, sobald EINE der
+# beiden verwalteten Zeilen migriert war, und sie warnte, obwohl eine
+# eigenstaendige Env-Zeile die Sprache laengst fuer alle Jobs setzte - dem
+# ueblichen Weg, eine Variable fuer saemtliche Cron-Jobs zu hinterlegen.
+eval "$(extract_func cron_sets_lang_globally "$INSTALL")"
+eval "$(extract_func cron_tool_line_needs_lang "$INSTALL")"
+eval "$(extract_func print_cron_lang_hint "$INSTALL")"
+eval "$(grep '^CRON_MARKER=' "$INSTALL")"
+
+# Sentinels statt der echten Zeilen: so laesst sich pruefen, WELCHE Zeile
+# gezeigt wird, ohne den Zeileninhalt hier zu duplizieren (den decken die
+# End-to-End-Zusicherungen oben ab).
+CRON_LINE_IECO="ZEILE_IECO"
+CRON_LINE_REFRESH="ZEILE_REFRESH"
+LANG_CHOICE=de
+
+CL_OLD_IECO="*/20 * * * * cd /opt && venv/bin/python3 midea_ieco_ensure.py all --only-if-on >> /opt/ieco.log 2>&1 $CRON_MARKER"
+CL_NEW_IECO="*/20 * * * * cd /opt && MIDEA_IECO_LANG=de venv/bin/python3 midea_ieco_ensure.py all --only-if-on >> /opt/ieco.log 2>&1 $CRON_MARKER"
+CL_OLD_REFRESH="0 3 * * 0 cd /opt && venv/bin/python3 midea_refresh_tokens.py --all >> /opt/refresh.log 2>&1 $CRON_MARKER"
+CL_NEW_REFRESH="0 3 * * 0 cd /opt && MIDEA_IECO_LANG=de venv/bin/python3 midea_refresh_tokens.py --all >> /opt/refresh.log 2>&1 $CRON_MARKER"
+CL_LOGROT="0 0 1 * * truncate -s 0 /opt/ieco.log /opt/refresh.log $CRON_MARKER"
+
+# Prueft die Ausgabe des Hinweises gegen die erwarteten Sentinels.
+# $1 = Crontab, $2 = erwartete Ausgabe (leer = kein Hinweis), $3 = Beschriftung
+assert_hint() {
+    local got hrc=0 label="$3"
+    got="$(print_cron_lang_hint "$1")"
+    if [ "$got" != "$2" ]; then
+        hrc=1
+        # Nur im Fehlerfall anhaengen, und einzeilig: eine mehrzeilige
+        # Fehlermeldung zerreisst die Ergebnisliste.
+        label="$label -- erhalten: $(printf '%s' "$got" | tr '\n' '|')"
+    fi
+    assert "$hrc" "$label"
+}
+
+assert_hint "$CL_OLD_IECO
+$CL_OLD_REFRESH
+$CL_LOGROT" "ZEILE_IECO
+ZEILE_REFRESH" "beide Zeilen alt: Hinweis fuer beide"
+
+assert_hint "$CL_OLD_IECO
+$CL_NEW_REFRESH
+$CL_LOGROT" "ZEILE_IECO" "nur die Refresh-Zeile migriert: Hinweis NUR fuer die iECO-Zeile"
+
+assert_hint "$CL_NEW_IECO
+$CL_OLD_REFRESH
+$CL_LOGROT" "ZEILE_REFRESH" "nur die iECO-Zeile migriert: Hinweis NUR fuer die Refresh-Zeile"
+
+assert_hint "MIDEA_IECO_LANG=de
+$CL_OLD_IECO
+$CL_OLD_REFRESH
+$CL_LOGROT" "" "Env-Zeile in der Crontab: kein Hinweis (cron wendet sie auf alle Jobs an)"
+
+assert_hint "  MIDEA_IECO_LANG = de
+$CL_OLD_IECO
+$CL_OLD_REFRESH" "" "Env-Zeile mit Leerzeichen: ebenfalls anerkannt"
+
+assert_hint "$CL_NEW_IECO
+$CL_NEW_REFRESH
+$CL_LOGROT" "" "beide Zeilen migriert: kein Hinweis"
+
+# Eine frische Installation schreibt zusaetzlich die Logrotate-Zeile - sie ruft
+# kein Werkzeug auf und braucht daher keine Sprache. Eine Pruefung, die nur auf
+# den Marker sieht, wuerde hier faelschlich warnen.
+assert_hint "$CL_LOGROT" "" "Logrotate-Zeile allein loest keinen Hinweis aus"
+
+assert_hint "" "" "leere Crontab: kein Hinweis"
+assert_hint "0 5 * * * /usr/bin/backup.sh" "" "fremde Cron-Jobs: kein Hinweis"
+
+# Eine auskommentierte Env-Zeile setzt nichts - der Hinweis bleibt faellig.
+assert_hint "# MIDEA_IECO_LANG=de
+$CL_OLD_IECO
+$CL_OLD_REFRESH" "ZEILE_IECO
+ZEILE_REFRESH" "auskommentierte Env-Zeile zaehlt nicht"
+
+# Erreichbarkeit: der Re-Run-Zweig ('bereits eingerichtet') verlaesst das Skript
+# per exit 0, bevor der Cron-Abschnitt erreicht wird. Ohne einen eigenen Aufruf
+# dort war der Hinweis praktisch nur ueber '--reconfigure' samt bejahter
+# Cron-Frage zu sehen - also fast nie.
+rc=0; [ "$(grep -c 'print_cron_lang_hint "' "$INSTALL")" -eq 2 ] || rc=1
+assert "$rc" "Hinweis an BEIDEN Stellen aufgerufen (Re-Run-Zweig und Cron-Abschnitt)"
 
 # ---------------------------------------------------------------------------
 echo "== PATH-Aufnahme: _path_rc_file / _write_path_block / ensure_bin_on_path =="
@@ -851,6 +1167,37 @@ rc=0; [ "$( ( unset LC_ALL LC_MESSAGES LANG; LANG_CHOICE_ARG=de; MIDEA_IECO_LANG
 assert "$rc" "resolve_lang: --lang (Flag) schlaegt Env"
 rc=0; [ "$( ( unset LANG_CHOICE_ARG LC_ALL LC_MESSAGES; MIDEA_IECO_LANG=en; LANG=de_DE.UTF-8; resolve_lang ) )" = "en" ] || rc=1
 assert "$rc" "resolve_lang: Env schlaegt Locale"
+
+# Grossschreibung und Schreibvarianten. midea_i18n.py behauptet ausdruecklich,
+# Installer und Laufzeit teilten dieselbe Aufloesung - die Python-Seite ist fuer
+# beides getestet, diese hier war es nicht. Faellt das 'tr' zur Kleinschreibung
+# weg, bekommt ein Nutzer mit LANG=DE_DE.UTF-8 stillschweigend englische Texte,
+# waehrend die Python-Werkzeuge daneben deutsch reden.
+for spelling in DE De German GERMAN deutsch DEUTSCH de-AT DE_CH.UTF-8; do
+    rc=0
+    [ "$( ( unset LANG_CHOICE_ARG LC_ALL LC_MESSAGES LANG; MIDEA_IECO_LANG="$spelling"; resolve_lang ) )" = "de" ] || rc=1
+    assert "$rc" "resolve_lang: '$spelling' gilt als Deutsch"
+done
+
+# Gegenproben zum Praefixvergleich. 'da_DK' deckt nur den Fall ab, dass jemand
+# den Vergleich ganz aufgibt; die eigentliche Gefahr ist eine Aufweitung auf
+# 'de*' - dagegen braucht es einen Wert, der MIT 'de' beginnt und trotzdem kein
+# Deutsch ist. midea_i18n.py nennt genau diese Bedingung als Grund fuer die
+# Praefixliste ('de_', 'de-'), hatte sie aber ebenfalls nur gegen da_DK geprueft.
+for foreign in da_DK.UTF-8 default dev_DEV; do
+    rc=0
+    [ "$( ( unset LANG_CHOICE_ARG MIDEA_IECO_LANG LC_ALL LC_MESSAGES; LANG="$foreign"; resolve_lang ) )" = "en" ] || rc=1
+    assert "$rc" "resolve_lang: '$foreign' ist NICHT Deutsch"
+done
+
+# Vollstaendige Praezedenzkette LC_ALL > LC_MESSAGES > LANG - bisher war nur
+# 'Env schlaegt Locale' geprueft, die Reihenfolge INNERHALB der Locale nicht.
+rc=0; [ "$( ( unset LANG_CHOICE_ARG MIDEA_IECO_LANG; LC_ALL=de_DE.UTF-8; LC_MESSAGES=en_US.UTF-8; LANG=en_US.UTF-8; resolve_lang ) )" = "de" ] || rc=1
+assert "$rc" "resolve_lang: LC_ALL schlaegt LC_MESSAGES und LANG"
+rc=0; [ "$( ( unset LANG_CHOICE_ARG MIDEA_IECO_LANG LC_ALL; LC_MESSAGES=de_DE.UTF-8; LANG=en_US.UTF-8; resolve_lang ) )" = "de" ] || rc=1
+assert "$rc" "resolve_lang: LC_MESSAGES schlaegt LANG"
+rc=0; [ "$( ( unset LANG_CHOICE_ARG MIDEA_IECO_LANG; LC_ALL=en_US.UTF-8; LC_MESSAGES=de_DE.UTF-8; LANG=de_DE.UTF-8; resolve_lang ) )" = "en" ] || rc=1
+assert "$rc" "resolve_lang: gesetztes LC_ALL gewinnt auch zugunsten von Englisch"
 
 # ---------------------------------------------------------------------------
 echo "== i18n: t()-Katalog vollstaendig + Interpolation =="
