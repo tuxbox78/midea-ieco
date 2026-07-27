@@ -1193,6 +1193,31 @@ assert "$rc" "Re-Run-Zweig wurde wirklich genommen (kein Onboarding)"
 rc=0; grep -qF "$CRON_LANG_WARN" "$ONB_OUT" || rc=1
 assert "$rc" "Re-Run-Zweig: der Sprachhinweis erscheint wirklich"
 
+# Und dasselbe fuer den Hinweis auf einen nicht aktiven Job: eine Crontab, die
+# nur die Logrotate-Zeile traegt, gilt dem Installer als "bereits eingerichtet" -
+# ohne diesen Hinweis liefe das Produkt still gar nicht. Auch hier je Aufrufstelle
+# ein eigener Lauf, sonst bleibt eine von beiden entfernbar.
+CRON_INACTIVE_WARN="$(t cron_job_inactive)"
+ONLY_LOGROTATE="0 0 1 * * truncate -s 0 /opt/ieco.log /opt/refresh.log $CANONICAL_CRON_MARKER"
+
+setup_onboarding_sandbox onbmiss1 "" "$ONLY_LOGROTATE"
+ONB_INPUT=("" "1" "Wohnzimmer" "192.168.0.5" "12345" "n" "j")
+run_onboarding
+rc=0; grep -qF "$CRON_INACTIVE_WARN" "$ONB_OUT" || rc=1
+assert "$rc" "Cron-Abschnitt: der Hinweis auf den fehlenden Job erscheint"
+rc=0; [ "$(wc -c < "$CRON_WRITES" | tr -d ' ')" -eq 0 ] || rc=1
+assert "$rc" "Cron-Abschnitt: dabei wird NICHTS in die Crontab geschrieben"
+
+setup_onboarding_sandbox onbmiss2 "" "$ONLY_LOGROTATE"
+printf '{"devices":[{"name":"W","ip":"1.2.3.4","port":6444,"id":1,"token":"","key":""}]}\n' \
+    > "$ONB/devices.json"
+ONB_INPUT=("")
+run_onboarding
+rc=0; grep -qF "$CRON_INACTIVE_WARN" "$ONB_OUT" || rc=1
+assert "$rc" "Re-Run-Zweig: der Hinweis auf den fehlenden Job erscheint"
+rc=0; [ "$(wc -c < "$CRON_WRITES" | tr -d ' ')" -eq 0 ] || rc=1
+assert "$rc" "Re-Run-Zweig: dabei wird NICHTS in die Crontab geschrieben"
+
 # ---------------------------------------------------------------------------
 echo "== Onboarding End-to-End: erkannte Geraete werden richtig uebernommen =="
 # ---------------------------------------------------------------------------
@@ -1248,6 +1273,8 @@ eval "$(extract_func _lang_value_is_effective "$INSTALL")"
 eval "$(extract_func _cron_line_sets_lang_inline "$INSTALL")"
 eval "$(extract_func cron_lines_needing_lang "$INSTALL")"
 eval "$(extract_func print_cron_lang_hint "$INSTALL")"
+eval "$(extract_func cron_missing_managed_lines "$INSTALL")"
+eval "$(extract_func print_cron_missing_hint "$INSTALL")"
 eval "$(grep '^CRON_MARKER=' "$INSTALL")"
 
 # Sentinels statt der echten Zeilen: so laesst sich pruefen, WELCHE Zeile
@@ -1306,6 +1333,9 @@ $CL_LOGROT" "" "beide Zeilen migriert: kein Hinweis"
 # Eine frische Installation schreibt zusaetzlich die Logrotate-Zeile - sie ruft
 # kein Werkzeug auf und braucht daher keine Sprache. Eine Pruefung, die nur auf
 # den Marker sieht, wuerde hier faelschlich warnen.
+# (Der SPRACH-Hinweis schweigt hier also zu Recht. Dass in dieser Lage ueberhaupt
+# kein Werkzeug-Job laeuft, meldet seit dieser Runde print_cron_missing_hint -
+# eine andere Frage, eigene Funktion, eigene Zusicherungen weiter unten.)
 assert_hint "$CL_LOGROT" "" "Logrotate-Zeile allein loest keinen Hinweis aus"
 
 assert_hint "" "" "leere Crontab: kein Hinweis"
@@ -1318,7 +1348,8 @@ $CL_OLD_REFRESH" "ZEILE_IECO
 ZEILE_REFRESH" "auskommentierte Env-Zeile zaehlt nicht"
 
 # Eine auskommentierte JOB-Zeile laeuft nicht und protokolliert folglich auch
-# nichts - fuer sie eine Sprachumstellung vorzuschlagen waere Rauschen. Das ist
+# nichts - fuer sie eine Sprachumstellung vorzuschlagen waere Rauschen. (Dass
+# sie nicht laeuft, meldet dafuer print_cron_missing_hint.) Das ist
 # der Fall, den der Kommentar-Guard wirklich abfaengt: die Zusicherung darueber
 # haelt auch ohne ihn, weil '# MIDEA_IECO_LANG' schon am Variablennamen
 # scheitert. Vor dieser Runde warnte der Installer hier.
@@ -1429,6 +1460,51 @@ assert_hint "MIDEA_IECO_LANG=de
 # damit eine Zeile, die der Installer nie geschrieben hat.
 assert_hint "*/20 * * * * cd /opt && venv/bin/python3 midea_ieco_ensure.py all --only-if-on" \
     "" "unmarkierte Zeile mit unserem Werkzeug loest keinen Hinweis aus"
+
+# ---------------------------------------------------------------------------
+echo "== Hinweis auf einen nicht aktiven verwalteten Job =="
+# ---------------------------------------------------------------------------
+# Der Installer haelt eine Crontab mit unserem Marker fuer "bereits eingerichtet"
+# und schreibt dann nichts mehr. Ist die iECO-Zeile auskommentiert oder geloescht,
+# laeuft das Produkt still gar nicht - und bis zu dieser Runde sagte niemand
+# etwas. Es wird weiterhin NICHTS geschrieben, nur gezeigt.
+assert_missing() {   # $1 = Crontab, $2 = erwartete Ausgabe, $3 = Beschriftung
+    local got mrc=0 label="$3"
+    got="$(print_cron_missing_hint "$1")"
+    if [ "$got" != "$2" ]; then
+        mrc=1
+        label="$label -- erhalten: $(printf '%s' "$got" | tr '\n' '|')"
+    fi
+    assert "$mrc" "$label"
+}
+
+assert_missing "$CL_NEW_IECO
+$CL_NEW_REFRESH
+$CL_LOGROT" "" "beide Jobs aktiv: kein Hinweis"
+
+assert_missing "$CL_LOGROT" "ZEILE_IECO
+ZEILE_REFRESH" "nur die Logrotate-Zeile: beide Werkzeug-Zeilen fehlen"
+
+assert_missing "# $CL_OLD_IECO
+$CL_NEW_REFRESH
+$CL_LOGROT" "ZEILE_IECO" "iECO auskommentiert: genau diese Zeile wird genannt"
+
+assert_missing "# $CL_OLD_IECO
+# $CL_OLD_REFRESH
+$CL_LOGROT" "ZEILE_IECO
+ZEILE_REFRESH" "beide auskommentiert: beide werden genannt"
+
+# Ohne Marker hat der Nutzer hier nie etwas eingerichtet - wer ueber Siri oder
+# systemd steuert, soll keinen Rat zu Cron-Jobs bekommen.
+assert_missing "0 5 * * * /usr/bin/backup.sh" "" "kein Marker: kein Hinweis"
+assert_missing "" "" "leere Crontab: kein Hinweis"
+
+# Der dokumentierte Wrapper zaehlt als vorhanden. Sonst bekaeme genau der Nutzer,
+# der ihn benutzt, den Rat, eine ZWEITE Zeile anzulegen - zwei Jobs alle 20
+# Minuten auf dieselben Anlagen.
+assert_missing "*/20 * * * * cd /opt && MIDEA_IECO_LANG=de /opt/midea_ieco_ensure.sh all --only-if-on $CRON_MARKER
+$CL_NEW_REFRESH
+$CL_LOGROT" "" "Job ueber den .sh-Wrapper zaehlt als vorhanden"
 
 # ---------------------------------------------------------------------------
 echo "== PATH-Aufnahme: _path_rc_file / _write_path_block / ensure_bin_on_path =="

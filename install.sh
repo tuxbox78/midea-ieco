@@ -323,6 +323,8 @@ Verzeichnisse ueber Umgebungsvariablen ueberschreibbar:
                            de='Cron-Jobs eingetragen fuer Benutzer %s.' ;;
         cron_lang_missing) en='Your existing cron jobs do not set MIDEA_IECO_LANG, so they log in English (cron runs without a locale). Your crontab is left untouched - to switch them to "%s", replace the midea-ieco lines with:'
                            de='Deine bestehenden Cron-Jobs setzen MIDEA_IECO_LANG nicht und protokollieren daher auf Englisch (Cron laeuft ohne Locale). Deine Crontab bleibt unangetastet - um sie auf "%s" umzustellen, ersetze die midea-ieco-Zeilen durch:' ;;
+        cron_job_inactive) en='Your crontab contains midea-ieco lines, but at least one job is not active (removed or commented out) and therefore never runs. Your crontab is left untouched - to bring it back, add:'
+                           de='Deine Crontab enthaelt midea-ieco-Zeilen, aber mindestens ein Job ist nicht aktiv (entfernt oder auskommentiert) und laeuft daher nie. Deine Crontab bleibt unangetastet - zum Wiederherstellen ergaenze:' ;;
         cron_no_crontab)   en="No 'crontab' command found. Cron jobs must be set up manually."
                            de="Kein 'crontab'-Kommando gefunden. Cron-Jobs muessen manuell eingerichtet werden." ;;
         banner_install_done) en='Installation complete!';  de='Installation abgeschlossen!' ;;
@@ -643,6 +645,52 @@ print_cron_lang_hint() {   # $1 = bestehende Crontab
     warn "$(t cron_lang_missing "$LANG_CHOICE")"
     if [[ "$CRON_NEEDS_IECO" -eq 1 ]]; then echo "$CRON_LINE_IECO"; fi
     if [[ "$CRON_NEEDS_REFRESH" -eq 1 ]]; then echo "$CRON_LINE_REFRESH"; fi
+}
+
+# Meldet verwaltete Werkzeug-Zeilen, die es nicht (mehr) gibt: entfernt oder
+# auskommentiert. Der Installer haelt eine Crontab mit unserem Marker fuer
+# "bereits eingerichtet" und schreibt dann nichts mehr - ist die iECO-Zeile aber
+# auskommentiert oder geloescht, laeuft das Produkt still gar nicht, und bis
+# hierher sagte niemand etwas.
+#
+# Bewusst eine EIGENE Funktion neben print_cron_lang_hint: die Sprachpruefung
+# beantwortet eine andere Frage ("laeuft der Job auf Englisch?") und ihre
+# Zusicherungen bleiben davon unberuehrt.
+#
+# Ohne Marker wird geschwiegen: wer seine Anlagen ueber Siri oder systemd
+# steuert, hat bewusst keinen Cron-Job und braucht keinen Rat dazu.
+cron_missing_managed_lines() {   # $1 = bestehende Crontab
+    CRON_MISSING_IECO=0
+    CRON_MISSING_REFRESH=0
+    case "$1" in *"$CRON_MARKER"*) : ;; *) return 0 ;; esac
+    local line trimmed have_ieco=0 have_refresh=0
+    while IFS= read -r line; do
+        trimmed="${line#"${line%%[![:space:]]*}"}"
+        case "$trimmed" in '#'*) continue ;; esac
+        case "$line" in *"$CRON_MARKER"*) : ;; *) continue ;; esac
+        # Praefix ohne Endung: deckt midea_ieco_ensure.py UND den dokumentierten
+        # Wrapper midea_ieco_ensure.sh ab. Wer seinen Job ueber den Wrapper
+        # faehrt, soll keinen Rat bekommen, eine zweite Zeile anzulegen.
+        case "$line" in *midea_ieco_ensure*)    have_ieco=1 ;; esac
+        case "$line" in *midea_refresh_tokens*) have_refresh=1 ;; esac
+    done <<< "$1"
+    [[ "$have_ieco" -eq 0 ]] && CRON_MISSING_IECO=1
+    [[ "$have_refresh" -eq 0 ]] && CRON_MISSING_REFRESH=1
+    # Explizit 0: unter 'set -e' wuerde ein falscher letzter Test den Installer
+    # an beiden Aufrufstellen abbrechen.
+    return 0
+}
+
+# Zeigt die fehlenden Zeilen - und schreibt NICHTS. Die Crontab gehoert dem
+# Nutzer; genau das sagen die Meldungen daneben auch zu.
+print_cron_missing_hint() {   # $1 = bestehende Crontab
+    cron_missing_managed_lines "$1"
+    if [[ "$CRON_MISSING_IECO" -eq 0 && "$CRON_MISSING_REFRESH" -eq 0 ]]; then
+        return 0
+    fi
+    warn "$(t cron_job_inactive)"
+    if [[ "$CRON_MISSING_IECO" -eq 1 ]]; then echo "$CRON_LINE_IECO"; fi
+    if [[ "$CRON_MISSING_REFRESH" -eq 1 ]]; then echo "$CRON_LINE_REFRESH"; fi
 }
 
 # Prueft einen Geraetenamen. Rueckgabe 0 = gueltig; sonst 1 mit einem
@@ -1254,7 +1302,9 @@ if [[ "$RECONFIGURE" -eq 0 ]] && is_already_configured; then
     # Cron-Zeilen ohne Sprachvariable praktisch nur ueber '--reconfigure' samt
     # bejahter Cron-Frage erreichbar, also fast nie.
     if command -v crontab &>/dev/null; then
-        print_cron_lang_hint "$(crontab -l 2>/dev/null || true)"
+        _cron_now="$(crontab -l 2>/dev/null || true)"
+        print_cron_lang_hint "$_cron_now"
+        print_cron_missing_hint "$_cron_now"
     fi
     hint_obsolete_credentials
     exit 0
@@ -1502,6 +1552,7 @@ if command -v crontab &>/dev/null; then
             # Locale und damit auf Englisch. Darauf wird hingewiesen, samt der
             # fertigen Zeile zum Uebernehmen - entscheiden soll der Nutzer.
             print_cron_lang_hint "$EXISTING_CRON"
+            print_cron_missing_hint "$EXISTING_CRON"
         else
             { echo "$EXISTING_CRON"
               echo "$CRON_LINE_IECO"
