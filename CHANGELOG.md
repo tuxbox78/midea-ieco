@@ -6,6 +6,131 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- `tests/test_wrapper.sh`: functional tests for `midea_ieco_ensure.sh`. The wrapper
+  is the second production path for `--only-if-on` (Siri shortcuts, SSH) and had no
+  functional test at all — `bash -n` and `shellcheck` both stay green when `"$@"`
+  is replaced by `"${1:-}"`, which is exactly the bug this project started with and
+  would switch on every deliberately-off unit every 20 minutes.
+- End-to-end installer tests that run the real `install.sh` in a stubbed sandbox and
+  assert what actually reaches `crontab -`: both jobs present, the `*/20` schedule,
+  `--only-if-on` behind the `all` target, `--all` on the refresh line, the log
+  redirection, `truncate` rather than `rm`, the marker on every line the installer
+  adds, and no second write on a re-run. Previously only the *contents of the shell
+  variables* were checked — deleting the `echo` that writes the iECO job left the
+  suite green while the product silently did nothing.
+
+- **Two failure causes that used to fall through unclassified.** A wrong *key*
+  (`msmart-ng` reports a SHA256 digest mismatch — the device answered the
+  handshake, but the reply cannot be decrypted) is now named as exactly that, with
+  a hint pointing at a token refresh; it is the clearest evidence the stored
+  credentials are stale, and it previously produced no hint at all. A real TCP
+  reset (`Connection reset by peer`, errno 54 on macOS / 104 on Linux) now
+  classifies as a dropped connection instead of falling through.
+- **`install.sh` points out cron jobs that predate the language pass-through.**
+  It never rewrites them: the crontab belongs to the user, and `--update`
+  explicitly promises not to touch it. It reports that the existing lines log in
+  English (cron runs without a locale) and prints the corrected lines to copy.
+  The previous entry's claim that this case was fixed was too broad — only *new*
+  cron installations were covered.
+- `tests/KNOWN_GAPS.md` — the behaviours that still survive deliberate mutation,
+  each with its user cost and the cheapest way to close it, plus how to re-run the
+  exercise. A green suite is not evidence on its own; this records where it is
+  thin instead of leaving it to be re-derived. (Its own accuracy has since been
+  corrected in place: the header arithmetic did not add up, `refused` was listed as
+  a covered classification although the same commit removed that word from the code
+  for being wrong, and the table of unclassified `msmart-ng` wordings was
+  incomplete. The corrections are recorded in the file itself. The commit message of
+  `f97a025` also states "228 Python (was 180)" — the correct previous number is
+  166, verified by running the suite at `f97a025^`.)
+
+- **iECO is tied to the operating mode — the tool now says so.** `midea_ieco_ensure.py`
+  checks the operating mode before writing anything and reports a mode that cannot
+  carry iECO by name, instead of attempting a write that silently fails and then
+  reporting the generic "iECO ist laut Geraet weiterhin deaktiviert" (reported as
+  issue #3). With `--only-if-on` (the recommended cron job) this is deliberately
+  **not** an error — a deliberately chosen mode is not a fault, and a unit left in
+  Auto no longer produces 72 failed runs a day. On an explicit call it exits
+  non-zero and switches nothing at all, not even power. If iECO is already active,
+  the existing short-circuit still wins, so an overly narrow mode list can never
+  flag a working state as a problem; an undeterminable mode fails open.
+- Measured on a real unit (PortaSplit `2060008E`, 2026-07-27, all five modes via
+  the remote): **Cool and Heat carry iECO; Auto, Dry and Fan only discard it.**
+  This matches `msmart-ng`'s own capability decoding (`1,3,8 - Cool, 3,4,8 - Heat`),
+  which is collapsed into a single `supports_ieco` bool and therefore cannot be
+  read back at runtime. Both READMEs gained a "Which modes support iECO" section;
+  the practical consequence — **iECO is unavailable in Auto, through this tool and
+  through the Midea app alike** — was previously undocumented anywhere.
+- `tools/probe_ieco_current_mode.py` — measures whether iECO holds in the mode the
+  unit is currently in, without switching modes over the network (set the mode on
+  the remote). Two connections per reading, one when iECO is already on.
+- `tools/probe_ieco_modes.py` — automated sweep across all modes. Prefer the
+  gentler script above: Midea units accept a single local connection and can lock
+  their LAN interface up temporarily under rapid session churn. The sweep now
+  aborts on the first connection loss, lets the unit settle, and retries the state
+  restore patiently (45 s cooldown, then 6 attempts 20 s apart).
+
+- Both READMEs now list the press coverage of this project ("In the media" /
+  "In den Medien"), with a transparency note on what was supplied to which
+  outlet and that no money changed hands in either direction.
+
+### Changed
+- `SETTLE_DELAY` and `DEVICE_DELAY` are named constants in `midea_ieco_ensure.py`
+  instead of inline literals, so their lower bounds can be asserted the way the
+  sister module already does. Timing behaviour is unchanged.
+- `summarize_failure_hint` checks the answered-codes subset after all single-cause
+  branches. Behaviour is identical today; the previous order quietly assumed every
+  member of `_ANSWERED_CODES` already had its own branch above it.
+
+- **Both Python tools are now bilingual, and default to English.** They printed
+  German only — so the English-speaking reporter of issue #2 filed a careful bug
+  report and got answers in a language he may not read. `install.sh` has had
+  English/German support for a while; the Python side never did. Language
+  resolution mirrors the installer exactly (`MIDEA_IECO_LANG` > `LC_ALL` >
+  `LC_MESSAGES` > `LANG` > English), so a German desktop keeps German without any
+  configuration. This covers every user-facing string of `midea_ieco_ensure.py`
+  and `midea_refresh_tokens.py`, including the `--help` output and the offline
+  overview. **Note for existing German users:** cron jobs usually run without a
+  locale, so scheduled runs will now log in English — add `MIDEA_IECO_LANG=de` to
+  your crontab to keep German.
+- New `midea_i18n.py` holds the shared language resolution used by both tools.
+  Duplicating it would have let the two copies drift apart — a locale edge case
+  fixed in one file and missed in the other. The message catalogues stay with
+  their respective modules; only the mechanism is shared. Operating-mode names
+  (`COOL`, `HEAT`) deliberately stay untranslated: that is what they are called
+  on the unit, on the remote and in `msmart-ng`. It adopts the installer's
+  *precedence*; the claim that it mirrors `install.sh` "1:1" was wrong and has
+  been corrected — in four whitespace/prefix edge cases it is deliberately more
+  generous (always in favour of German, never the reverse), and the module
+  documents each one. All ordinary cases agree.
+
+- Operating modes are printed as name **and** number (`mode=FAN_ONLY (5)` instead of
+  `mode=5`). `msmart-ng`'s `OperationalMode` is an `IntEnum`, which renders as a bare
+  number from Python 3.11 on — unreadable in logs and bug reports. This also makes
+  the READMEs' log examples match reality again.
+
+- Documentation: the measured extra consumption without iECO is now stated as
+  the honest range **2 to 3.8 kWh per day and unit** instead of a flat "roughly
+  4 kWh". Re-deriving the per-day figures from the raw Shelly logs showed the
+  4 kWh to be the optimistic end: 3.8 kWh/day holds for the unit with a clean
+  like-for-like comparison, while the second unit lands at 2.0–3.2 kWh/day
+  depending on whether partial-runtime days are included. The measurement setup
+  (two units, individual power meters, ten days, unchanged 23 °C setpoint) and
+  its limitations are now named explicitly, as is the evidence *for*
+  comparability (near-identical overnight base load on iECO and non-iECO days).
+- Documentation: the claim that iECO ends on its own after roughly eight hours
+  is now marked **unconfirmed** in both READMEs, after several PortaSplit owners
+  reported never observing such a cut-off. Midea's own "up to eight hours with
+  only 1.2 kWh" is a *consumption* figure, not a timeout — the likely source of
+  the confusion — and any interaction (app, IR remote, changing the target
+  temperature) appears to reset such a timer anyway, so it would rarely be seen
+  in practice. It has not been isolated in a controlled measurement here.
+  The reproducible behaviour this project actually addresses is now stated more
+  prominently in its place: iECO is lost whenever a unit is switched off and on
+  **outside the app** — at the unit or with the remote — silently, with no
+  indication on the display. Switching through the app preserves it, which is
+  why not every owner runs into this. No change to how the tool behaves.
+
 ### Fixed
 - **The mixed-failure hint claimed things that had not happened.** When
   `VERIFY_BAD_KEY` joined the set of "the device answered" codes, the hint text was
@@ -42,29 +167,6 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The notice is also reachable now: a plain re-run on a configured system exits
   before the cron section, so it was previously almost impossible to see.
 
-### Added
-- `tests/test_wrapper.sh`: functional tests for `midea_ieco_ensure.sh`. The wrapper
-  is the second production path for `--only-if-on` (Siri shortcuts, SSH) and had no
-  functional test at all — `bash -n` and `shellcheck` both stay green when `"$@"`
-  is replaced by `"${1:-}"`, which is exactly the bug this project started with and
-  would switch on every deliberately-off unit every 20 minutes.
-- End-to-end installer tests that run the real `install.sh` in a stubbed sandbox and
-  assert what actually reaches `crontab -`: both jobs present, the `*/20` schedule,
-  `--only-if-on` behind the `all` target, `--all` on the refresh line, the log
-  redirection, `truncate` rather than `rm`, the marker on every written line, and no
-  second write on a re-run. Previously only the *contents of the shell variables*
-  were checked — deleting the `echo` that writes the iECO job left the suite green
-  while the product silently did nothing.
-
-### Changed
-- `SETTLE_DELAY` and `DEVICE_DELAY` are named constants in `midea_ieco_ensure.py`
-  instead of inline literals, so their lower bounds can be asserted the way the
-  sister module already does. Timing behaviour is unchanged.
-- `summarize_failure_hint` checks the answered-codes subset after all single-cause
-  branches. Behaviour is identical today; the previous order quietly assumed every
-  member of `_ANSWERED_CODES` already had its own branch above it.
-
-### Fixed
 - **A wrong hint is worse than no hint: the "rejected first, silent afterwards"
   pattern was order-blind.** `summarize_failure_hint` reduced its input to a set,
   so `[unreachable, rejected]` produced the same advice as `[rejected,
@@ -92,32 +194,6 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `PYTHONDONTWRITEBYTECODE`, so a direct `python3 -m unittest …` afterwards could
   still be served stale bytecode. Both ends are cleaned now.
 
-### Added
-- **Two failure causes that used to fall through unclassified.** A wrong *key*
-  (`msmart-ng` reports a SHA256 digest mismatch — the device answered the
-  handshake, but the reply cannot be decrypted) is now named as exactly that, with
-  a hint pointing at a token refresh; it is the clearest evidence the stored
-  credentials are stale, and it previously produced no hint at all. A real TCP
-  reset (`Connection reset by peer`, errno 54 on macOS / 104 on Linux) now
-  classifies as a dropped connection instead of falling through.
-- **`install.sh` points out cron jobs that predate the language pass-through.**
-  It never rewrites them: the crontab belongs to the user, and `--update`
-  explicitly promises not to touch it. It reports that the existing lines log in
-  English (cron runs without a locale) and prints the corrected lines to copy.
-  The previous entry's claim that this case was fixed was too broad — only *new*
-  cron installations were covered.
-- `tests/KNOWN_GAPS.md` — the behaviours that still survive deliberate mutation,
-  each with its user cost and the cheapest way to close it, plus how to re-run the
-  exercise. A green suite is not evidence on its own; this records where it is
-  thin instead of leaving it to be re-derived. (Its own accuracy has since been
-  corrected in place: the header arithmetic did not add up, `refused` was listed as
-  a covered classification although the same commit removed that word from the code
-  for being wrong, and the table of unclassified `msmart-ng` wordings was
-  incomplete. The corrections are recorded in the file itself. The commit message of
-  `f97a025` also states "228 Python (was 180)" — the correct previous number is
-  166, verified by running the suite at `f97a025^`.)
-
-### Fixed
 - **The most common real-world failure got no hint at all.** When a unit is
   switched off, its IP has changed, or a firewall drops the packets, `msmart-ng`
   reports `Connect timeout.` — a wording the failure classification did not know,
@@ -154,30 +230,51 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   its own update phase.
 - `midea_i18n.py` was missing from the `py_compile` step of the test suite.
 
-### Changed
-- **Both Python tools are now bilingual, and default to English.** They printed
-  German only — so the English-speaking reporter of issue #2 filed a careful bug
-  report and got answers in a language he may not read. `install.sh` has had
-  English/German support for a while; the Python side never did. Language
-  resolution mirrors the installer exactly (`MIDEA_IECO_LANG` > `LC_ALL` >
-  `LC_MESSAGES` > `LANG` > English), so a German desktop keeps German without any
-  configuration. This covers every user-facing string of `midea_ieco_ensure.py`
-  and `midea_refresh_tokens.py`, including the `--help` output and the offline
-  overview. **Note for existing German users:** cron jobs usually run without a
-  locale, so scheduled runs will now log in English — add `MIDEA_IECO_LANG=de` to
-  your crontab to keep German.
-- New `midea_i18n.py` holds the shared language resolution used by both tools.
-  Duplicating it would have let the two copies drift apart — a locale edge case
-  fixed in one file and missed in the other. The message catalogues stay with
-  their respective modules; only the mechanism is shared. Operating-mode names
-  (`COOL`, `HEAT`) deliberately stay untranslated: that is what they are called
-  on the unit, on the remote and in `msmart-ng`. It adopts the installer's
-  *precedence*; the claim that it mirrors `install.sh` "1:1" was wrong and has
-  been corrected — in four whitespace/prefix edge cases it is deliberately more
-  generous (always in favour of German, never the reverse), and the module
-  documents each one. All ordinary cases agree.
+- Documentation: both READMEs claimed that the `midea_ac_lan` Home Assistant
+  integration "exposes iECO as one preset" and recommended it to Home Assistant
+  users. **It cannot set iECO at all** — an instance of the very ECO/iECO mix-up
+  this project exists to explain. `midea_ac_lan` is built on `midea-local`, which
+  has no iECO property whatsoever (verified against 6.6.1 and the current 6.11.0:
+  the only eco-related AC attribute is `eco_mode`), and its documented presets are
+  `none, comfort, eco, boost, sleep, away` — that `eco` being the plain
+  fixed-24 °C ECO mode. The integration that *does* expose iECO is
+  [`midea-ac-py`](https://github.com/mill1000/midea-ac-py), built on the same
+  `msmart-ng` library this project uses for control. Both READMEs now name the
+  distinction, and the "Do I need Home Assistant?" FAQ points to `midea-ac-py`.
+  Reported by a user who had gone hunting for a preset that was never there —
+  thank you.
 
 ### Testing
+- **Existing user data is now a fixture, not an empty directory.** Four places
+  where the installer touches data the user already has were only exercised from
+  an empty starting state, so the assertions could not see destruction. Each of
+  these survived the whole suite: dropping `echo "$EXISTING_CRON"` from the
+  crontab write (which deletes every foreign cron job), turning `>>` into `>` in
+  `_write_path_block` (which truncates `~/.bashrc`), dropping the `devices.json`
+  backup before `--reconfigure`, and disabling the config-safe re-run guard at its
+  call site — the guard function was tested, its call site was not. The production
+  code was correct in all four; a crontab preload and three assertions with
+  existing content close them, and the marker assertion is restricted to the lines
+  the installer adds.
+- **The connection-retry pause is pinned by order.** Three of the four sleeps in
+  `midea_ieco_ensure.py` were pinned; the one spacing out connection attempts
+  could be deleted with the suite staying green — the pacing that matters most,
+  since the unit tolerates a single local connection and blocks after dense
+  access.
+- **Every argument pair at a message call site is checked as a rendered line.**
+  The call sites were derived from the AST — each `t()` call with two or more
+  values, each adjacent pair swapped in turn — which gives 60 mutations; 25 of
+  them survived. All 60 are caught now, verified by re-running the survey. The
+  expectations are rendered from the catalogue, so a reworded message moves them
+  instead of voiding them. While doing this, `_assert_order` was rewritten to
+  search forward from the previous match, which looked like a strengthening and
+  measurably weakened it (a swapped pair was then found again in the next retry
+  line). Reverted, and both helpers now state in their docstring what they cannot
+  do.
+- **`midea_ieco_ensure.sh`'s `exec` is proven by process identity.** Signal
+  delivery — the reason the `exec` is there — is racy to test directly; that the
+  wrapper *becomes* the Python process is the same property and is a plain PID
+  comparison. Removing `exec` now turns the wrapper tests red.
 - **The most safety-critical string in the project was unguarded.** Four tests
   were added proving `--only-if-on` reaches `ensure_ieco` from `main()` — but the
   only place that flag is used in production is the crontab line `install.sh`
@@ -260,82 +357,6 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   up to 11 s (5 s connect plus three internal 2 s read retries), so the old cap
   could cut its retry logic off mid-flight and report a timeout for a unit that
   would have answered — a false negative that also corrupted the new diagnosis.
-
-### Added
-- **iECO is tied to the operating mode — the tool now says so.** `midea_ieco_ensure.py`
-  checks the operating mode before writing anything and reports a mode that cannot
-  carry iECO by name, instead of attempting a write that silently fails and then
-  reporting the generic "iECO ist laut Geraet weiterhin deaktiviert" (reported as
-  issue #3). With `--only-if-on` (the recommended cron job) this is deliberately
-  **not** an error — a deliberately chosen mode is not a fault, and a unit left in
-  Auto no longer produces 72 failed runs a day. On an explicit call it exits
-  non-zero and switches nothing at all, not even power. If iECO is already active,
-  the existing short-circuit still wins, so an overly narrow mode list can never
-  flag a working state as a problem; an undeterminable mode fails open.
-- Measured on a real unit (PortaSplit `2060008E`, 2026-07-27, all five modes via
-  the remote): **Cool and Heat carry iECO; Auto, Dry and Fan only discard it.**
-  This matches `msmart-ng`'s own capability decoding (`1,3,8 - Cool, 3,4,8 - Heat`),
-  which is collapsed into a single `supports_ieco` bool and therefore cannot be
-  read back at runtime. Both READMEs gained a "Which modes support iECO" section;
-  the practical consequence — **iECO is unavailable in Auto, through this tool and
-  through the Midea app alike** — was previously undocumented anywhere.
-- `tools/probe_ieco_current_mode.py` — measures whether iECO holds in the mode the
-  unit is currently in, without switching modes over the network (set the mode on
-  the remote). Two connections per reading, one when iECO is already on.
-- `tools/probe_ieco_modes.py` — automated sweep across all modes. Prefer the
-  gentler script above: Midea units accept a single local connection and can lock
-  their LAN interface up temporarily under rapid session churn. The sweep now
-  aborts on the first connection loss, lets the unit settle, and retries the state
-  restore patiently (45 s cooldown, then 6 attempts 20 s apart).
-
-### Changed
-- Operating modes are printed as name **and** number (`mode=FAN_ONLY (5)` instead of
-  `mode=5`). `msmart-ng`'s `OperationalMode` is an `IntEnum`, which renders as a bare
-  number from Python 3.11 on — unreadable in logs and bug reports. This also makes
-  the READMEs' log examples match reality again.
-
-### Added
-- Both READMEs now list the press coverage of this project ("In the media" /
-  "In den Medien"), with a transparency note on what was supplied to which
-  outlet and that no money changed hands in either direction.
-
-### Changed
-- Documentation: the measured extra consumption without iECO is now stated as
-  the honest range **2 to 3.8 kWh per day and unit** instead of a flat "roughly
-  4 kWh". Re-deriving the per-day figures from the raw Shelly logs showed the
-  4 kWh to be the optimistic end: 3.8 kWh/day holds for the unit with a clean
-  like-for-like comparison, while the second unit lands at 2.0–3.2 kWh/day
-  depending on whether partial-runtime days are included. The measurement setup
-  (two units, individual power meters, ten days, unchanged 23 °C setpoint) and
-  its limitations are now named explicitly, as is the evidence *for*
-  comparability (near-identical overnight base load on iECO and non-iECO days).
-- Documentation: the claim that iECO ends on its own after roughly eight hours
-  is now marked **unconfirmed** in both READMEs, after several PortaSplit owners
-  reported never observing such a cut-off. Midea's own "up to eight hours with
-  only 1.2 kWh" is a *consumption* figure, not a timeout — the likely source of
-  the confusion — and any interaction (app, IR remote, changing the target
-  temperature) appears to reset such a timer anyway, so it would rarely be seen
-  in practice. It has not been isolated in a controlled measurement here.
-  The reproducible behaviour this project actually addresses is now stated more
-  prominently in its place: iECO is lost whenever a unit is switched off and on
-  **outside the app** — at the unit or with the remote — silently, with no
-  indication on the display. Switching through the app preserves it, which is
-  why not every owner runs into this. No change to how the tool behaves.
-
-### Fixed
-- Documentation: both READMEs claimed that the `midea_ac_lan` Home Assistant
-  integration "exposes iECO as one preset" and recommended it to Home Assistant
-  users. **It cannot set iECO at all** — an instance of the very ECO/iECO mix-up
-  this project exists to explain. `midea_ac_lan` is built on `midea-local`, which
-  has no iECO property whatsoever (verified against 6.6.1 and the current 6.11.0:
-  the only eco-related AC attribute is `eco_mode`), and its documented presets are
-  `none, comfort, eco, boost, sleep, away` — that `eco` being the plain
-  fixed-24 °C ECO mode. The integration that *does* expose iECO is
-  [`midea-ac-py`](https://github.com/mill1000/midea-ac-py), built on the same
-  `msmart-ng` library this project uses for control. Both READMEs now name the
-  distinction, and the "Do I need Home Assistant?" FAQ points to `midea-ac-py`.
-  Reported by a user who had gone hunting for a preset that was never there —
-  thank you.
 
 ## [0.2.0] - 2026-07-11
 

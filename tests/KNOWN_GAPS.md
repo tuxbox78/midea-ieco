@@ -15,11 +15,31 @@ independent run reported **213 mutations, 144 caught, 69 survived**. That count
 comes from the review and was **not** re-derived here — do not treat it as a
 measurement of the current tree.
 
-The survivors that review ranked by user damage have since been worked through. For
-this round **88 mutations were applied one at a time and each was confirmed to turn
-the suite red**, covering every finding except the ones listed below. No claim is
-made that those 88 map one-to-one onto the 69 survivors above; they were derived
-from the findings, not from that list.
+The survivors that review ranked by user damage have since been worked through. In
+the round before this one, **88 mutations were applied one at a time and each was
+confirmed to turn the suite red**. No claim is made that those 88 map one-to-one
+onto the 69 survivors above; they were derived from the findings, not from that
+list. That round's header claimed the 88 covered "every finding except the ones
+listed below" — they did not: two mutations derived from those same findings
+(dropping `echo "$EXISTING_CRON"`, dropping the connection-retry pause) survived
+and were not listed.
+
+The round after that started by re-checking ten known survivors, then closed them
+one phase at a time. What was **measured** at the end, rather than argued:
+
+- the ten survivors that opened the round (foreign cron jobs, `~/.bashrc`
+  truncation, the `devices.json` backup, the config-safe re-run guard, the
+  connection-retry pause, two argument swaps, and `exec` in the wrapper) each turn
+  the suite red now;
+- six mutations of the rewritten cron language check, each caught by the fixture
+  that names its case;
+- all 60 adjacent-pair swaps derived from the AST (see gap 4 below);
+- the suite stays green under the default locale, `de_DE.UTF-8`, `LC_ALL=C`,
+  `tr_TR.UTF-8`, `MIDEA_IECO_LANG=de` and under Python 3.9, and `shellcheck` 0.9.0
+  (the version CI runs) reports nothing on any of the five shell files.
+
+None of that says the suite is complete — only that these specific things were
+checked. What is known to be open is below.
 
 To re-run the exercise:
 
@@ -31,7 +51,7 @@ bash tests/run_all.sh
 
 Use a copy. Mutating the real working tree risks committing a mutation by accident.
 
-Four traps that have all produced wrong results here at least once:
+Five traps that have all produced wrong results here at least once:
 
 > **Check the baseline first.** If the copy is already red, every mutation result is
 > worthless. A newly reported `shellcheck` finding is enough to cause this.
@@ -48,6 +68,10 @@ Four traps that have all produced wrong results here at least once:
 > stale `.pyc` and look like a survivor when it is not. `tests/run_all.sh` clears the
 > caches before *and* after each run for this reason; if you run `unittest` directly,
 > export `PYTHONDONTWRITEBYTECODE=1` yourself.
+>
+> **Replace the whole thing.** A replacement that matches only the first fragment of
+> a multi-line string leaves the rest standing and fakes a survivor. This happened
+> with a catalogue text wrapped over four lines.
 
 ---
 
@@ -108,15 +132,35 @@ nobody re-diagnoses it from scratch.
 
 ### 4. Installer messages with several placeholders are only spot-checked
 
-Both Python tools now assert the **rendered** message of every multi-placeholder
-call site, because a swapped pair produces a syntactically perfect but wrong
-sentence. For `install.sh` only the four-value case (`dev_line_auto`, checked
-end-to-end through the discovery path) and the cron lines are covered that way; the
-remaining two-value installer messages are covered by the catalog completeness test
-only.
+For the two Python tools this was measured rather than asserted. The call sites
+were derived from the AST — every `t()` call with two or more values, each
+adjacent pair swapped in turn — which yields **60 mutations**. 25 of them survived
+the suite; all 60 turn it red now, and the survey was re-run to confirm that. The
+expectations are rendered from the catalogue via `t()`, so a reworded message
+moves the assertion with it; what is pinned is the argument order.
+
+Two limits of that measurement, so it is not read as more than it is: it covers
+*adjacent* pairs (a three-way rotation is not in the 60), and it covers the two
+Python modules only.
+
+For `install.sh` only the four-value case (`dev_line_auto`, checked end-to-end
+through the discovery path) and the cron lines are covered that way; the remaining
+two-value installer messages are covered by the catalog completeness test only.
 
 *Cost:* cosmetic. These strings are progress output during a supervised, interactive
 run, not diagnostics someone has to act on hours later.
+
+### 5. The cron language notice ignores standalone `LANG=`/`LC_ALL=` lines
+
+The notice walks the crontab line by line and honours the nearest preceding
+`MIDEA_IECO_LANG` assignment. A standalone `LANG=de_DE.UTF-8` line would also make
+the jobs log in German — `resolve_lang` falls back to the locale — but it does not
+suppress the notice.
+
+*Cost:* a superfluous notice in an exotic setup. It suggests a line to copy and
+never rewrites anything, so the worst case is one paragraph of unnecessary advice.
+Deliberate: the notice recommends `MIDEA_IECO_LANG`, and matching every way a
+locale can arrive would widen the check for no practical gain.
 
 ---
 
@@ -153,6 +197,21 @@ listed it as equivalent, and that no longer holds.
   installer points out managed lines that lack `MIDEA_IECO_LANG` and prints the
   corrected ones, but the user's crontab is theirs. This is a deliberate boundary,
   not a gap.
+- **`hint_mixed` also fires when the first candidate was unclassified**, e.g.
+  `[other, rejected, silent]`. The head is deliberately more permissive than the
+  tail: both claims of the text hold — the device did answer, and afterwards it did
+  not — and what happened *before* the first answer cannot change either, whereas
+  the same code in the tail would undercut the asserted ending. 64 of the 2801
+  sequences up to length four take this path. Written down and pinned by a test so
+  the asymmetry is not later mistaken for an oversight and tightened away, which
+  would drop a correct hint.
+- **The `exec` test compares process identity, not signals.** `tests/test_wrapper.sh`
+  asserts that the wrapper *becomes* the Python process (same PID), which is the
+  property `exec` provides and from which signal delivery follows; it does not send a
+  `SIGTERM` and observe the process tree. Should a shell optimise the last command of
+  a script into an `exec` by itself, the test stays green for correct code and only
+  loses its grip on the mutation. Measured against this project's bash (3.2), the
+  call without `exec` forks.
 - **The wording of `midea_ieco_ensure.sh`'s venv error message.** The wrapper is glue
   code and, unlike the two Python tools, single-language. `tests/test_wrapper.sh`
   pins the exit code and that the message names the missing path and points at
@@ -180,3 +239,20 @@ Recorded so the same wrong statements do not get re-derived from the history:
   importable under Apple's system Python 3.9 and the full suite runs there.
 - The commit message of `f97a025` says "228 Python (was 180)". The correct previous
   number is **166** — verified by running the suite at `f97a025^`.
+- **"Both Python tools now assert the rendered message of every multi-placeholder
+  call site."** They did not: 25 of 60 adjacent-pair swaps survived when that
+  sentence was written. It has been replaced by what was measured, together with
+  what the measurement does *not* cover (gap 4 above).
+- **The header claimed the round's 88 mutations covered "every finding except the
+  ones listed below".** Two mutations derived from those findings survived without
+  being listed. Corrected at the top of this file.
+- **`tests/README.md` listed `git` among the onboarding sandbox's PATH stubs.** It
+  is not one there — it is simply never called, because without a `.git` directory
+  `fetch_project_files` takes another branch. `git` *is* a stub in the `--update`
+  sandbox, and `crontab` is not needed there. The sentence now describes each
+  sandbox separately.
+- The `--reconfigure` re-run had no `.bak` assertion, and the "commented-out
+  environment line does not count" fixture passed for a different reason than its
+  name suggested (the variable name check rejects `# MIDEA_IECO_LANG` before the
+  comment guard ever matters). The case the comment guard actually protects — a
+  commented-out managed *job* line — now has its own fixture.
