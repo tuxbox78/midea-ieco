@@ -52,7 +52,7 @@ MIDEA_IECO_DIR=/eigener/pfad MIDEA_IECO_BIN_DIR=/eigener/bin \
   bash -c "$(curl -fsSL https://raw.githubusercontent.com/tuxbox78/midea-ieco/main/install.sh)"
 ```
 
-Installer, Update-Modus und das gesamte Onboarding sind **zweisprachig (Deutsch/Englisch)**. Die Sprache richtet sich automatisch nach deiner Locale — Deutsch bei einer `de_*`-Locale (`LANG` / `LC_ALL` / `LC_MESSAGES`), sonst Englisch. **Wichtig:** Viele Raspberry Pis laufen mit einer `en_*`-Locale (z. B. `en_GB`) und zeigen dann Englisch. Erzwinge Deutsch über die Umgebungsvariable `MIDEA_IECO_LANG=de` – praktisch direkt beim Einzeiler:
+Installer, Update-Modus, das gesamte Onboarding **und beide Kommandozeilen-Werkzeuge zur Laufzeit** sind **zweisprachig (Deutsch/Englisch)** — inklusive `--help` und sämtlicher Status- und Fehlermeldungen. Die Sprache richtet sich automatisch nach deiner Locale — Deutsch bei einer `de_*`-Locale (`LANG` / `LC_ALL` / `LC_MESSAGES`), sonst Englisch. **Wichtig:** Viele Raspberry Pis laufen mit einer `en_*`-Locale (z. B. `en_GB`) und zeigen dann Englisch; auch Cron-Jobs laufen meist ganz ohne Locale. Erzwinge Deutsch über die Umgebungsvariable `MIDEA_IECO_LANG=de` – praktisch direkt beim Einzeiler oder als Zeile in der Crontab:
 
 ```bash
 MIDEA_IECO_LANG=de \
@@ -497,6 +497,7 @@ Die App bietet keine bedingte Logik wie „iECO nur aktivieren, wenn die Anlage 
 | `midea_ieco_ensure.py` | Prüft und setzt den Einschaltzustand und iECO für ein oder alle konfigurierten Geräte |
 | `midea_refresh_tokens.py` | Holt frische Token-/Key-Paare (ohne Cloud-Passwort) und aktualisiert `devices.json` |
 | `midea_ieco_ensure.sh` | Wrapper für SSH/Kurzbefehle: startet `midea_ieco_ensure.py` mit dem venv-Python und reicht alle Argumente weiter |
+| `midea_i18n.py` | Gemeinsame Deutsch/Englisch-Sprachwahl für beide Python-Werkzeuge |
 | `devices.example.json` | Vorlage für `devices.json` — kopieren, dann eigene Geräte eintragen |
 | `devices.json` | Lokale Gerätekonfiguration (Name, IP, Port, ID, Token, Key). Lokal erzeugt, **git-ignoriert** |
 

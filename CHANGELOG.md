@@ -7,16 +7,23 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Changed
-- **`midea_refresh_tokens.py` is now bilingual, and defaults to English.** It
-  printed German only — so the English-speaking reporter of issue #2 filed a
-  careful bug report and got answers in a language he may not read. `install.sh`
-  has had English/German support for a while; the Python side never did. Language
+- **Both Python tools are now bilingual, and default to English.** They printed
+  German only — so the English-speaking reporter of issue #2 filed a careful bug
+  report and got answers in a language he may not read. `install.sh` has had
+  English/German support for a while; the Python side never did. Language
   resolution mirrors the installer exactly (`MIDEA_IECO_LANG` > `LC_ALL` >
   `LC_MESSAGES` > `LANG` > English), so a German desktop keeps German without any
-  configuration. **Note for existing German users:** cron jobs usually run without
-  a locale, so scheduled runs will now log in English — add
-  `MIDEA_IECO_LANG=de` to your crontab to keep German. `midea_ieco_ensure.py` is
-  still German-only and remains to be converted.
+  configuration. This covers every user-facing string of `midea_ieco_ensure.py`
+  and `midea_refresh_tokens.py`, including the `--help` output and the offline
+  overview. **Note for existing German users:** cron jobs usually run without a
+  locale, so scheduled runs will now log in English — add `MIDEA_IECO_LANG=de` to
+  your crontab to keep German.
+- New `midea_i18n.py` holds the shared language resolution used by both tools.
+  Duplicating it would have let the two copies drift apart — a locale edge case
+  fixed in one file and missed in the other. The message catalogues stay with
+  their respective modules; only the mechanism is shared. Operating-mode names
+  (`COOL`, `HEAT`) deliberately stay untranslated: that is what they are called
+  on the unit, on the remote and in `msmart-ng`.
 - **A failed token verification now says *why* it failed** (prompted by issue #2).
   `midea_refresh_tokens.py` reported every rejected candidate with the same
   "lieferte keine gueltige Verbindung", collapsing causes that have nothing to do

@@ -11,6 +11,9 @@ Mit --only-if-on: Schaltet NICHTS ein. Nur wenn das Geraet bereits laeuft,
 wird iECO bei Bedarf nachgezogen. Ist es aus, wird sofort abgebrochen,
 OHNE zusaetzliche Netzwerkabfragen (kein get_capabilities()-Aufruf).
 
+Die Ausgabe ist zweisprachig (Englisch als Default, Deutsch bei deutscher
+Locale oder MIDEA_IECO_LANG=de) - siehe midea_i18n.py.
+
 Nutzung:
     python3 midea_ieco_ensure.py <device_name|all>
     python3 midea_ieco_ensure.py <device_name|all> --only-if-on
@@ -25,6 +28,11 @@ import sys
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+# Sprachwahl: gemeinsame Mechanik fuer beide Werkzeuge (Reihenfolge und
+# englischer Default sind dort dokumentiert). resolve_lang wird mitimportiert,
+# damit es weiterhin ueber dieses Modul erreichbar bleibt.
+from midea_i18n import make_translator, resolve_lang  # noqa: F401
 
 if TYPE_CHECKING:
     # Nur fuer Typpruefer: der echte Import passiert lazy in
@@ -67,7 +75,204 @@ CMD_UPDATE = "midea-ieco-update"
 # importiert (damit die netzwerkfreie Uebersicht auch ohne installiertes msmart
 # laeuft), ein Enum-Zugriff auf Modulebene wuerde das zunichtemachen.
 IECO_CAPABLE_MODE_VALUES = frozenset({2, 4})
-IECO_CAPABLE_MODE_NAMES = "COOL oder HEAT"
+
+# Katalog: key -> (englisch, deutsch). Platzhalter im printf-Stil (%s), damit
+# beide Sprachfassungen strukturell identisch bleiben und ein fehlender
+# Platzhalter beim Testen sofort auffaellt.
+_MESSAGES: dict[str, tuple[str, str]] = {
+    # --- Modusnamen ---------------------------------------------------------
+    # Die Modus-Bezeichner COOL/HEAT selbst bleiben unuebersetzt: so heissen sie
+    # im Geraet, in msmart-ng und auf der Fernbedienung. Nur das Bindewort ist
+    # sprachabhaengig.
+    "mode_names_capable": ("COOL or HEAT", "COOL oder HEAT"),
+    # --- Konfiguration ------------------------------------------------------
+    "cfg_not_found": (
+        "Configuration file not found: %s",
+        "Konfigurationsdatei nicht gefunden: %s"),
+    "cfg_unreadable": (
+        "ERROR: %s could not be read (%s: %s).",
+        "FEHLER: %s konnte nicht gelesen werden (%s: %s)."),
+    "cfg_bad_shape": (
+        'ERROR: %s does not have the expected form {"devices": [...]}.',
+        'FEHLER: %s hat nicht die erwartete Form {"devices": [...]}.'),
+    "soft_cfg_missing": (
+        "No %s yet - please run install.sh.",
+        "Noch keine %s vorhanden - bitte install.sh ausfuehren."),
+    "soft_cfg_unreadable": (
+        "%s could not be read (%s: %s).",
+        "%s konnte nicht gelesen werden (%s: %s)."),
+    "soft_cfg_bad_shape": (
+        '%s does not have the expected form {"devices": [...]}.',
+        '%s hat nicht die erwartete Form {"devices": [...]}.'),
+    # --- Uebersicht ---------------------------------------------------------
+    "ov_headline": (
+        "%s - keeps the iECO mode of Midea air conditioners active, locally.",
+        "%s - haelt den iECO-Modus von Midea-Klimaanlagen lokal aktiv."),
+    "ov_config": (
+        "Configuration: %s",
+        "Konfiguration: %s"),
+    "ov_note": (
+        "Note: %s",
+        "Hinweis: %s"),
+    "ov_no_devices": (
+        "Configured devices: (none)",
+        "Konfigurierte Geraete: (keine)"),
+    "ov_devices_count": (
+        "Configured devices (%s):",
+        "Konfigurierte Geraete (%s):"),
+    "ov_skipped_entry": (
+        "  - (skipped: unexpected entry of type %s)",
+        "  - (uebersprungen: unerwarteter Eintrag vom Typ %s)"),
+    "ov_unnamed": (
+        "(unnamed)",
+        "(ohne Namen)"),
+    "ov_invalid_name": (
+        "(invalid name)",
+        "(ungueltiger Name)"),
+    "ov_reserved_name": (
+        "      WARNING: '%s' is a reserved word and cannot be addressed from the "
+        "command line - please rename it in %s.",
+        "      WARNUNG: '%s' ist ein reserviertes Wort und per Kommando nicht "
+        "ansteuerbar - bitte in %s umbenennen."),
+    "ov_examples_header": (
+        "Examples:",
+        "Beispiele:"),
+    "ov_example_device": (
+        "  %s <device-name>          ensure iECO (powers on if needed)",
+        "  %s <Geraetename>          iECO sicherstellen (schaltet bei Bedarf ein)"),
+    "ov_example_all": (
+        "  %s %s                    all configured devices",
+        "  %s %s                    alle konfigurierten Geraete"),
+    "ov_example_only_if_on": (
+        "  %s %s --only-if-on       only running devices, powers nothing on",
+        "  %s %s --only-if-on       nur laufende Geraete, schaltet nichts ein"),
+    "ov_example_list": (
+        "  %s %s                   show this overview",
+        "  %s %s                   diese Uebersicht anzeigen"),
+    "ov_example_refresh": (
+        "  %s --all     renew token/key from the cloud",
+        "  %s --all     Token/Key aus der Cloud erneuern"),
+    "ov_example_update": (
+        "  %s              update the project",
+        "  %s              Projekt aktualisieren"),
+    "ov_full_options": (
+        "All options: %s --help",
+        "Vollstaendige Optionen: %s --help"),
+    "ov_path_note": (
+        "(The %s commands require their BIN directory to be on the PATH; "
+        "otherwise call directly: venv/bin/python3 <script> ...)",
+        "(Die %s-Befehle setzen ihr BIN-Verzeichnis im PATH voraus; "
+        "sonst direkt: venv/bin/python3 <skript> ...)"),
+    # --- Verbindung ---------------------------------------------------------
+    "conn_attempt_failed": (
+        "  [%s] Connection attempt %s/%s failed (%s): %s",
+        "  [%s] Verbindungsversuch %s/%s fehlgeschlagen (%s): %s"),
+    "conn_gave_up": (
+        "Connection to %s failed after %s attempts",
+        "Verbindung zu %s fehlgeschlagen nach %s Versuchen"),
+    # --- ensure_ieco --------------------------------------------------------
+    "dev_error": (
+        "[%s] ERROR: %s",
+        "[%s] FEHLER: %s"),
+    "dev_not_online": (
+        "[%s] ERROR: Device does not report itself as online.",
+        "[%s] FEHLER: Geraet meldet sich nicht als online."),
+    "dev_off_only_if_on": (
+        "[%s] --only-if-on is active and the device is off. No action, no "
+        "further queries.",
+        "[%s] --only-if-on aktiv und Geraet ist aus. Keine Aktion, keine "
+        "weiteren Abfragen."),
+    "dev_caps_failed": (
+        "[%s] ERROR during get_capabilities()/refresh(): %s: %s",
+        "[%s] FEHLER bei get_capabilities()/refresh(): %s: %s"),
+    "dev_status_before": (
+        "[%s] Status before action: power=%s, mode=%s, ieco=%s, eco=%s",
+        "[%s] Status vor Aktion: power=%s, mode=%s, ieco=%s, eco=%s"),
+    "dev_no_ieco_capability": (
+        "[%s] ERROR: Device reports no iECO capability.",
+        "[%s] FEHLER: Geraet meldet keine iECO-Faehigkeit."),
+    "dev_already_desired": (
+        "[%s] Already in the desired state (on, iECO active). No further "
+        "queries necessary.",
+        "[%s] Bereits im gewuenschten Zustand (an, iECO aktiv). Keine weiteren "
+        "Abfragen notwendig."),
+    "dev_mode_unsupported": (
+        "[%s] Operating mode %s does not support iECO (only %s).",
+        "[%s] Betriebsmodus %s unterstuetzt kein iECO (nur %s)."),
+    "dev_mode_only_if_on": (
+        "[%s] --only-if-on is active: no action, not an error.",
+        "[%s] --only-if-on aktiv: keine Aktion, kein Fehler."),
+    "dev_mode_nothing_switched": (
+        "[%s] Nothing was switched. Please set the unit to %s and call again.",
+        "[%s] Es wurde nichts geschaltet. Bitte die Anlage auf %s stellen und "
+        "erneut aufrufen."),
+    "dev_apply_attempt_failed": (
+        "  [%s] apply() attempt %s/%s failed (%s): %s",
+        "  [%s] apply()-Versuch %s/%s fehlgeschlagen (%s): %s"),
+    "dev_reconnect_failed": (
+        "  [%s] Reconnect before retry failed (%s): %s",
+        "  [%s] Reconnect vor Wiederholung fehlgeschlagen (%s): %s"),
+    "dev_apply_failed": (
+        "[%s] ERROR while setting: %s",
+        "[%s] FEHLER beim Setzen: %s"),
+    "dev_verify_failed": (
+        "[%s] ERROR during verification: %s",
+        "[%s] FEHLER bei Verifikation: %s"),
+    "dev_status_after": (
+        "[%s] Status after action: power=%s, mode=%s, ieco=%s, eco=%s",
+        "[%s] Status nach Aktion: power=%s, mode=%s, ieco=%s, eco=%s"),
+    "dev_still_disabled": (
+        "[%s] ERROR: According to the device, iECO is still disabled!",
+        "[%s] FEHLER: iECO ist laut Geraet weiterhin deaktiviert!"),
+    "dev_ok": (
+        "[%s] OK: iECO is active (confirmed by the device).",
+        "[%s] OK: iECO ist aktiv (vom Geraet bestaetigt)."),
+    # --- Konfigurationspruefung --------------------------------------------
+    "cfgchk_missing_field": (
+        "required field '%s' is missing",
+        "Pflichtfeld '%s' fehlt"),
+    "cfgchk_id_not_numeric": (
+        "field 'id' is not numeric (%s)",
+        "Feld 'id' ist nicht numerisch (%s)"),
+    "cfgchk_port_not_numeric": (
+        "field 'port' is not numeric (%s)",
+        "Feld 'port' ist nicht numerisch (%s)"),
+    # --- main() -------------------------------------------------------------
+    "cli_description": (
+        "Ensures that iECO is active on Midea air conditioners.",
+        "Stellt sicher, dass iECO auf Midea-Klimaanlagen aktiv ist."),
+    "cli_help_target": (
+        "Device name from devices.json, 'all' (all devices) or 'list' (show "
+        "configured devices). Without an argument: overview.",
+        "Geraetename aus devices.json, 'all' (alle Geraete) oder 'list' "
+        "(konfigurierte Geraete anzeigen). Ohne Argument: Uebersicht."),
+    "cli_help_only_if_on": (
+        "Do NOT power the device on. Only check and re-enable iECO if it is "
+        "already running.",
+        "Geraet NICHT einschalten. Nur pruefen und iECO nachziehen, falls es "
+        "bereits laeuft."),
+    "main_skipped_entries": (
+        "WARNING: %s unexpected entry/entries in %s skipped (not an object).",
+        "WARNUNG: %s unerwartete(r) Eintrag/Eintraege in %s uebersprungen "
+        "(kein Objekt)."),
+    "main_incomplete_entry": (
+        "WARNING: Device %s in %s is incomplete (%s) - skipped.",
+        "WARNUNG: Geraet %s in %s unvollstaendig (%s) - uebersprungen."),
+    "main_device_not_found": (
+        "Device '%s' not found in devices.json.",
+        "Geraet '%s' nicht in devices.json gefunden."),
+    "main_no_devices_configured": (
+        "No devices configured in devices.json. Nothing to do.",
+        "Keine Geraete in devices.json konfiguriert. Nichts zu tun."),
+    "main_result_ok": (
+        "Overall result: OK.",
+        "Gesamtergebnis: OK."),
+    "main_result_error": (
+        "Overall result: ERROR - at least one device has a problem.",
+        "Gesamtergebnis: FEHLER - mindestens ein Geraet hat ein Problem."),
+}
+
+t = make_translator(_MESSAGES)
 
 
 def _mode_value(mode: object) -> int | None:
@@ -105,18 +310,16 @@ def load_config() -> dict:
     klarer Meldung abgebrochen statt mit einem rohen Traceback - relevant fuer
     den 20-Minuten-Cron-Lauf."""
     if not CONFIG_PATH.exists():
-        print(f"Konfigurationsdatei nicht gefunden: {CONFIG_PATH}")
+        print(t("cfg_not_found", CONFIG_PATH))
         sys.exit(1)
     try:
         with open(CONFIG_PATH, encoding="utf-8") as f:
             data = json.load(f)
     except (OSError, ValueError) as exc:  # ValueError deckt JSONDecodeError UND UnicodeDecodeError (nicht-UTF-8-Datei) ab
-        print(f"FEHLER: {CONFIG_PATH} konnte nicht gelesen werden "
-              f"({type(exc).__name__}: {exc}).")
+        print(t("cfg_unreadable", CONFIG_PATH, type(exc).__name__, exc))
         sys.exit(1)
     if not isinstance(data, dict) or not isinstance(data.get("devices"), list):
-        print(f"FEHLER: {CONFIG_PATH} hat nicht die erwartete Form "
-              '{"devices": [...]}.')
+        print(t("cfg_bad_shape", CONFIG_PATH))
         sys.exit(1)
     return data
 
@@ -129,14 +332,14 @@ def _read_devices_soft() -> tuple[list, str | None]:
     Exit 0. Gibt es keinen verwertbaren Inhalt, ist devices leer und hinweis
     erklaert warum. Es findet KEIN Netzwerkzugriff statt."""
     if not CONFIG_PATH.exists():
-        return [], f"Noch keine {CONFIG_PATH.name} vorhanden - bitte install.sh ausfuehren."
+        return [], t("soft_cfg_missing", CONFIG_PATH.name)
     try:
         with open(CONFIG_PATH, encoding="utf-8") as f:
             data = json.load(f)
     except (OSError, ValueError) as exc:  # ValueError deckt JSONDecodeError UND UnicodeDecodeError (nicht-UTF-8-Datei) ab
-        return [], f"{CONFIG_PATH} konnte nicht gelesen werden ({type(exc).__name__}: {exc})."
+        return [], t("soft_cfg_unreadable", CONFIG_PATH, type(exc).__name__, exc)
     if not isinstance(data, dict) or not isinstance(data.get("devices"), list):
-        return [], f'{CONFIG_PATH} hat nicht die erwartete Form {{"devices": [...]}}.'
+        return [], t("soft_cfg_bad_shape", CONFIG_PATH)
     return data["devices"], None
 
 
@@ -150,30 +353,30 @@ def print_overview() -> None:
     unabhaengig von der Netzwerklage funktioniert."""
     devices, note = _read_devices_soft()
 
-    print(f"{CMD_MAIN} - haelt den iECO-Modus von Midea-Klimaanlagen lokal aktiv.")
-    print(f"Konfiguration: {CONFIG_PATH}")
+    print(t("ov_headline", CMD_MAIN))
+    print(t("ov_config", CONFIG_PATH))
     print("")
 
     if note is not None:
-        print(f"Hinweis: {note}")
+        print(t("ov_note", note))
     elif not devices:
-        print("Konfigurierte Geraete: (keine)")
+        print(t("ov_no_devices"))
     else:
-        print(f"Konfigurierte Geraete ({len(devices)}):")
+        print(t("ov_devices_count", len(devices)))
         for d in devices:
             # Robust gegen eine von Hand kaputt editierte devices.json: ein
             # Eintrag, der kein Objekt ist, darf die Uebersicht NICHT mit einem
             # Traceback abbrechen (Ziel: funktioniert auch bei kaputter Datei).
             if not isinstance(d, dict):
-                print(f"  - (uebersprungen: unerwarteter Eintrag vom Typ {type(d).__name__})")
+                print(t("ov_skipped_entry", type(d).__name__))
                 continue
             # name als String erzwingen: ein verschachteltes Objekt unter 'name'
             # wuerde sonst die 'in RESERVED_TARGETS'-Pruefung (unhashbar) mit
             # einem TypeError abbrechen - und beim Formatieren ungewollt Inhalt
             # ausgeben. ip/port erscheinen nur in einem f-String (absturzsicher).
-            name = d.get("name", "(ohne Namen)")
+            name = d.get("name", t("ov_unnamed"))
             if not isinstance(name, str):
-                name = "(ungueltiger Name)"
+                name = t("ov_invalid_name")
             ip = d.get("ip", "?")
             port = d.get("port", 6444)
             print(f"  - {name}  ->  {ip}:{port}")
@@ -182,21 +385,19 @@ def print_overview() -> None:
             # ist per CLI nicht ansteuerbar - er wuerde als Sonderbefehl
             # interpretiert. Klar darauf hinweisen, statt still zu scheitern.
             if name in RESERVED_TARGETS:
-                print(f"      WARNUNG: '{name}' ist ein reserviertes Wort und per "
-                      f"Kommando nicht ansteuerbar - bitte in {CONFIG_PATH.name} umbenennen.")
+                print(t("ov_reserved_name", name, CONFIG_PATH.name))
 
     print("")
-    print("Beispiele:")
-    print(f"  {CMD_MAIN} <Geraetename>          iECO sicherstellen (schaltet bei Bedarf ein)")
-    print(f"  {CMD_MAIN} {TARGET_ALL}                    alle konfigurierten Geraete")
-    print(f"  {CMD_MAIN} {TARGET_ALL} --only-if-on       nur laufende Geraete, schaltet nichts ein")
-    print(f"  {CMD_MAIN} {TARGET_LIST}                   diese Uebersicht anzeigen")
-    print(f"  {CMD_REFRESH} --all     Token/Key aus der Cloud erneuern")
-    print(f"  {CMD_UPDATE}              Projekt aktualisieren")
+    print(t("ov_examples_header"))
+    print(t("ov_example_device", CMD_MAIN))
+    print(t("ov_example_all", CMD_MAIN, TARGET_ALL))
+    print(t("ov_example_only_if_on", CMD_MAIN, TARGET_ALL))
+    print(t("ov_example_list", CMD_MAIN, TARGET_LIST))
+    print(t("ov_example_refresh", CMD_REFRESH))
+    print(t("ov_example_update", CMD_UPDATE))
     print("")
-    print(f"Vollstaendige Optionen: {CMD_MAIN} --help")
-    print(f"(Die {CMD_MAIN}-Befehle setzen ihr BIN-Verzeichnis im PATH voraus; "
-          f"sonst direkt: venv/bin/python3 <skript> ...)")
+    print(t("ov_full_options", CMD_MAIN))
+    print(t("ov_path_note", CMD_MAIN))
 
 
 async def close_device(device: AC) -> None:
@@ -250,11 +451,11 @@ async def connect_and_refresh(dev_conf: dict, retries: int = CONNECT_RETRIES,
         except Exception as exc:
             last_exc = exc
             await close_device(device)
-            print(f"  [{name}] Verbindungsversuch {attempt}/{retries} "
-                  f"fehlgeschlagen ({type(exc).__name__}): {exc}")
+            print(t("conn_attempt_failed", name, attempt, retries,
+                    type(exc).__name__, exc))
             if attempt < retries:
                 await asyncio.sleep(RETRY_DELAY)
-    raise RuntimeError(f"Verbindung zu {name} fehlgeschlagen nach {retries} Versuchen") from last_exc
+    raise RuntimeError(t("conn_gave_up", name, retries)) from last_exc
 
 
 async def ensure_ieco(dev_conf: dict, only_if_on: bool) -> bool:
@@ -263,12 +464,12 @@ async def ensure_ieco(dev_conf: dict, only_if_on: bool) -> bool:
     try:
         device = await connect_and_refresh(dev_conf)
     except RuntimeError as exc:
-        print(f"[{name}] FEHLER: {exc}")
+        print(t("dev_error", name, exc))
         return False
 
     try:
         if not device.online:
-            print(f"[{name}] FEHLER: Geraet meldet sich nicht als online.")
+            print(t("dev_not_online", name))
             return False
 
         is_on = device.power_state
@@ -279,8 +480,7 @@ async def ensure_ieco(dev_conf: dict, only_if_on: bool) -> bool:
         # ohne get_capabilities() korrekt; der ieco-Zustand spielt hier keine
         # Rolle - also kein get_capabilities(), kein apply(), keine Netzwerklast.
         if only_if_on and not is_on:
-            print(f"[{name}] --only-if-on aktiv und Geraet ist aus. "
-                  f"Keine Aktion, keine weiteren Abfragen.")
+            print(t("dev_off_only_if_on", name))
             return True
 
         # Ab hier brauchen wir den ECHTEN ieco-Zustand (fuer die Statusanzeige,
@@ -292,16 +492,14 @@ async def ensure_ieco(dev_conf: dict, only_if_on: bool) -> bool:
             await device.get_capabilities()
             await device.refresh()
         except Exception as exc:
-            print(f"[{name}] FEHLER bei get_capabilities()/refresh(): "
-                  f"{type(exc).__name__}: {exc}")
+            print(t("dev_caps_failed", name, type(exc).__name__, exc))
             return False
 
-        print(f"[{name}] Status vor Aktion: power={is_on}, "
-              f"mode={_mode_label(device.operational_mode)}, "
-              f"ieco={device.ieco}, eco={device.eco}")
+        print(t("dev_status_before", name, is_on,
+                _mode_label(device.operational_mode), device.ieco, device.eco))
 
         if not device.supports_ieco:
-            print(f"[{name}] FEHLER: Geraet meldet keine iECO-Faehigkeit.")
+            print(t("dev_no_ieco_capability", name))
             return False
 
         # Kurzschluss BEWUSST vor dem Modus-Guard: laeuft iECO bereits, ist alles
@@ -309,8 +507,7 @@ async def ensure_ieco(dev_conf: dict, only_if_on: bool) -> bool:
         # zu enge Modus-Liste niemals einen tatsaechlich funktionierenden Zustand
         # als Problem melden.
         if is_on and device.ieco:
-            print(f"[{name}] Bereits im gewuenschten Zustand (an, iECO aktiv). "
-                  f"Keine weiteren Abfragen notwendig.")
+            print(t("dev_already_desired", name))
             return True
 
         # Modus-Guard: iECO ist an den Betriebsmodus gebunden (siehe
@@ -322,21 +519,20 @@ async def ensure_ieco(dev_conf: dict, only_if_on: bool) -> bool:
         mode_value = _mode_value(device.operational_mode)
         if mode_value is not None and mode_value not in IECO_CAPABLE_MODE_VALUES:
             mode_text = _mode_label(device.operational_mode)
-            print(f"[{name}] Betriebsmodus {mode_text} unterstuetzt kein iECO "
-                  f"(nur {IECO_CAPABLE_MODE_NAMES}).")
+            print(t("dev_mode_unsupported", name, mode_text,
+                    t("mode_names_capable")))
             if only_if_on:
                 # Ein bewusst gewaehlter Modus ist kein Fehlerzustand. Im
                 # 20-Minuten-Cron wuerde ein Fehlschlag hier taeglich 72 Meldungen
                 # und Exit 2 erzeugen - konsistent zum ausgeschalteten Geraet wird
                 # das deshalb als "nichts zu tun" gewertet.
-                print(f"[{name}] --only-if-on aktiv: keine Aktion, kein Fehler.")
+                print(t("dev_mode_only_if_on", name))
                 return True
             # Beim ausdruecklichen Aufruf wollte der Nutzer iECO. Nichts schalten
             # (auch nicht einschalten - eine halbe Aktion ohne iECO waere nicht das
             # Gewuenschte), aber klar sagen, was zu tun ist, und den Lauf als
             # nicht erfolgreich werten.
-            print(f"[{name}] Es wurde nichts geschaltet. Bitte die Anlage auf "
-                  f"{IECO_CAPABLE_MODE_NAMES} stellen und erneut aufrufen.")
+            print(t("dev_mode_nothing_switched", name, t("mode_names_capable")))
             return False
 
         was_off = not is_on
@@ -354,8 +550,8 @@ async def ensure_ieco(dev_conf: dict, only_if_on: bool) -> bool:
                 break
             except Exception as exc:
                 last_exc = exc
-                print(f"  [{name}] apply()-Versuch {attempt}/{ACTION_RETRIES} "
-                      f"fehlgeschlagen ({type(exc).__name__}): {exc}")
+                print(t("dev_apply_attempt_failed", name, attempt, ACTION_RETRIES,
+                        type(exc).__name__, exc))
                 if attempt < ACTION_RETRIES:
                     await asyncio.sleep(RETRY_DELAY)
                     await close_device(device)
@@ -378,12 +574,12 @@ async def ensure_ieco(dev_conf: dict, only_if_on: bool) -> bool:
                         device.ieco = True
                     except Exception as exc2:
                         last_exc = exc2
-                        print(f"  [{name}] Reconnect vor Wiederholung "
-                              f"fehlgeschlagen ({type(exc2).__name__}): {exc2}")
+                        print(t("dev_reconnect_failed", name,
+                                type(exc2).__name__, exc2))
                         break
 
         if not applied:
-            print(f"[{name}] FEHLER beim Setzen: {last_exc}")
+            print(t("dev_apply_failed", name, last_exc))
             return False
 
         await asyncio.sleep(2.0)
@@ -394,18 +590,17 @@ async def ensure_ieco(dev_conf: dict, only_if_on: bool) -> bool:
             # Ursache der frueher zu Unrecht als Fehlschlag gewerteten Verifikation.
             device = await connect_and_refresh(dev_conf, with_capabilities=True)
         except RuntimeError as exc:
-            print(f"[{name}] FEHLER bei Verifikation: {exc}")
+            print(t("dev_verify_failed", name, exc))
             return False
 
-        print(f"[{name}] Status nach Aktion: power={device.power_state}, "
-              f"mode={_mode_label(device.operational_mode)}, "
-              f"ieco={device.ieco}, eco={device.eco}")
+        print(t("dev_status_after", name, device.power_state,
+                _mode_label(device.operational_mode), device.ieco, device.eco))
 
         if not device.ieco:
-            print(f"[{name}] FEHLER: iECO ist laut Geraet weiterhin deaktiviert!")
+            print(t("dev_still_disabled", name))
             return False
 
-        print(f"[{name}] OK: iECO ist aktiv (vom Geraet bestaetigt).")
+        print(t("dev_ok", name))
         return True
 
     finally:
@@ -427,11 +622,11 @@ def _device_config_problem(d: dict) -> str | None:
     sauberen Fehlschlag (im try -> RuntimeError -> Exit 2)."""
     for key in ("name", "ip", "id"):
         if key not in d:
-            return f"Pflichtfeld '{key}' fehlt"
+            return t("cfgchk_missing_field", key)
     try:
         int(d["id"])
     except (TypeError, ValueError):
-        return f"Feld 'id' ist nicht numerisch ({d['id']!r})"
+        return t("cfgchk_id_not_numeric", repr(d["id"]))
     # port ist optional (Default 6444), wird aber - wenn vorhanden - ebenfalls
     # ausserhalb des try mit int() konvertiert; ein nicht-numerischer/leerer/
     # None-Wert wuerde dort ungefangen abbrechen. Fehlt der Schluessel, greift
@@ -440,25 +635,24 @@ def _device_config_problem(d: dict) -> str | None:
         try:
             int(d["port"])
         except (TypeError, ValueError):
-            return f"Feld 'port' ist nicht numerisch ({d['port']!r})"
+            return t("cfgchk_port_not_numeric", repr(d["port"]))
     return None
 
 
 async def main() -> None:
     parser = argparse.ArgumentParser(
         prog=CMD_MAIN,
-        description="Stellt sicher, dass iECO auf Midea-Klimaanlagen aktiv ist.",
+        description=t("cli_description"),
     )
     parser.add_argument(
         "target",
         nargs="?",
-        help="Geraetename aus devices.json, 'all' (alle Geraete) oder 'list' "
-             "(konfigurierte Geraete anzeigen). Ohne Argument: Uebersicht.",
+        help=t("cli_help_target"),
     )
     parser.add_argument(
         "--only-if-on",
         action="store_true",
-        help="Geraet NICHT einschalten. Nur pruefen und iECO nachziehen, falls es bereits laeuft.",
+        help=t("cli_help_only_if_on"),
     )
     args = parser.parse_args()
 
@@ -478,8 +672,7 @@ async def main() -> None:
     dict_entries = [d for d in config["devices"] if isinstance(d, dict)]
     nondict = len(config["devices"]) - len(dict_entries)
     if nondict:
-        print(f"WARNUNG: {nondict} unerwartete(r) Eintrag/Eintraege in "
-              f"{CONFIG_PATH.name} uebersprungen (kein Objekt).")
+        print(t("main_skipped_entries", nondict, CONFIG_PATH.name))
 
     # Objekt-Eintraege ohne die zum Verbinden noetigen Felder (name/ip/id)
     # wuerden spaeter in connect_and_refresh mit einem ungefangenen KeyError/
@@ -491,14 +684,13 @@ async def main() -> None:
         if problem is None:
             devices.append(d)
         else:
-            label = d["name"] if isinstance(d.get("name"), str) else "(ohne Namen)"
-            print(f"WARNUNG: Geraet {label!r} in {CONFIG_PATH.name} "
-                  f"unvollstaendig ({problem}) - uebersprungen.")
+            label = d["name"] if isinstance(d.get("name"), str) else t("ov_unnamed")
+            print(t("main_incomplete_entry", repr(label), CONFIG_PATH.name, problem))
 
     if args.target != TARGET_ALL:
         devices = [d for d in devices if d.get("name") == args.target]
         if not devices:
-            print(f"Geraet '{args.target}' nicht in devices.json gefunden.")
+            print(t("main_device_not_found", args.target))
             sys.exit(1)
     elif not devices:
         # 'all' auf leerer Geraeteliste: all([]) waere True und wuerde
@@ -507,7 +699,7 @@ async def main() -> None:
         # konsistent zum Schwestermodul midea_refresh_tokens.py, das bei leerem
         # --all ebenfalls mit Exit 1 endet -, damit eine Fehlkonfiguration auch
         # im stillen Cron-Lauf sichtbar wird.
-        print("Keine Geraete in devices.json konfiguriert. Nichts zu tun.")
+        print(t("main_no_devices_configured"))
         sys.exit(1)
 
     results = []
@@ -516,10 +708,10 @@ async def main() -> None:
         await asyncio.sleep(1.0)
 
     if all(results):
-        print("Gesamtergebnis: OK.")
+        print(t("main_result_ok"))
         sys.exit(0)
     else:
-        print("Gesamtergebnis: FEHLER - mindestens ein Geraet hat ein Problem.")
+        print(t("main_result_error"))
         sys.exit(2)
 
 

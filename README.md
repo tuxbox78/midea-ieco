@@ -52,7 +52,7 @@ MIDEA_IECO_DIR=/your/custom/path MIDEA_IECO_BIN_DIR=/your/custom/bin \
   bash -c "$(curl -fsSL https://raw.githubusercontent.com/tuxbox78/midea-ieco/main/install.sh)"
 ```
 
-The installer, its update mode, and the whole onboarding are **bilingual (English/German)**. The language follows your locale automatically — English by default, German on a `de_*` locale (`LANG` / `LC_ALL` / `LC_MESSAGES`). Force it explicitly with the `MIDEA_IECO_LANG` environment variable (`en` or `de`), which is handy for the one-liner:
+The installer, its update mode, the whole onboarding **and both command-line tools at runtime** are **bilingual (English/German)** — including `--help` and every status and error message. The language follows your locale automatically — English by default, German on a `de_*` locale (`LANG` / `LC_ALL` / `LC_MESSAGES`). Force it explicitly with the `MIDEA_IECO_LANG` environment variable (`en` or `de`), which is handy for the one-liner:
 
 ```bash
 MIDEA_IECO_LANG=de \
@@ -498,6 +498,7 @@ The app does not provide conditional logic such as "enable iECO only if the unit
 | `midea_ieco_ensure.py` | Checks and sets power status and iECO for one or all configured devices |
 | `midea_refresh_tokens.py` | Retrieves fresh token/key pairs (no cloud password) and updates `devices.json` |
 | `midea_ieco_ensure.sh` | Wrapper for SSH/Shortcuts: runs `midea_ieco_ensure.py` with the venv Python and forwards all arguments |
+| `midea_i18n.py` | Shared English/German language resolution used by both Python tools |
 | `devices.example.json` | Template for `devices.json` — copy it, then fill in your devices |
 | `devices.json` | Your local device config (name, IP, port, ID, token, key). Generated locally, **git-ignored** |
 

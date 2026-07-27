@@ -45,6 +45,11 @@ import tempfile
 import time
 from pathlib import Path
 
+# Sprachwahl: gemeinsame Mechanik fuer beide Werkzeuge (Reihenfolge und
+# englischer Default sind dort dokumentiert). resolve_lang wird mitimportiert,
+# damit es weiterhin ueber dieses Modul erreichbar bleibt.
+from midea_i18n import make_translator, resolve_lang  # noqa: F401
+
 CONFIG_PATH = Path(__file__).parent / "devices.json"
 SUBPROCESS_TIMEOUT = 60
 
@@ -67,34 +72,6 @@ VERIFY_TIMEOUT = 15
 # Grund (RETRY_DELAY).
 CANDIDATE_DELAY = 5.0
 DEVICE_DELAY = 2.0
-
-
-# ---------------------------------------------------------------------------
-# Sprachwahl der Ausgabe
-#
-# Spiegelt bewusst 1:1 resolve_lang() aus install.sh, damit Installer und
-# Laufzeit dieselbe Sprache sprechen: MIDEA_IECO_LANG schlaegt die Locale
-# (LC_ALL > LC_MESSAGES > LANG), Default ist ENGLISCH. Grund fuer den
-# englischen Default: das Projekt hat englischsprachige Nutzer, die sonst
-# deutsche Fehlermeldungen bekommen, die sie nicht lesen koennen - genau das
-# ist in Issue #2 passiert. Wer eine deutsche Locale hat (LANG=de_DE.UTF-8),
-# bekommt weiterhin Deutsch, ohne etwas zu konfigurieren.
-#
-# Hinweis fuer Cron: Cron-Jobs laufen oft ohne gesetzte Locale, dort greift
-# also der englische Default. Wer die Logs auf Deutsch moechte, setzt in der
-# Crontab MIDEA_IECO_LANG=de.
-# ---------------------------------------------------------------------------
-def resolve_lang() -> str:
-    """Ermittelt die Ausgabesprache ('de' oder 'en'). Reihenfolge:
-    MIDEA_IECO_LANG > LC_ALL > LC_MESSAGES > LANG > 'en'."""
-    raw = os.environ.get("MIDEA_IECO_LANG") or ""
-    if not raw:
-        raw = (os.environ.get("LC_ALL") or os.environ.get("LC_MESSAGES")
-               or os.environ.get("LANG") or "")
-    raw = raw.strip().lower()
-    if raw in ("de", "german", "deutsch") or raw.startswith(("de_", "de-", "de.")):
-        return "de"
-    return "en"
 
 
 # Katalog: key -> (englisch, deutsch). Platzhalter im printf-Stil (%s), damit
@@ -234,17 +211,7 @@ _MESSAGES: dict[str, tuple[str, str]] = {
 }
 
 
-def t(key: str, *args: object) -> str:
-    """Liefert den Katalogtext zu ``key`` in der aktiven Sprache.
-
-    Die Sprache wird bei JEDEM Aufruf neu ermittelt (nicht beim Import
-    zwischengespeichert): das haelt die Funktion frei von verstecktem Zustand
-    und macht sie in Tests ohne Modul-Reload umschaltbar. Ein unbekannter
-    Schluessel wuerde einen KeyError ausloesen - das ist beabsichtigt, ein
-    Tippfehler soll im Test auffallen und nicht als leere Zeile im Log landen."""
-    english, german = _MESSAGES[key]
-    text = german if resolve_lang() == "de" else english
-    return text % args if args else text
+t = make_translator(_MESSAGES)
 
 # Extraktion der (key, token)-Paare aus der rohen --debug-Ausgabe der Cloud.
 # Beispielformat (einzeilig):

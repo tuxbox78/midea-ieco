@@ -10,6 +10,8 @@ import asyncio
 import enum
 import io
 import json
+import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -24,6 +26,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import _stub_msmart  # noqa: E402,F401  (registriert Fake-msmart VOR dem Import)
 import midea_ieco_ensure as mie  # noqa: E402
+
+# Ausgabesprache fuer das GESAMTE Modul auf Englisch pinnen (den Default).
+# Ohne dieses Pinning haengen alle Textzusicherungen an der Locale des
+# Ausfuehrenden: auf einem deutschen Entwicklerrechner waeren sie gruen, im
+# (locale-losen) CI rot. Die deutsche Fassung prueft GermanOutputTests gezielt.
+_LANG_PATCHER = None
+
+
+def setUpModule():
+    global _LANG_PATCHER
+    _LANG_PATCHER = mock.patch.dict(os.environ, {"MIDEA_IECO_LANG": "en"})
+    _LANG_PATCHER.start()
+
+
+def tearDownModule():
+    if _LANG_PATCHER is not None:
+        _LANG_PATCHER.stop()
 
 
 class LoadConfigTests(unittest.TestCase):
@@ -199,7 +218,7 @@ class EmptyAllTests(unittest.TestCase):
             with self.assertRaises(SystemExit) as cm:
                 asyncio.run(mie.main())
         self.assertEqual(cm.exception.code, 1)
-        self.assertIn("Keine Geraete", out.getvalue())
+        self.assertIn("No devices configured", out.getvalue())
 
     def test_all_on_nonempty_devices_does_not_trip_guard(self):
         # Positivfall: bei >=1 Geraet greift der Guard NICHT; main() laeuft
@@ -217,7 +236,7 @@ class EmptyAllTests(unittest.TestCase):
             with self.assertRaises(SystemExit) as cm:
                 asyncio.run(mie.main())
         self.assertEqual(cm.exception.code, 0)
-        self.assertNotIn("Keine Geraete", out.getvalue())
+        self.assertNotIn("No devices configured", out.getvalue())
 
 
 class CapabilityGatedDevice:
@@ -357,7 +376,7 @@ class ModeGuardTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 _, out, dev = self._run(mode)
                 self.assertEqual(dev.apply_calls, 0)
-                self.assertIn("unterstuetzt kein iECO", out)
+                self.assertIn("does not support iECO", out)
 
     def test_incapable_mode_is_failure_on_explicit_call(self):
         # Ohne --only-if-on wollte der Nutzer aktiv iECO -> kein stilles "OK".
@@ -365,7 +384,7 @@ class ModeGuardTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 ok, out, _ = self._run(mode, only_if_on=False)
                 self.assertFalse(ok)
-                self.assertIn("nichts geschaltet", out)
+                self.assertIn("Nothing was switched", out)
 
     def test_incapable_mode_is_no_error_with_only_if_on(self):
         # Im Cron ist ein bewusst gewaehlter Modus kein Fehlerzustand, sonst
@@ -374,7 +393,7 @@ class ModeGuardTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 ok, out, _ = self._run(mode, only_if_on=True)
                 self.assertTrue(ok)
-                self.assertIn("kein Fehler", out)
+                self.assertIn("not an error", out)
 
     def test_active_ieco_short_circuits_before_guard(self):
         # Laeuft iECO bereits, darf eine zu enge Modus-Liste das NICHT als
@@ -382,8 +401,8 @@ class ModeGuardTests(unittest.TestCase):
         ok, out, dev = self._run(_OpMode.FAN_ONLY, ieco=True)
         self.assertTrue(ok)
         self.assertEqual(dev.apply_calls, 0)
-        self.assertIn("Bereits im gewuenschten Zustand", out)
-        self.assertNotIn("unterstuetzt kein iECO", out)
+        self.assertIn("Already in the desired state", out)
+        self.assertNotIn("does not support iECO", out)
 
     def test_unknown_mode_fails_open(self):
         # Laesst sich der Modus nicht bestimmen, wird NICHT blockiert - sonst
@@ -391,7 +410,7 @@ class ModeGuardTests(unittest.TestCase):
         ok, out, dev = self._run("unbekannt")
         self.assertTrue(ok)
         self.assertEqual(dev.apply_calls, 1)
-        self.assertNotIn("unterstuetzt kein iECO", out)
+        self.assertNotIn("does not support iECO", out)
 
     def test_off_device_in_incapable_mode_is_not_powered_on(self):
         # Kein Einschalten als halbe Aktion: der Nutzer wollte iECO, nicht
@@ -404,7 +423,7 @@ class ModeGuardTests(unittest.TestCase):
     def test_guard_message_names_the_mode_and_the_remedy(self):
         _, out, _ = self._run(_OpMode.FAN_ONLY)
         self.assertIn("FAN_ONLY (5)", out)
-        self.assertIn("COOL oder HEAT", out)
+        self.assertIn("COOL or HEAT", out)
 
 
 class OverviewTests(unittest.TestCase):
@@ -443,7 +462,7 @@ class OverviewTests(unittest.TestCase):
         self._write({"devices": []})
         code, out = self._run([])
         self.assertEqual(code, 0)
-        self.assertIn("Beispiele:", out)
+        self.assertIn("Examples:", out)
         # Die Uebersicht muss die Schwesterbefehle nennen (Discoverability-Ziel).
         self.assertIn("midea-ieco-refresh-tokens", out)
         self.assertIn("midea-ieco-update", out)
@@ -486,7 +505,7 @@ class OverviewTests(unittest.TestCase):
         self._write({"devices": [{"name": "list", "ip": "1.2.3.4", "port": 6444}]})
         code, out = self._run(["list"])
         self.assertEqual(code, 0)
-        self.assertIn("WARNUNG", out)
+        self.assertIn("WARNING", out)
 
     def test_unknown_device_name_still_exits_1(self):
         # Regressionsschutz: ein echter (nicht reservierter) Name bleibt Exit 1.
@@ -504,7 +523,7 @@ class OverviewTests(unittest.TestCase):
         code, out = self._run(["list"])
         self.assertEqual(code, 0)
         self.assertIn("Wohnzimmer", out)
-        self.assertIn("uebersprungen", out)
+        self.assertIn("skipped", out)
 
     def test_nonstring_name_does_not_crash_or_leak(self):
         # Ein Objekt unter 'name' ist unhashbar -> die reservierte-Wort-Pruefung
@@ -523,7 +542,7 @@ class OverviewTests(unittest.TestCase):
         self.path.write_bytes(b'{"devices": [{"name": "K\xfcche", "ip": "1.2.3.4"}]}')
         code, out = self._run(["list"])
         self.assertEqual(code, 0)
-        self.assertIn("Hinweis", out)
+        self.assertIn("Note", out)
 
 
 class OverviewWithoutMsmartTests(unittest.TestCase):
@@ -540,11 +559,15 @@ class OverviewWithoutMsmartTests(unittest.TestCase):
             self.skipTest("msmart installiert - der msmart-freie Pfad ist nicht pruefbar")
         # Der echte Skriptlauf importiert msmart NICHT (Lazy-Import erst beim
         # Geraetezugriff), die Uebersicht muss also sauber mit Exit 0 erscheinen.
+        # Sprache explizit mitgeben: der Unterprozess erbt zwar os.environ (und
+        # damit das Pinning aus setUpModule), aber darauf soll sich der Test
+        # nicht stillschweigend verlassen.
+        env = {**os.environ, "MIDEA_IECO_LANG": "en"}
         result = subprocess.run(
             [sys.executable, str(REPO_DIR / "midea_ieco_ensure.py"), "list"],
-            capture_output=True, text=True)
+            capture_output=True, text=True, env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Beispiele:", result.stdout)
+        self.assertIn("Examples:", result.stdout)
 
 
 class MalformedEntryDeviceSelectionTests(unittest.TestCase):
@@ -589,7 +612,7 @@ class MalformedEntryDeviceSelectionTests(unittest.TestCase):
                                  {"name": "W", "ip": "1.2.3.4", "id": 1, "token": "t", "key": "k"}]})
         code, out = self._run(["all"])
         self.assertEqual(code, 0)
-        self.assertIn("WARNUNG", out)
+        self.assertIn("WARNING", out)
         self.assertEqual(len(self.processed), 1)
 
     def test_named_target_found_despite_nondict_sibling(self):
@@ -604,7 +627,7 @@ class MalformedEntryDeviceSelectionTests(unittest.TestCase):
         self._write({"devices": ["oops", 123]})
         code, out = self._run(["all"])
         self.assertEqual(code, 1)
-        self.assertIn("WARNUNG", out)
+        self.assertIn("WARNING", out)
         self.assertEqual(len(self.processed), 0)
 
     def test_all_skips_incomplete_dict(self):
@@ -613,7 +636,7 @@ class MalformedEntryDeviceSelectionTests(unittest.TestCase):
                                  {"name": "W", "ip": "1.2.3.4", "id": 1, "token": "t", "key": "k"}]})
         code, out = self._run(["all"])
         self.assertEqual(code, 0)
-        self.assertIn("unvollstaendig", out)
+        self.assertIn("incomplete", out)
         self.assertEqual(len(self.processed), 1)
 
     def test_named_incomplete_target_not_found(self):
@@ -622,7 +645,7 @@ class MalformedEntryDeviceSelectionTests(unittest.TestCase):
         self._write({"devices": [{"name": "W", "ip": "1.2.3.4"}]})  # kein id
         code, out = self._run(["W"])
         self.assertEqual(code, 1)
-        self.assertIn("unvollstaendig", out)
+        self.assertIn("incomplete", out)
         self.assertEqual(len(self.processed), 0)
 
     def test_noninteger_id_skipped(self):
@@ -630,7 +653,7 @@ class MalformedEntryDeviceSelectionTests(unittest.TestCase):
                                  {"name": "W", "ip": "1.2.3.4", "id": 1, "token": "t", "key": "k"}]})
         code, out = self._run(["all"])
         self.assertEqual(code, 0)
-        self.assertIn("numerisch", out)
+        self.assertIn("numeric", out)
         self.assertEqual(len(self.processed), 1)
 
     def test_bad_port_skipped(self):
@@ -655,7 +678,7 @@ class MalformedEntryDeviceSelectionTests(unittest.TestCase):
             with self.assertRaises(SystemExit) as cm:
                 asyncio.run(mie.main())
         self.assertEqual(cm.exception.code, 1)
-        self.assertIn("unvollstaendig", out.getvalue())
+        self.assertIn("incomplete", out.getvalue())
 
 
 class DeviceConfigProblemTests(unittest.TestCase):
@@ -677,13 +700,13 @@ class DeviceConfigProblemTests(unittest.TestCase):
         self.assertIn("id", mie._device_config_problem({"name": "W", "ip": "1.2.3.4"}))
 
     def test_noninteger_id_flagged(self):
-        self.assertIn("numerisch", mie._device_config_problem(
+        self.assertIn("numeric", mie._device_config_problem(
             {"name": "W", "ip": "1.2.3.4", "id": "abc"}))
 
     def test_none_and_list_id_flagged(self):
-        self.assertIn("numerisch", mie._device_config_problem(
+        self.assertIn("numeric", mie._device_config_problem(
             {"name": "W", "ip": "1.2.3.4", "id": None}))
-        self.assertIn("numerisch", mie._device_config_problem(
+        self.assertIn("numeric", mie._device_config_problem(
             {"name": "W", "ip": "1.2.3.4", "id": [1]}))
 
     def test_valid_or_absent_port_ok(self):
@@ -701,6 +724,97 @@ class DeviceConfigProblemTests(unittest.TestCase):
         for bad in ("abc", "", None, [1]):
             self.assertIn("port", mie._device_config_problem(
                 {"name": "W", "ip": "1.2.3.4", "id": 1, "port": bad}))
+
+
+class GermanOutputTests(unittest.TestCase):
+    """Gegenprobe zum modulweiten Englisch-Pinning: dieselben Pfade auf Deutsch.
+
+    Zweck ist nicht, jede Formulierung zu wiederholen, sondern zu belegen, dass
+    die Sprache tatsaechlich durchschlaegt - und zwar in beiden Richtungen. Ohne
+    diesen Test koennte der deutsche Katalogzweig unbemerkt kaputtgehen, weil
+    alle uebrigen Tests nur die englische Fassung sehen."""
+
+    def setUp(self):
+        patcher = mock.patch.dict(os.environ, {"MIDEA_IECO_LANG": "de"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "devices.json"
+        orig = mie.CONFIG_PATH
+        mie.CONFIG_PATH = self.path
+        self.addCleanup(lambda: setattr(mie, "CONFIG_PATH", orig))
+
+    def test_overview_is_german(self):
+        self.path.write_text('{"devices": []}', encoding="utf-8")
+        with mock.patch.object(mie.sys, "argv", ["midea-ieco", "list"]), \
+                redirect_stdout(io.StringIO()) as out:
+            with self.assertRaises(SystemExit) as cm:
+                asyncio.run(mie.main())
+        self.assertEqual(cm.exception.code, 0)
+        self.assertIn("Beispiele:", out.getvalue())
+        self.assertNotIn("Examples:", out.getvalue())
+
+    def test_mode_guard_message_is_german(self):
+        d_action = FakeDevice(power_state=True, ieco=False)
+        d_action.operational_mode = _OpMode.FAN_ONLY
+        connect = _scripted_connect([d_action, FakeDevice(power_state=True, ieco=True)])
+        with ExitStack() as es:
+            es.enter_context(mock.patch.object(mie, "connect_and_refresh", connect))
+            es.enter_context(mock.patch.object(mie.asyncio, "sleep", _anoop))
+            out = es.enter_context(redirect_stdout(io.StringIO()))
+            asyncio.run(mie.ensure_ieco({"name": "X", "ip": "1", "id": "1"},
+                                        only_if_on=False))
+        text = out.getvalue()
+        self.assertIn("unterstuetzt kein iECO", text)
+        # Die Modusnamen selbst bleiben unuebersetzt - nur das Bindewort wechselt.
+        self.assertIn("COOL oder HEAT", text)
+        self.assertIn("FAN_ONLY (5)", text)
+
+    def test_config_problem_reason_is_german(self):
+        self.assertIn("numerisch", mie._device_config_problem(
+            {"name": "W", "ip": "1.2.3.4", "id": "abc"}))
+
+    def test_empty_all_message_is_german(self):
+        self.path.write_text('{"devices": []}', encoding="utf-8")
+        with mock.patch.object(mie.sys, "argv", ["midea-ieco", "all"]), \
+                redirect_stdout(io.StringIO()) as out:
+            with self.assertRaises(SystemExit) as cm:
+                asyncio.run(mie.main())
+        self.assertEqual(cm.exception.code, 1)
+        self.assertIn("Keine Geraete", out.getvalue())
+
+
+class CatalogTests(unittest.TestCase):
+    """Der Katalog muss vollstaendig und in beiden Sprachen strukturgleich sein -
+    sonst faellt eine Luecke erst beim Nutzer auf (analog test_refresh_tokens.py)."""
+
+    def _used_keys(self):
+        src = (REPO_DIR / "midea_ieco_ensure.py").read_text(encoding="utf-8")
+        return set(re.findall(r'\bt\(\s*"([a-z0-9_]+)"', src))
+
+    def test_every_used_key_exists(self):
+        missing = self._used_keys() - set(mie._MESSAGES)
+        self.assertEqual(missing, set(), f"Verwendet, aber nicht im Katalog: {missing}")
+
+    def test_no_orphan_keys(self):
+        orphans = set(mie._MESSAGES) - self._used_keys()
+        self.assertEqual(orphans, set(), f"Im Katalog, aber unbenutzt: {orphans}")
+
+    def test_placeholder_count_matches_between_languages(self):
+        # Ungleiche %s-Zahl waere ein TypeError zur Laufzeit - ausgerechnet im
+        # Fehlerpfad, in dem man ihn am wenigsten gebrauchen kann.
+        for key, (english, german) in mie._MESSAGES.items():
+            self.assertEqual(english.count("%s"), german.count("%s"), key)
+
+    def test_both_languages_non_empty(self):
+        for key, (english, german) in mie._MESSAGES.items():
+            self.assertTrue(english.strip(), key)
+            self.assertTrue(german.strip(), key)
+
+    def test_unknown_key_raises(self):
+        with self.assertRaises(KeyError):
+            mie.t("does_not_exist")
 
 
 if __name__ == "__main__":
