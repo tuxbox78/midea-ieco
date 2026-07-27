@@ -1115,6 +1115,44 @@ rc=0; [ "$(cksum < "$CRON_FILE")" = "$CRON_SUM_KEEP" ] || rc=1
 assert "$rc" "Re-Run mit Bestand: Crontab byte-identisch (kein Duplikat, kein Verlust)"
 
 # ---------------------------------------------------------------------------
+echo "== Cron-Sprachhinweis: BEIDE Aufrufstellen wirken wirklich =="
+# ---------------------------------------------------------------------------
+# Bis hierher haftete die Erreichbarkeit an einer Quelltext-Zaehlung
+# ('grep -c print_cron_lang_hint'). Die bleibt gruen, wenn man die Aufrufstelle
+# auf print_cron_lang_hint "" setzt - der Hinweis waere tot, die Suite still.
+# Beide Stellen laufen deshalb jetzt end-to-end.
+#
+# Die Zusicherung ankert auf dem WARNTEXT, nicht auf der korrigierten Zeile:
+# der Installer druckt die drei Cron-Zeilen weiter oben ohnehin unbedingt, eine
+# Pruefung auf ihr Vorkommen waere im Cron-Abschnitt vakuum-gruen (gemessen: mit
+# entkernter Aufrufstelle erscheint die Zeile weiterhin).
+LANG_CHOICE=de
+CRON_LANG_WARN="$(t cron_lang_missing de)"
+OLD_MANAGED="*/20 * * * * cd /opt && venv/bin/python3 midea_ieco_ensure.py all --only-if-on >> /opt/ieco.log 2>&1 $CANONICAL_CRON_MARKER
+0 3 * * 0 cd /opt && venv/bin/python3 midea_refresh_tokens.py --all >> /opt/refresh.log 2>&1 $CANONICAL_CRON_MARKER"
+
+# (a) Cron-Abschnitt: Marker vorhanden -> 'bereits eingetragen' + Sprachhinweis.
+setup_onboarding_sandbox onbhint1 "" "$OLD_MANAGED"
+ONB_INPUT=("" "1" "Wohnzimmer" "192.168.0.5" "12345" "n" "j")
+run_onboarding
+rc=0; grep -qF "$CRON_LANG_WARN" "$ONB_OUT" || rc=1
+assert "$rc" "Cron-Abschnitt: der Sprachhinweis erscheint wirklich"
+
+# (b) Re-Run-Zweig: vorhandene devices.json -> Skript endet VOR dem
+# Cron-Abschnitt, der Hinweis kommt nur aus dem eigenen Aufruf dort.
+setup_onboarding_sandbox onbhint2 "" "$OLD_MANAGED"
+printf '{"devices":[{"name":"W","ip":"1.2.3.4","port":6444,"id":1,"token":"","key":""}]}\n' \
+    > "$ONB/devices.json"
+ONB_INPUT=("")
+run_onboarding
+rc=0; [ "$ONB_RC" -eq 0 ] || rc=1
+assert "$rc" "Re-Run-Zweig laeuft durch (Exit $ONB_RC)"
+rc=0; grep -qE "Bereits eingerichtet|Already set up" "$ONB_OUT" || rc=1
+assert "$rc" "Re-Run-Zweig wurde wirklich genommen (kein Onboarding)"
+rc=0; grep -qF "$CRON_LANG_WARN" "$ONB_OUT" || rc=1
+assert "$rc" "Re-Run-Zweig: der Sprachhinweis erscheint wirklich"
+
+# ---------------------------------------------------------------------------
 echo "== Onboarding End-to-End: erkannte Geraete werden richtig uebernommen =="
 # ---------------------------------------------------------------------------
 # Der Regelfall fuer echte Nutzer: die Discovery findet Geraete, der Installer
@@ -1313,12 +1351,17 @@ $CL_LOGROT" "ZEILE_IECO" "inline gesetzte, aber LEERE Sprachvariable zaehlt nich
 assert_hint "MIDEA_IECO_LANG=de
 0 5 * * * /usr/bin/backup.sh" "" "Env-Zeile ohne verwaltete Zeilen: kein Hinweis"
 
-# Erreichbarkeit: der Re-Run-Zweig ('bereits eingerichtet') verlaesst das Skript
-# per exit 0, bevor der Cron-Abschnitt erreicht wird. Ohne einen eigenen Aufruf
-# dort war der Hinweis praktisch nur ueber '--reconfigure' samt bejahter
-# Cron-Frage zu sehen - also fast nie.
-rc=0; [ "$(grep -c 'print_cron_lang_hint "' "$INSTALL")" -eq 2 ] || rc=1
-assert "$rc" "Hinweis an BEIDEN Stellen aufgerufen (Re-Run-Zweig und Cron-Abschnitt)"
+# Die Erreichbarkeit BEIDER Aufrufstellen wird nicht mehr hier per Quelltext-
+# Zaehlung behauptet, sondern oben end-to-end gefahren ("Cron-Sprachhinweis:
+# BEIDE Aufrufstellen wirken wirklich"). Eine Zaehlung bleibt gruen, wenn man
+# eine Aufrufstelle auf print_cron_lang_hint "" setzt - sie sichert die
+# Verdrahtung, nicht die Wirkung.
+
+# Eine UNMARKIERTE Zeile gehoert dem Nutzer, auch wenn sie unser Werkzeug ruft:
+# der Hinweis wuerde vorschlagen, "die midea-ieco-Zeilen" zu ersetzen, und meinte
+# damit eine Zeile, die der Installer nie geschrieben hat.
+assert_hint "*/20 * * * * cd /opt && venv/bin/python3 midea_ieco_ensure.py all --only-if-on" \
+    "" "unmarkierte Zeile mit unserem Werkzeug loest keinen Hinweis aus"
 
 # ---------------------------------------------------------------------------
 echo "== PATH-Aufnahme: _path_rc_file / _write_path_block / ensure_bin_on_path =="
