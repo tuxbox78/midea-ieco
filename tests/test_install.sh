@@ -1218,6 +1218,34 @@ assert "$rc" "Re-Run-Zweig: der Hinweis auf den fehlenden Job erscheint"
 rc=0; [ "$(wc -c < "$CRON_WRITES" | tr -d ' ')" -eq 0 ] || rc=1
 assert "$rc" "Re-Run-Zweig: dabei wird NICHTS in die Crontab geschrieben"
 
+# Wackeliges 'crontab -l': liefert der Aufruf zweimal Unterschiedliches, darf
+# NICHTS geschrieben werden. Der gefaehrliche Fall ist ein transienter Lesefehler
+# bei vorhandener Crontab - der Schreibblock haelte den Bestand fuer leer und
+# ersetzte die Crontab des Nutzers durch unsere drei Zeilen, mit Erfolgsmeldung.
+CRON_UNSTABLE_WARN="$(t cron_read_unstable)"
+setup_onboarding_sandbox onbwackel "" "0 5 * * * /usr/local/bin/backup.sh"
+# Stub, dessen '-l' beim ZWEITEN Aufruf etwas anderes liefert.
+cat > "$ONB_STUB/crontab" <<EOF
+#!/usr/bin/env bash
+n_file="$WORK/onbwackel_lcount"
+case "\${1:-}" in
+  -l) n=\$(cat "\$n_file" 2>/dev/null || echo 0); n=\$((n + 1)); echo "\$n" > "\$n_file"
+      if [ "\$n" -eq 1 ]; then cat "$CRON_FILE"; else echo "etwas anderes"; fi ;;
+  -)  cat > "$CRON_FILE"; printf 'x' >> "$CRON_WRITES" ;;
+  *)  exit 0 ;;
+esac
+EOF
+chmod +x "$ONB_STUB/crontab"
+ONB_INPUT=("" "1" "Wohnzimmer" "192.168.0.5" "12345" "n" "j")
+run_onboarding
+
+rc=0; grep -qF "$CRON_UNSTABLE_WARN" "$ONB_OUT" || rc=1
+assert "$rc" "wackeliges 'crontab -l': der Nutzer wird gewarnt"
+rc=0; [ "$(wc -c < "$CRON_WRITES" | tr -d ' ')" -eq 0 ] || rc=1
+assert "$rc" "wackeliges 'crontab -l': es wird NICHTS geschrieben"
+rc=0; grep -qFx "0 5 * * * /usr/local/bin/backup.sh" "$CRON_FILE" || rc=1
+assert "$rc" "wackeliges 'crontab -l': der fremde Job bleibt erhalten"
+
 # ---------------------------------------------------------------------------
 echo "== Onboarding End-to-End: erkannte Geraete werden richtig uebernommen =="
 # ---------------------------------------------------------------------------

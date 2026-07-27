@@ -323,6 +323,8 @@ Verzeichnisse ueber Umgebungsvariablen ueberschreibbar:
                            de='Cron-Jobs eingetragen fuer Benutzer %s.' ;;
         cron_lang_missing) en='Your existing cron jobs do not set MIDEA_IECO_LANG, so they log in English (cron runs without a locale). Your crontab is left untouched - to switch them to "%s", replace the midea-ieco lines with:'
                            de='Deine bestehenden Cron-Jobs setzen MIDEA_IECO_LANG nicht und protokollieren daher auf Englisch (Cron laeuft ohne Locale). Deine Crontab bleibt unangetastet - um sie auf "%s" umzustellen, ersetze die midea-ieco-Zeilen durch:' ;;
+        cron_read_unstable) en='Reading the current crontab returned different results twice in a row - something is wrong with it. Nothing has been written; please add the lines above by hand.'
+                            de='Das Lesen der aktuellen Crontab lieferte zweimal hintereinander Unterschiedliches - dort stimmt etwas nicht. Es wurde nichts geschrieben; bitte ergaenze die Zeilen oben von Hand.' ;;
         cron_job_inactive) en='Your crontab contains midea-ieco lines, but at least one job is not active (removed or commented out) and therefore never runs. Your crontab is left untouched - to bring it back, add:'
                            de='Deine Crontab enthaelt midea-ieco-Zeilen, aber mindestens ein Job ist nicht aktiv (entfernt oder auskommentiert) und laeuft daher nie. Deine Crontab bleibt unangetastet - zum Wiederherstellen ergaenze:' ;;
         cron_no_crontab)   en="No 'crontab' command found. Cron jobs must be set up manually."
@@ -1543,7 +1545,18 @@ if command -v crontab &>/dev/null; then
     read -r -p "$(t prompt_cron_add)" DO_CRON
     if [[ "$DO_CRON" =~ ^[jJyY]$ ]]; then
         EXISTING_CRON=$(crontab -l 2>/dev/null || true)
-        if echo "$EXISTING_CRON" | grep -qF "$CRON_MARKER"; then
+        # Zweite Lesung als Absicherung. 'crontab -l' liefert fuer "es gibt
+        # keine Crontab" und fuer einen transienten Fehler denselben Exit-Code,
+        # die beiden Faelle sind also nicht unterscheidbar - der zweite ist der
+        # gefaehrliche: der Schreibblock unten haenge unsere Zeilen an einen
+        # faelschlich LEEREN Bestand an und ERSETZTE damit die Crontab des
+        # Nutzers, mit Erfolgsmeldung. Unterscheiden muss man die Faelle dafuer
+        # gar nicht; es genuegt, zweimal zu lesen und bei Abweichung nichts zu
+        # tun. Die drei Zeilen stehen oben bereits zum Uebernehmen.
+        EXISTING_CRON_CHECK=$(crontab -l 2>/dev/null || true)
+        if [[ "$EXISTING_CRON" != "$EXISTING_CRON_CHECK" ]]; then
+            warn "$(t cron_read_unstable)"
+        elif echo "$EXISTING_CRON" | grep -qF "$CRON_MARKER"; then
             warn "$(t cron_already)"
             # Bestehende verwaltete Zeilen werden BEWUSST nicht umgeschrieben -
             # die Crontab gehoert dem Nutzer, und '--update' sagt ausdruecklich
