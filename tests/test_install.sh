@@ -130,6 +130,47 @@ rc=0; [ -f "$INSTALL_DIR/credentials.json" ] || rc=1
 assert "$rc" "credentials.json bleibt erhalten (kein Auto-Loeschen)"
 
 # ---------------------------------------------------------------------------
+echo "== error() schreibt nach stderr (sonst stummer Abbruch) =="
+# ---------------------------------------------------------------------------
+# Die ECHTE error()-Zeile wird hier geladen, nicht der Stub von oben - der
+# schreibt schon immer nach stderr und wuerde die Pruefung ihres Gegenstands
+# berauben. extract_func taugt dafuer nicht: error() ist ein Einzeiler, dessen
+# '}' nicht am Zeilenanfang steht.
+#
+# Die Farbzeile MUSS mitgeladen werden. Ohne sie stirbt der Aufruf unter 'set -u'
+# an ${RED}, es erscheint auf keinem Kanal etwas - und eine Zusicherung der Form
+# "steht nicht auf stdout" waere dann aus dem falschen Grund gruen.
+err_out="$( ( set -u
+              eval "$(grep -m1 '^RED=' "$INSTALL")"
+              eval "$(grep -m1 '^error()' "$INSTALL")"
+              error "BOOMTEXT" ) 2>/dev/null || true )"
+err_err="$( ( set -u
+              eval "$(grep -m1 '^RED=' "$INSTALL")"
+              eval "$(grep -m1 '^error()' "$INSTALL")"
+              error "BOOMTEXT" ) 2>&1 >/dev/null || true )"
+
+rc=0; case "$err_err" in *BOOMTEXT*) : ;; *) rc=1 ;; esac
+assert "$rc" "error(): die Meldung erscheint auf stderr"
+rc=0; case "$err_out" in *BOOMTEXT*) rc=1 ;; esac
+assert "$rc" "error(): auf stdout erscheint sie NICHT (sonst verschluckt sie \$( ))"
+
+# Der Fall, um den es geht: ein Pfad mit Zeilenumbruch bricht shell_quote_for_cron
+# ab. Frueher landete die Meldung im gefangenen Wert und der Nutzer sah nichts.
+# Bewusst OHNE eigenen t()-Stub: die Subshell erbt das oben geladene t(), also
+# den echten Katalogtext. Ein zusaetzlicher Stub waere fuer shellcheck eine nie
+# direkt aufgerufene Funktion (SC2317) und liesse die CI scheitern.
+SQ_ERRTEXT="$(t err_cron_newline)"
+sq_out="$( ( set -u
+             eval "$(grep -m1 '^RED=' "$INSTALL")"
+             eval "$(grep -m1 '^error()' "$INSTALL")"
+             eval "$(extract_func shell_quote_for_cron "$INSTALL")"
+             shell_quote_for_cron "$(printf 'a\nb')" ) 2>/dev/null || true )"
+rc=0; case "$sq_out" in *"$SQ_ERRTEXT"*) rc=1 ;; esac
+assert "$rc" "shell_quote_for_cron: der Fehlertext landet nicht im Ergebniswert"
+rc=0; [ -n "$SQ_ERRTEXT" ] || rc=1
+assert "$rc" "Gegenprobe: der erwartete Fehlertext ist ueberhaupt nicht leer"
+
+# ---------------------------------------------------------------------------
 echo "== shell_quote_for_cron (#4) =="
 # ---------------------------------------------------------------------------
 eval "$(extract_func shell_quote_for_cron "$INSTALL")"

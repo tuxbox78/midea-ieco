@@ -25,7 +25,13 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC
 info()  { echo -e "${BLUE}[INFO]${NC}  $*"; }
 ok()    { echo -e "${GREEN}[OK]${NC}    $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
-error() { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
+# error() schreibt bewusst nach STDERR. Mehrere Funktionen werden in einer
+# Kommandosubstitution aufgerufen (resolve_extracted_root_dir, shell_quote_for_cron);
+# auf stdout landete ihre Fehlermeldung dort IM ERGEBNISWERT statt auf dem
+# Bildschirm, und "set -e" brach danach vollkommen stumm ab - ein Installations-
+# pfad mit Zeilenumbruch endete ohne ein Wort. Nur error() wird umgeleitet:
+# info/ok/warn sind Fortschrittsausgaben und gehoeren auf stdout.
+error() { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 
 # Zentrales Aufraeumen: wird bei JEDEM Skriptende ausgefuehrt (Erfolg, Fehler,
 # Abbruch per Strg+C) - verhindert verwaiste Temp-Dateien/Verzeichnisse.
