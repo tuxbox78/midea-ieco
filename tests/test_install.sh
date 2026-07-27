@@ -21,6 +21,20 @@
 # shellcheck disable=SC2034,SC2030,SC2031,SC1090
 set -uo pipefail
 
+# Umgebung neutralisieren, BEVOR irgendetwas laeuft. install.sh loest sein
+# Zielverzeichnis mit hoechster Prioritaet aus MIDEA_IECO_RESOLVED_DIR auf
+# (Regel 1) - ist die Variable von aussen gesetzt, richten sich saemtliche
+# End-to-End-Laeufe auf ein FREMDES Verzeichnis und legen dort devices.json,
+# devices.json.bak und eine venv an; im Update-Pfad kommen ein echter
+# ZIP-Download und 'cp -R' darueber hinzu. install.sh exportiert die Variable
+# selbst an Kindprozesse, der Leak ist also kein exotischer Nutzerfehler.
+# Nur dieses Unsetzen macht die Suite dagegen dicht - Stubs fuer die
+# Netzwerkbefehle reichen nicht, weil der Schaden ueber 'cd "$INSTALL_DIR"'
+# entsteht und nicht ueber git/curl.
+unset MIDEA_IECO_RESOLVED_DIR MIDEA_IECO_UPDATE_PHASE MIDEA_IECO_DIR \
+      MIDEA_IECO_BIN_DIR MIDEA_IECO_UPDATE_TMP MIDEA_IECO_PREV_REF \
+      MIDEA_IECO_LANG
+
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INSTALL="$REPO/install.sh"
 pass=0; fail=0
@@ -704,7 +718,11 @@ cat > "$SBIN/pip" <<'EOF'
 #!/usr/bin/env bash
 case "$*" in *"show"*) echo "Version: 9.9.9" ;; *) exit 0 ;; esac
 EOF
-chmod +x "$SBIN/git" "$SBIN/python3" "$SBIN/pip"
+for _net in curl unzip; do
+    printf '#!/usr/bin/env bash\necho "VERBOTEN im Test: %s $*" >&2\nexit 1\n' \
+        "$_net" > "$SBIN/$_net"
+done
+chmod +x "$SBIN/git" "$SBIN/python3" "$SBIN/pip" "$SBIN/curl" "$SBIN/unzip"
 
 UPD_OUT="$WORK/upd_out.txt"; UPD_RC=0
 # stdin von /dev/null: install_all_wrappers ruft ensure_bin_on_path; ohne TTY
@@ -780,7 +798,15 @@ cat > "$LSBIN/curl" <<'EOF'
 #!/usr/bin/env bash
 exit 1
 EOF
-chmod +x "$LSBIN/git" "$LSBIN/python3" "$LSBIN/curl"
+# unzip MUSS ebenfalls gestubbt sein: download_and_overlay_zip prueft es VOR
+# dem (absichtlich scheiternden) curl und wuerde es sonst per 'brew install' /
+# 'sudo apt-get install' nachinstallieren - der Test bestuende dann aus dem
+# falschen Grund und griffe ins System des Ausfuehrenden ein.
+cat > "$LSBIN/unzip" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+chmod +x "$LSBIN/git" "$LSBIN/python3" "$LSBIN/curl" "$LSBIN/unzip"
 
 LEAKTMP="$WORK/leak_tmp"; mkdir -p "$LEAKTMP"
 LEAK_RC=0
@@ -885,7 +911,16 @@ case "\${1:-}" in
   *)  exit 0 ;;
 esac
 EOF
-    chmod +x "$ONB_STUB/python3" "$ONB_STUB/pip" "$ONB_STUB/crontab"
+    # Netzwerkbefehle hart scheitern lassen. Erreichbar sind sie im Onboarding
+    # nur ueber einen Umweg (fehlgeleitetes INSTALL_DIR), aber ein Test, der
+    # klonen oder laden KANN, ist kein Test mehr. Bewusst Tiefenverteidigung:
+    # das Unsetzen am Dateikopf ist die eigentliche Absicherung.
+    for _net in git curl unzip; do
+        printf '#!/usr/bin/env bash\necho "VERBOTEN im Test: %s $*" >&2\nexit 1\n' \
+            "$_net" > "$ONB_STUB/$_net"
+    done
+    chmod +x "$ONB_STUB/python3" "$ONB_STUB/pip" "$ONB_STUB/crontab" \
+             "$ONB_STUB/git" "$ONB_STUB/curl" "$ONB_STUB/unzip"
 }
 
 # Faehrt das Onboarding mit geskripteter Eingabe durch ($ONB_INPUT, eine Antwort
