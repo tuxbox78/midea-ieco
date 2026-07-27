@@ -6,6 +6,7 @@
 Ausfuehren: python3 -m unittest tests.test_refresh_tokens  (aus dem Repo-Root)
 oder direkt: python3 tests/test_refresh_tokens.py
 """
+import ast
 import io
 import json
 import os
@@ -22,8 +23,41 @@ from unittest import mock
 
 REPO_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_DIR))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import _stub_msmart  # noqa: E402,F401  (Fake-msmart VOR midea_ieco_ensure registrieren)
+import midea_ieco_ensure as mie  # noqa: E402  (nur fuer die Katalog-Aritaetspruefung)
 import midea_refresh_tokens as mrt  # noqa: E402
+
+
+# Ausgabesprache fuer das GESAMTE Modul auf Englisch pinnen (den Default).
+# Ohne dieses Pinning haengen alle Textzusicherungen an der Locale des
+# Ausfuehrenden: auf einem deutschen Entwicklerrechner waeren sie gruen, im
+# (locale-losen) CI rot. Die deutschen Gegenproben ueberschreiben das gezielt
+# per eigenem patch.dict in ihrem setUp.
+_LANG_PATCHER = None
+
+
+def setUpModule():
+    global _LANG_PATCHER
+    _LANG_PATCHER = mock.patch.dict(os.environ, {"MIDEA_IECO_LANG": "en"})
+    _LANG_PATCHER.start()
+
+
+def tearDownModule():
+    if _LANG_PATCHER is not None:
+        _LANG_PATCHER.stop()
+
+
+def _longest_literal(template: str) -> str:
+    """Laengstes festes Textstueck einer Katalog-Vorlage (ohne %s-Platzhalter).
+
+    Damit laesst sich eine Meldung wiedererkennen, ohne ihren Wortlaut im Test
+    zu duplizieren: aendert jemand die Formulierung im Katalog, wandert die
+    Zusicherung automatisch mit, statt still auf einen nicht mehr existierenden
+    Text zu pruefen (genau so war die frueher hier fest verdrahtete deutsche
+    Marke wirkungslos geworden)."""
+    return max(template.split("%s"), key=len).strip(" []().:")
 
 
 class _ConfigPathMixin(unittest.TestCase):
@@ -91,12 +125,24 @@ class MsmartMissingProbeTests(unittest.TestCase):
             self.skipTest("msmart ist installiert - Negativpfad nicht pruefbar")
         work = tempfile.mkdtemp()
         self.addCleanup(lambda: shutil.rmtree(work, ignore_errors=True))
+        # Sprache explizit pinnen und BEIDE Sprachfassungen des Markers pruefen.
+        # Zuvor stand hier nur der deutsche Wortlaut ("Hole Token"), waehrend der
+        # Unterprozess nach der i18n-Umstellung englisch lief - die Zusicherung
+        # konnte damit nicht mehr fehlschlagen und haette einen Cloud-Kontakt vor
+        # der msmart-Pruefung nicht mehr bemerkt.
+        env = {**os.environ, "MIDEA_IECO_LANG": "en"}
         result = subprocess.run(
             [sys.executable, str(REPO_DIR / "midea_refresh_tokens.py"), "--all"],
-            capture_output=True, text=True, cwd=work)
+            capture_output=True, text=True, cwd=work, env=env)
+        combined = result.stdout + result.stderr
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("msmart-ng", result.stderr)
-        self.assertNotIn("Hole Token", result.stdout + result.stderr)
+        for template in mrt._MESSAGES["dev_fetching"]:
+            marker = _longest_literal(template)
+            # Selbstschutz: eine leere oder zu kurze Marke waere eine Zusicherung,
+            # die nicht fehlschlagen KANN - lieber hier auffallen als still passieren.
+            self.assertGreater(len(marker), 10, template)
+            self.assertNotIn(marker, combined)
 
 
 class SaveConfigTests(_ConfigPathMixin):
@@ -193,6 +239,17 @@ class DiscoverInvocationTests(unittest.TestCase):
 
     TL = '{"tokenlist": [{"key": "aa", "token": "bb"}]}'
 
+    def _assert_message(self, cm, key):
+        """Prueft, dass die RuntimeError-Meldung aus dem erwarteten Katalog-
+        Eintrag stammt - ueber den Katalog statt ueber einen im Test kopierten
+        Wortlaut. Diese Meldungen werden dem Nutzer ausgegeben (ueber
+        'dev_fetch_failed'), waren aber lange deutsch fest verdrahtet; eine hier
+        eingetippte Zeichenkette wuerde bei der naechsten Umformulierung still
+        veralten, statt den Test rot zu machen."""
+        marker = _longest_literal(mrt._MESSAGES[key][0])
+        self.assertGreater(len(marker), 10, key)
+        self.assertIn(marker, str(cm.exception))
+
     @staticmethod
     def _ns(rc=0, out="", err=""):
         return SimpleNamespace(returncode=rc, stdout=out, stderr=err)
@@ -287,14 +344,16 @@ class DiscoverInvocationTests(unittest.TestCase):
             raise subprocess.TimeoutExpired(cmd, mrt.SUBPROCESS_TIMEOUT)
 
         with mock.patch("midea_refresh_tokens.subprocess.run", side_effect=fake_run):
-            with self.assertRaisesRegex(RuntimeError, "nicht reagiert"):
+            with self.assertRaises(RuntimeError) as cm:
                 mrt.fetch_candidate_credentials("1.2.3.4")
+        self._assert_message(cm, "err_discover_timeout")
 
     def test_midealocal_missing_becomes_runtimeerror(self):
         with mock.patch("midea_refresh_tokens.subprocess.run",
                         side_effect=FileNotFoundError()):
-            with self.assertRaisesRegex(RuntimeError, "nicht installiert"):
+            with self.assertRaises(RuntimeError) as cm:
                 mrt.fetch_candidate_credentials("1.2.3.4")
+        self._assert_message(cm, "err_midealocal_missing")
 
     def test_generic_oserror_becomes_runtimeerror(self):
         # Ein sonstiger Subprozess-Startfehler (OSError-Unterklasse, aber KEIN
@@ -304,16 +363,18 @@ class DiscoverInvocationTests(unittest.TestCase):
         # die reihenfolge-sensible FileNotFoundError-Klausel NICHT faelschlich greift.
         with mock.patch("midea_refresh_tokens.subprocess.run",
                         side_effect=PermissionError("exec denied")):
-            with self.assertRaisesRegex(RuntimeError, "nicht gestartet werden"):
+            with self.assertRaises(RuntimeError) as cm:
                 mrt.fetch_candidate_credentials("1.2.3.4")
+        self._assert_message(cm, "err_discover_start")
 
     def test_mkdtemp_failure_becomes_runtimeerror(self):
         # Temp-Verzeichnis nicht anlegbar (z.B. voller Datentraeger) -> klarer
         # RuntimeError statt rohem OSError-Traceback.
         with mock.patch("midea_refresh_tokens.tempfile.mkdtemp",
                         side_effect=OSError("no space")):
-            with self.assertRaisesRegex(RuntimeError, "Arbeitsverzeichnis"):
+            with self.assertRaises(RuntimeError) as cm:
                 mrt.fetch_candidate_credentials("1.2.3.4")
+        self._assert_message(cm, "err_tempdir")
 
     def test_config_write_failure_becomes_runtimeerror_and_cleans_up(self):
         # mkdtemp real (Verzeichnis entsteht wirklich), aber der {}-Write
@@ -330,8 +391,9 @@ class DiscoverInvocationTests(unittest.TestCase):
         with mock.patch("midea_refresh_tokens.tempfile.mkdtemp", side_effect=spy_mkdtemp), \
                 mock.patch("midea_refresh_tokens._atomic_write_json",
                            side_effect=OSError("nope")):
-            with self.assertRaisesRegex(RuntimeError, "Isolations-Konfig"):
+            with self.assertRaises(RuntimeError) as cm:
                 mrt.fetch_candidate_credentials("1.2.3.4")
+        self._assert_message(cm, "err_isolation_config")
         self.assertFalse(Path(created["dir"]).exists())
 
 
@@ -508,14 +570,60 @@ class CatalogTests(unittest.TestCase):
         for key, (english, german) in mrt._MESSAGES.items():
             self.assertEqual(english.count("%s"), german.count("%s"), key)
 
-    def test_both_languages_non_empty_and_distinct_where_expected(self):
+    def test_both_languages_non_empty(self):
         for key, (english, german) in mrt._MESSAGES.items():
             self.assertTrue(english.strip(), key)
             self.assertTrue(german.strip(), key)
 
+    def test_every_entry_is_actually_translated(self):
+        """Beide Fassungen muessen sich unterscheiden - sonst ist ein Eintrag nur
+        scheinbar uebersetzt.
+
+        Der frueher hier stehende Test hiess '..._and_distinct_where_expected',
+        pruefte aber ausschliesslich 'nicht leer': ein deutscher Eintrag durfte
+        unbemerkt englischen Text enthalten. Ausgenommen sind nur Eintraege, die
+        in beiden Sprachen bewusst gleich lauten."""
+        # Begruendete Ausnahmen, nicht 'was gerade nicht passt'. Leer = keine.
+        deliberately_identical: set[str] = set()
+        for key, (english, german) in mrt._MESSAGES.items():
+            if key in deliberately_identical:
+                continue
+            self.assertNotEqual(english, german,
+                                f"Katalogeintrag '{key}' ist in beiden Sprachen gleich")
+
     def test_unknown_key_raises_instead_of_printing_nothing(self):
         with self.assertRaises(KeyError):
             mrt.t("does_not_exist")
+
+    def test_every_call_site_passes_the_right_number_of_arguments(self):
+        # Die Platzhalter-Paritaet oben vergleicht nur EN gegen DE. Stimmt die
+        # Zahl dagegen nicht mit der AUFRUFSTELLE ueberein, gibt es einen
+        # TypeError - und zwar ausgerechnet in einem selten durchlaufenen
+        # Fehlerpfad, in dem er am meisten schadet. Deshalb hier statisch gegen
+        # den Quelltext geprueft, fuer BEIDE Module.
+        for module, path in ((mrt, REPO_DIR / "midea_refresh_tokens.py"),
+                             (mie, REPO_DIR / "midea_ieco_ensure.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            checked = 0
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Name) and node.func.id == "t"
+                        and node.args
+                        and isinstance(node.args[0], ast.Constant)
+                        and isinstance(node.args[0].value, str)):
+                    key = node.args[0].value
+                    # *args-Aufrufe koennen statisch nicht gezaehlt werden.
+                    if any(isinstance(a, ast.Starred) for a in node.args):
+                        continue
+                    passed = len(node.args) - 1
+                    expected = module._MESSAGES[key][0].count("%s")
+                    self.assertEqual(
+                        passed, expected,
+                        f"{path.name}:{node.lineno} t({key!r}) uebergibt {passed} "
+                        f"Argument(e), die Vorlage erwartet {expected}")
+                    checked += 1
+            # Selbstschutz: findet die Analyse nichts, prueft sie auch nichts.
+            self.assertGreater(checked, 20, f"zu wenige t()-Aufrufe in {path.name} gefunden")
 
     def test_interpolation_works_in_both_languages(self):
         with mock.patch.dict(os.environ, {"MIDEA_IECO_LANG": "en"}):
@@ -576,11 +684,32 @@ class ClassifyVerifyFailureTests(_LangMixin):
         self.assertEqual(code, mrt.VERIFY_CAP)
         self.assertIn(str(mrt.VERIFY_TIMEOUT), text)
 
-    def test_authentication_error_is_not_swallowed_by_timeout_branch(self):
-        # Gegenprobe zur Klausel oben: msmart-ngs Fehler sind KEINE
-        # TimeoutError-Unterklasse, die isinstance-Pruefung darf sie nicht fangen.
-        self.assertNotIsInstance(self._AuthenticationError("x"), TimeoutError)
-        self.assertEqual(self._classify("No response from host.")[0], mrt.VERIFY_SILENT)
+    def test_named_cause_wins_over_the_timeout_branch(self):
+        # Eine benannte Ursache muss auch dann korrekt eingeordnet werden, wenn
+        # sie als ECHTER TimeoutError ankommt: msmart-ng erzeugt 'Connect
+        # timeout.' als TimeoutError und haengt ihn nur auf manchen Pfaden in
+        # einen AuthenticationError um. Wuerde der isinstance-Test zuerst greifen,
+        # landete dieselbe Ursache je nach Aufrufweg mal als 'unreachable' und mal
+        # pauschal als 'unser Zeitlimit'.
+        # (Die frueher hier stehende Zusicherung prueft eine Eigenschaft der
+        # test-eigenen Ersatzklasse und konnte nie fehlschlagen.)
+        self.assertEqual(mrt.classify_verify_failure(
+            TimeoutError("Connect timeout."))[0], mrt.VERIFY_UNREACHABLE)
+        self.assertEqual(mrt.classify_verify_failure(
+            TimeoutError("No response from host."))[0], mrt.VERIFY_SILENT)
+        # Ohne Meldungstext bleibt es korrekt unser eigener Deckel.
+        self.assertEqual(mrt.classify_verify_failure(TimeoutError())[0], mrt.VERIFY_CAP)
+
+    def test_connect_timeout_is_unreachable_not_other(self):
+        # Der haeufigste reale Fehlerfall (Geraet aus, veraltete IP, Firewall
+        # verwirft): fiel zuvor auf VERIFY_OTHER und bekam damit GAR KEINEN
+        # Gesamthinweis - obwohl der passende Hinweistext existierte.
+        code, text = self._classify("Connect timeout.")
+        self.assertEqual(code, mrt.VERIFY_UNREACHABLE)
+        self.assertIsNotNone(mrt.summarize_failure_hint([code, code]))
+        # Muss sich vom aktiv abgewiesenen Fall im TEXT unterscheiden - die
+        # Ursachen sind verschieden, auch wenn der Code derselbe ist.
+        self.assertNotEqual(text, self._classify("Connect failed.")[1])
 
     def test_unknown_message_keeps_original_text(self):
         # Formuliert msmart-ng kuenftig anders um, geht Einordnung verloren -
@@ -701,6 +830,16 @@ class CandidateLoopTests(_LangMixin):
         # Drei Kandidaten -> genau ZWEI Pausen (keine vor dem ersten Versuch).
         self.assertEqual(slept, [mrt.CANDIDATE_DELAY] * 2)
 
+    def test_candidate_delay_is_actually_long_enough_to_matter(self):
+        # Der Test oben leitet seine Erwartung aus CANDIDATE_DELAY selbst ab und
+        # bliebe daher auch bei 0.0 gruen - er sichert Anzahl und Platzierung der
+        # Pausen, nicht ihre Wirkung. Der Wert wird deshalb hier gegen eine
+        # UNABHAENGIGE Untergrenze geprueft: eine Pause unterhalb weniger Sekunden
+        # entzerrt nichts, und genau die fehlende Entzerrung war der Befund aus
+        # Issue #2. Gleiche Bauweise wie VerifyTimeoutHeadroomTests.
+        self.assertGreaterEqual(mrt.CANDIDATE_DELAY, 3.0)
+        self.assertGreaterEqual(mrt.DEVICE_DELAY, 1.0)
+
     def test_no_delay_for_single_candidate(self):
         ok, _, slept = self._run([("k1", "t1")], [(True, "", "")])
         self.assertTrue(ok)
@@ -740,6 +879,38 @@ class CandidateLoopTests(_LangMixin):
             ok = mrt.update_device(dev)
         self.assertTrue(ok)
         self.assertEqual((dev["key"], dev["token"]), ("k2", "t2"))
+
+
+class DeviceDelayTests(_ConfigPathMixin):
+    """Die Pause ZWISCHEN GERAETEN (DEVICE_DELAY) war bisher voellig ungetestet -
+    sie liess sich ersatzlos entfernen, ohne dass die Suite es bemerkt haette."""
+
+    def _run_main(self, device_count):
+        self.path.write_text(json.dumps({"devices": [
+            {"name": f"D{i}", "ip": f"1.2.3.{i}", "id": i} for i in range(device_count)
+        ]}), encoding="utf-8")
+        slept = []
+        with mock.patch.dict(os.environ, {"MIDEA_IECO_LANG": "en"}), \
+                mock.patch.dict(sys.modules, {"msmart": mock.MagicMock()}), \
+                mock.patch.object(mrt, "update_device", lambda dev: True), \
+                mock.patch.object(mrt, "save_config", lambda cfg: None), \
+                mock.patch.object(mrt.time, "sleep", lambda s: slept.append(s)), \
+                mock.patch.object(mrt.sys, "argv", ["x", "--all"]), \
+                redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as cm:
+                mrt.main()
+        return cm.exception.code, slept
+
+    def test_pause_between_devices_but_not_before_the_first(self):
+        code, slept = self._run_main(3)
+        self.assertEqual(code, 0)
+        # Drei Geraete -> genau ZWEI Pausen.
+        self.assertEqual(slept, [mrt.DEVICE_DELAY] * 2)
+
+    def test_single_device_never_pauses(self):
+        code, slept = self._run_main(1)
+        self.assertEqual(code, 0)
+        self.assertEqual(slept, [])
 
 
 class VerifyTimeoutHeadroomTests(unittest.TestCase):

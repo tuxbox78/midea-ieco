@@ -406,9 +406,11 @@ Die Unterscheidung der Ursachen ist wichtig, denn sie haben nichts miteinander z
 
 | Meldung | Bedeutung | Wo ansetzen |
 |---|---|---|
-| *Gerät hat den Token aktiv abgelehnt (ERROR-Antwort)* | Das Gerät ist erreichbar und hat geantwortet — es weist nur diesen Token zurück. Netzwerk und Firewall sind in Ordnung. | Der Token passt nicht zu diesem Gerät. Mögliche Ursachen: eine Firmware, die die lokale Anmeldung anders handhabt, oder eine udpId-Variante, die die Cloud-Abfrage nicht abdeckt |
+| *Gerät hat den Token aktiv abgelehnt (ERROR-Antwort des Geräts)* | Das Gerät ist erreichbar und hat geantwortet — es weist nur diesen Token zurück. Netzwerk und Firewall sind in Ordnung. | Der Token passt nicht zu diesem Gerät. Mögliche Ursachen: eine Firmware, die die lokale Anmeldung anders handhabt, oder eine udpId-Variante, die die Cloud-Abfrage nicht abdeckt |
 | *Gerät nimmt die Verbindung an, antwortet aber nicht* | TCP-Verbindung steht, es kommt aber nichts zurück | Meist die Einzelverbindungs-Grenze unten. Midea-App schließen, einige Minuten warten, erneut versuchen |
-| *Verbindungsaufbau fehlgeschlagen* | Gar keine Verbindung möglich | Falsche IP in `devices.json`, oder Port 6444 blockiert — prüfen mit `nc -zv <IP> 6444` |
+| *keine Antwort beim Verbindungsaufbau* | Unter dieser Adresse hat gar nichts geantwortet | Falsche IP in `devices.json`, Anlage aus, oder eine Firewall verwirft die Pakete — prüfen mit `ping <IP>` und `nc -zv <IP> 6444` |
+| *Verbindung wurde abgewiesen* | Es hat etwas geantwortet, aber auf diesem Port lauscht nichts | Richtiger Host, falscher Port — oder die IP gehört gar nicht zur Anlage |
+| *Zeitlimit erreicht* | Die Anlage ist erreichbar, reagiert aber sehr langsam | Meist schwaches WLAN oder ausgelastetes Netz; später erneut versuchen statt an der Konfiguration zu drehen |
 
 Ein Muster sollte man kennen: **Eine Midea-Anlage hält nur eine einzige lokale Verbindung** und antwortet nach schnell aufeinanderfolgenden Versuchen eine Weile gar nicht mehr — auch die Midea-App auf dem Handy belegt genau diese Verbindung. Wird der erste Kandidat aktiv abgelehnt und laufen alle folgenden dann in einen Timeout, wurden die späteren gar nicht mehr wirklich geprüft. Genau deshalb entzerrt das Werkzeug seine Versuche und weist auf dieses Muster hin, wenn es auftritt. Vor einem Urteil also einige Minuten warten, mit geschlossener App.
 

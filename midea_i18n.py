@@ -12,10 +12,22 @@ auseinanderlaufen - eine korrigierte Locale-Sonderform in der einen Datei, die
 in der anderen fehlt. Die Kataloge bleiben bewusst bei den jeweiligen Modulen,
 geteilt wird nur die Mechanik.
 
-Die Aufloesung spiegelt 1:1 resolve_lang() aus install.sh, damit Installer und
-Laufzeit dieselbe Sprache sprechen:
+Die Aufloesung uebernimmt die REIHENFOLGE von resolve_lang() aus install.sh,
+damit Installer und Laufzeit dieselbe Sprache sprechen:
 
     MIDEA_IECO_LANG  >  LC_ALL  >  LC_MESSAGES  >  LANG  >  Englisch
+
+In vier Randfaellen ist diese Fassung bewusst grosszuegiger als die Shell-
+Variante (jeweils zugunsten von Deutsch, nie umgekehrt), weil sie Werte
+trimmt und einen zusaetzlichen Praefix kennt:
+
+    LANG=de.UTF-8                 -> hier de, in install.sh en
+    MIDEA_IECO_LANG=" de "        -> hier de, in install.sh en
+    MIDEA_IECO_LANG="   " + LANG=de_DE  -> hier de, in install.sh en
+    LC_ALL="   " + LANG=de_DE     -> hier de, in install.sh en
+
+Alle regulaeren Faelle stimmen ueberein. Wer exakte Gleichheit braucht, setzt
+MIDEA_IECO_LANG sauber auf 'de' oder 'en' - dann verhalten sich beide identisch.
 
 Der Default ist ENGLISCH. Grund: das Projekt hat englischsprachige Nutzer, die
 sonst deutsche Meldungen bekommen, die sie nicht lesen koennen - genau das ist

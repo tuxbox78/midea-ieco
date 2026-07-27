@@ -1279,7 +1279,12 @@ ok "$(t devices_written)"
 # =============================================================================
 echo ""
 info "$(t tokens_fetching)"
-if python3 midea_refresh_tokens.py --all; then
+# Sprachwahl an die Python-Werkzeuge durchreichen: sie loesen ihre Sprache
+# eigenstaendig auf (MIDEA_IECO_LANG > Locale > Englisch). Ohne diese Uebergabe
+# faellt ihre Ausgabe auf die Locale zurueck - ein 'install.sh --lang de' auf
+# einem englischsprachigen System ergaebe sonst einen deutschen Installer mit
+# englischer Token-Ausgabe. Dieselbe Weitergabe nutzt bereits die Update-Phase.
+if MIDEA_IECO_LANG="$LANG_CHOICE" python3 midea_refresh_tokens.py --all; then
     ok "$(t tokens_fetched)"
 else
     warn "$(t tokens_failed)"
@@ -1300,7 +1305,7 @@ read -r -p "$(t prompt_test_run)" DO_TEST
 if [[ "$DO_TEST" =~ ^[jJyY]$ ]]; then
     FIRST_DEVICE=$(python3 -c "import json; print(json.load(open('devices.json'))['devices'][0]['name'])")
     info "$(t test_running "$FIRST_DEVICE")"
-    if python3 midea_ieco_ensure.py "$FIRST_DEVICE"; then
+    if MIDEA_IECO_LANG="$LANG_CHOICE" python3 midea_ieco_ensure.py "$FIRST_DEVICE"; then
         ok "$(t test_ok)"
     else
         warn "$(t test_failed)"
@@ -1316,8 +1321,14 @@ CRON_MARKER="# midea-ieco-managed"
 # Pfad cron-sicher quoten (Leerzeichen/Sonderzeichen/%); dieselbe gequotete
 # Form speist sowohl die Anzeige als auch den crontab-Eintrag.
 IDQ="$(shell_quote_for_cron "$INSTALL_DIR")"
-CRON_LINE_IECO="*/20 * * * * cd $IDQ && venv/bin/python3 midea_ieco_ensure.py all --only-if-on >> $IDQ/ieco.log 2>&1 $CRON_MARKER"
-CRON_LINE_REFRESH="0 3 * * 0 cd $IDQ && venv/bin/python3 midea_refresh_tokens.py --all >> $IDQ/refresh.log 2>&1 $CRON_MARKER"
+# Sprachwahl in die Cron-Zeile schreiben: cron laeuft praktisch immer OHNE
+# gesetzte Locale, die Werkzeuge fielen dort also auf ihren englischen Default
+# zurueck - ein deutscher Nutzer haette nach der Einrichtung stillschweigend
+# englische Logs. Ein Wert ist hier gefahrlos einsetzbar, weil resolve_lang
+# ausschliesslich 'de' oder 'en' zurueckgibt (siehe dessen case-Verzweigung),
+# also weder Leerzeichen noch Sonderzeichen enthalten kann.
+CRON_LINE_IECO="*/20 * * * * cd $IDQ && MIDEA_IECO_LANG=$LANG_CHOICE venv/bin/python3 midea_ieco_ensure.py all --only-if-on >> $IDQ/ieco.log 2>&1 $CRON_MARKER"
+CRON_LINE_REFRESH="0 3 * * 0 cd $IDQ && MIDEA_IECO_LANG=$LANG_CHOICE venv/bin/python3 midea_refresh_tokens.py --all >> $IDQ/refresh.log 2>&1 $CRON_MARKER"
 # truncate akzeptiert mehrere Dateioperanden (GNU wie BSD/macOS) - ein Lauf
 # leert beide Logs, statt refresh.log unbegrenzt wachsen zu lassen.
 CRON_LINE_LOGROTATE="0 0 1 * * truncate -s 0 $IDQ/ieco.log $IDQ/refresh.log $CRON_MARKER"

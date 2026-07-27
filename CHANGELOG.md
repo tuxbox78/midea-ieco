@@ -6,6 +6,43 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **The most common real-world failure got no hint at all.** When a unit is
+  switched off, its IP has changed, or a firewall drops the packets, `msmart-ng`
+  reports `Connect timeout.` — a wording the failure classification did not know,
+  so it fell through to "unclassified" and `summarize_failure_hint` returned
+  nothing. The matching hint ("check the IP address, whether the unit is powered,
+  and whether port 6444 is reachable") existed but could never fire. It now has
+  its own marker, and one distinct from a *refused* connection: refused means
+  something answered, a timeout means nobody is there — a real difference when
+  hunting the cause. Found by an independent review of the previous two commits.
+- **The failure classification could contradict itself depending on the call
+  path.** `msmart-ng` raises `Connect timeout.` as a `TimeoutError` and only
+  re-wraps it as an `AuthenticationError` on some paths. Because the "is this our
+  own time limit?" check ran *before* the message markers, the same cause was
+  reported as "unreachable" or as "our time limit" depending on where it came
+  from. Message markers now win; the type check only catches what has no message
+  of its own (which is exactly our own `asyncio.wait_for`).
+- **German text still reached English users** — the thing the previous commit set
+  out to fix. Every `print()` was localized, but the `RuntimeError` messages
+  raised inside the discover subprocess handling were hard-coded German and are
+  printed to the user verbatim, as was `midea_refresh_tokens.py --help` in full.
+  An English user hitting the *most likely* first-run failure read
+  `Kein tokenlist-Eintrag in der Ausgabe gefunden`. All of it is catalogued now.
+- Each candidate line said "rejected" regardless of cause. Only one of the
+  possible causes is an actual rejection by the device; a connection that never
+  came up was rejected by nobody. The line now reads "failed", with the specific
+  cause immediately after it.
+- Hints added for two further cases that previously produced none: every attempt
+  dropped by the device, and every attempt hitting the time limit.
+- `install.sh` now passes the chosen language through to the Python tools and
+  into the generated crontab. `install.sh --lang de` on an English-locale machine
+  produced a German installer with English token output, and — more visibly — an
+  existing German user's `ieco.log` silently switched to English after an update,
+  because cron runs without a locale. The installer already used this idiom for
+  its own update phase.
+- `midea_i18n.py` was missing from the `py_compile` step of the test suite.
+
 ### Changed
 - **Both Python tools are now bilingual, and default to English.** They printed
   German only — so the English-speaking reporter of issue #2 filed a careful bug
@@ -23,7 +60,40 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fixed in one file and missed in the other. The message catalogues stay with
   their respective modules; only the mechanism is shared. Operating-mode names
   (`COOL`, `HEAT`) deliberately stay untranslated: that is what they are called
-  on the unit, on the remote and in `msmart-ng`.
+  on the unit, on the remote and in `msmart-ng`. It adopts the installer's
+  *precedence*; the claim that it mirrors `install.sh` "1:1" was wrong and has
+  been corrected — in four whitespace/prefix edge cases it is deliberately more
+  generous (always in favour of German, never the reverse), and the module
+  documents each one. All ordinary cases agree.
+
+### Testing
+- The test suite was re-examined by an independent review, which mutated the
+  source in a scratch copy to check that the tests actually go red. Everything
+  below was a mutation that previously survived a fully green suite:
+  **`main()` dropping `--only-if-on` entirely** (the most safety-critical path in
+  the project — a regression there powers on every switched-off unit, every 20
+  minutes, from cron); **never powering the unit on**; **never setting iECO**;
+  **removing the final verification**, which meant a build that changed nothing
+  at all still printed "iECO is active (confirmed by the device)"; a
+  `CANDIDATE_DELAY` of `0`; and `DEVICE_DELAY` removed. The state-change tests
+  now assert against the *acting* device rather than a separately pre-configured
+  verification stand-in, which is what made those mutations invisible.
+- Two assertions were fixed that could no longer fail. One checked for German
+  wording in a subprocess that now runs in English (so it no longer noticed a
+  cloud contact happening before the `msmart` availability check); the other
+  asserted a property of the test's own stand-in class. Text assertions are now
+  derived from the message catalogue instead of being retyped, so a reworded
+  message moves the assertion with it rather than quietly voiding it.
+- A test named `..._and_distinct_where_expected` only checked "not empty", so a
+  German catalogue entry could contain English text unnoticed. It now checks what
+  its name says. A new check compares every `t()` call site against its format
+  string, so a wrong argument count cannot ship a `TypeError` hiding in a rarely
+  hit error path.
+- `tests/run_all.sh` clears the bytecode caches *before* the run and disables
+  bytecode writing. Python validates a `.pyc` by size and mtime second, so an
+  edit that keeps the file size identical (`sys.exit(0)` → `sys.exit(1)`) could
+  be served from a stale cache — this briefly masked real failures during the
+  mutation review.
 - **A failed token verification now says *why* it failed** (prompted by issue #2).
   `midea_refresh_tokens.py` reported every rejected candidate with the same
   "lieferte keine gueltige Verbindung", collapsing causes that have nothing to do

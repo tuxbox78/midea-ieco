@@ -726,6 +726,113 @@ class DeviceConfigProblemTests(unittest.TestCase):
                 {"name": "W", "ip": "1.2.3.4", "id": 1, "port": bad}))
 
 
+class OnlyIfOnWiringTests(unittest.TestCase):
+    """Das Flag --only-if-on muss von main() bis ensure_ieco DURCHGEREICHT werden.
+
+    Die innere Logik des Guards war gut abgedeckt, seine Verdrahtung dagegen gar
+    nicht: man konnte in main() 'only_if_on=args.only_if_on' auf 'False'
+    festnageln, ohne dass ein Test rot wurde. Das ist der sicherheitskritischste
+    Pfad des Projekts - eine Regression dort schaltet per Cron alle 20 Minuten
+    jede bewusst ausgeschaltete Anlage EIN."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "devices.json"
+        orig = mie.CONFIG_PATH
+        mie.CONFIG_PATH = self.path
+        self.addCleanup(lambda: setattr(mie, "CONFIG_PATH", orig))
+        self.path.write_text(json.dumps({"devices": [
+            {"name": "W", "ip": "1.2.3.4", "id": 1, "token": "t", "key": "k"}]}),
+            encoding="utf-8")
+
+    def _seen_flag(self, argv):
+        seen = []
+
+        async def _capture(dev_conf, only_if_on):
+            seen.append(only_if_on)
+            return True
+
+        async def _boom(*a, **k):
+            raise AssertionError("connect_and_refresh darf hier nicht laufen")
+
+        with ExitStack() as es:
+            es.enter_context(mock.patch.object(mie, "ensure_ieco", _capture))
+            es.enter_context(mock.patch.object(mie, "connect_and_refresh", _boom))
+            es.enter_context(mock.patch.object(mie.asyncio, "sleep", _anoop))
+            es.enter_context(mock.patch.object(mie.sys, "argv", ["midea-ieco"] + argv))
+            es.enter_context(redirect_stdout(io.StringIO()))
+            with self.assertRaises(SystemExit):
+                asyncio.run(mie.main())
+        self.assertEqual(len(seen), 1, "ensure_ieco wurde nicht genau einmal gerufen")
+        return seen[0]
+
+    def test_flag_reaches_ensure_ieco_for_a_named_device(self):
+        self.assertIs(self._seen_flag(["W", "--only-if-on"]), True)
+
+    def test_flag_reaches_ensure_ieco_for_all(self):
+        self.assertIs(self._seen_flag(["all", "--only-if-on"]), True)
+
+    def test_absent_flag_arrives_as_false(self):
+        # Gegenprobe: ohne das Flag darf NICHT versehentlich True ankommen -
+        # sonst wuerde eine laufende Anlage nie eingeschaltet.
+        self.assertIs(self._seen_flag(["W"]), False)
+        self.assertIs(self._seen_flag(["all"]), False)
+
+
+class StateChangeTests(unittest.TestCase):
+    """Die beiden einzigen echten Zustandsaenderungen des Werkzeugs muessen am
+    HANDELNDEN Geraet belegt werden.
+
+    Zuvor kam der Erfolg ausschliesslich vom - unabhaengig vorkonfigurierten -
+    Verifikationsgeraet: eine Fassung, die weder einschaltet noch iECO setzt noch
+    ueberhaupt verifiziert, meldete weiterhin 'OK: iECO is active (confirmed by
+    the device)' und bestand die gesamte Suite."""
+
+    def _run(self, d_action, d_verify, only_if_on=False):
+        connect = _scripted_connect([d_action, d_verify])
+        with ExitStack() as es:
+            es.enter_context(mock.patch.object(mie, "connect_and_refresh", connect))
+            es.enter_context(mock.patch.object(mie.asyncio, "sleep", _anoop))
+            out = es.enter_context(redirect_stdout(io.StringIO()))
+            result = asyncio.run(mie.ensure_ieco(
+                {"name": "X", "ip": "1", "id": "1"}, only_if_on=only_if_on))
+        return result, out.getvalue()
+
+    def test_switched_off_device_is_powered_on_and_set_to_ieco(self):
+        d_action = FakeDevice(power_state=False, ieco=False)
+        ok, _ = self._run(d_action, FakeDevice(power_state=True, ieco=True))
+        self.assertTrue(ok)
+        # Am handelnden Objekt geprueft, nicht am Verifikationsgeraet:
+        self.assertIs(d_action.power_state, True)
+        self.assertIs(d_action.ieco, True)
+        self.assertEqual(d_action.apply_calls, 1)
+
+    def test_running_device_gets_ieco_without_touching_power(self):
+        d_action = FakeDevice(power_state=True, ieco=False)
+        ok, _ = self._run(d_action, FakeDevice(power_state=True, ieco=True))
+        self.assertTrue(ok)
+        self.assertIs(d_action.ieco, True)
+        self.assertIs(d_action.power_state, True)
+
+    def test_device_denying_ieco_at_verification_is_a_failure(self):
+        # Meldet das Geraet nach dem Schreiben weiterhin ieco=False, ist der Lauf
+        # fehlgeschlagen - auch wenn alles davor geklappt hat. Ohne diesen Test
+        # liess sich die abschliessende Pruefung ersatzlos entfernen.
+        ok, out = self._run(FakeDevice(power_state=True, ieco=False),
+                            FakeDevice(power_state=True, ieco=False))
+        self.assertFalse(ok)
+        self.assertIn("still disabled", out)
+
+    def test_only_if_on_never_powers_on_a_switched_off_device(self):
+        # Die Kernzusage des Flags, am Objekt belegt statt am Rueckgabewert.
+        d_action = FakeDevice(power_state=False, ieco=False)
+        ok, _ = self._run(d_action, FakeDevice(), only_if_on=True)
+        self.assertTrue(ok)
+        self.assertIs(d_action.power_state, False)
+        self.assertEqual(d_action.apply_calls, 0)
+
+
 class GermanOutputTests(unittest.TestCase):
     """Gegenprobe zum modulweiten Englisch-Pinning: dieselben Pfade auf Deutsch.
 

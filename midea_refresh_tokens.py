@@ -111,9 +111,13 @@ _MESSAGES: dict[str, tuple[str, str]] = {
     "dev_candidate_ok": (
         "[%s] Candidate %s/%s verified successfully and saved.",
         "[%s] Kandidat %s/%s erfolgreich verifiziert und gespeichert."),
-    "dev_candidate_rejected": (
-        "[%s] Candidate %s/%s rejected: %s%s",
-        "[%s] Kandidat %s/%s abgelehnt: %s%s"),
+    # Bewusst neutral formuliert ("failed", nicht "rejected"): nur EINE der
+    # moeglichen Ursachen ist tatsaechlich eine Ablehnung durch das Geraet. Bei
+    # einer nicht zustande gekommenen Verbindung hat nichts und niemand etwas
+    # abgelehnt - die konkrete Ursache steht ohnehin direkt dahinter.
+    "dev_candidate_failed": (
+        "[%s] Candidate %s/%s failed: %s%s",
+        "[%s] Kandidat %s/%s fehlgeschlagen: %s%s"),
     "dev_try_next": (
         ", trying the next one ...",
         ", versuche naechsten ..."),
@@ -139,8 +143,14 @@ _MESSAGES: dict[str, tuple[str, str]] = {
         "connection was dropped by the device",
         "Verbindung wurde vom Geraet abgebrochen"),
     "diag_unreachable": (
-        "could not connect (is the port reachable?)",
-        "Verbindungsaufbau fehlgeschlagen (Port erreichbar?)"),
+        "connection was refused - something answered, but not on this port",
+        "Verbindung wurde abgewiesen - es hat etwas geantwortet, aber nicht auf "
+        "diesem Port"),
+    "diag_unreachable_timeout": (
+        "no answer at all while connecting - wrong IP, device switched off, or "
+        "blocked by a firewall",
+        "keine Antwort beim Verbindungsaufbau - falsche IP, Geraet aus, oder von "
+        "einer Firewall verworfen"),
     "diag_no_detail": (
         "no further detail",
         "keine naehere Angabe"),
@@ -166,11 +176,33 @@ _MESSAGES: dict[str, tuple[str, str]] = {
         "Handy belegt diese Verbindung. Bitte die App schliessen, einige Minuten "
         "warten und erneut versuchen."),
     "hint_all_unreachable": (
-        "No connection could be established. Please check the IP address in "
-        "devices.json and whether port 6444 is reachable "
-        "(e.g. 'nc -zv <IP> 6444').",
-        "Kein Verbindungsaufbau moeglich. Bitte IP-Adresse in devices.json sowie "
-        "die Erreichbarkeit von Port 6444 pruefen (z.B. 'nc -zv <IP> 6444')."),
+        "No connection could be established at all, so the token could not even "
+        "be tried. Please check the IP address in devices.json, that the unit is "
+        "powered and on the network, and that port 6444 is reachable "
+        "(e.g. 'ping <IP>' and 'nc -zv <IP> 6444').",
+        "Es kam ueberhaupt keine Verbindung zustande - der Token konnte also gar "
+        "nicht erst geprueft werden. Bitte IP-Adresse in devices.json pruefen, ob "
+        "die Anlage mit Strom und im Netz ist, und ob Port 6444 erreichbar ist "
+        "(z.B. 'ping <IP>' und 'nc -zv <IP> 6444')."),
+    "hint_all_reset": (
+        "The device dropped every connection. Most often this is the "
+        "single-connection limit: it holds only ONE local connection at a time, "
+        "and the Midea app on your phone occupies that same one. Please close the "
+        "app, wait a few minutes and retry.",
+        "Das Geraet hat jede Verbindung abgebrochen. Meist steckt die "
+        "Einzelverbindungs-Grenze dahinter: Es haelt nur EINE lokale Verbindung "
+        "gleichzeitig, und die Midea-App auf dem Handy belegt genau diese. Bitte "
+        "die App schliessen, einige Minuten warten und erneut versuchen."),
+    "hint_all_cap": (
+        "Every attempt ran into the time limit without a clear answer. The device "
+        "is reachable but reacting unusually slowly - typically a weak Wi-Fi "
+        "signal or a busy network. Retrying later, or improving reception, is "
+        "usually more effective than changing anything here.",
+        "Jeder Versuch lief ohne klare Antwort ins Zeitlimit. Das Geraet ist "
+        "erreichbar, reagiert aber ungewoehnlich langsam - typischerweise bei "
+        "schwachem WLAN-Signal oder ausgelastetem Netz. Ein spaeterer Versuch "
+        "oder besserer Empfang hilft hier meist mehr als eine Aenderung an der "
+        "Konfiguration."),
     "hint_mixed": (
         "Notable pattern: at least one token was actively rejected, after which "
         "the device stopped answering. Most likely it accepted no further "
@@ -208,6 +240,58 @@ _MESSAGES: dict[str, tuple[str, str]] = {
     "main_updated": (
         "devices.json updated: %s",
         "devices.json aktualisiert: %s"),
+    # --- Fehler des discover-Unterprozesses -------------------------------
+    # Diese Texte werden als RuntimeError geworfen UND ueber "dev_fetch_failed"
+    # an den Nutzer ausgegeben - sie muessen daher genauso uebersetzt sein wie
+    # jeder print(). Sie waren zunaechst deutsch fest verdrahtet, sodass ein
+    # englischsprachiger Nutzer im WAHRSCHEINLICHSTEN Fehlerfall deutschen Text
+    # zu lesen bekam (aufgefallen bei der Nachpruefung zu Issue #2).
+    "err_tempdir": (
+        "Could not create the temporary working directory for discover (%s: %s).",
+        "Temporaeres Arbeitsverzeichnis fuer discover konnte nicht angelegt "
+        "werden (%s: %s)."),
+    "err_isolation_config": (
+        "Could not write the isolation config for discover (%s: %s).",
+        "Isolations-Konfig fuer discover konnte nicht geschrieben werden (%s: %s)."),
+    "err_discover_timeout": (
+        "The discover command did not respond within %ss (is the device at %s "
+        "reachable?)",
+        "discover-Befehl hat nach %ss nicht reagiert (Geraet unter %s erreichbar?)"),
+    "err_midealocal_missing": (
+        "midealocal is not installed in the current Python interpreter (wrong "
+        "venv active?)",
+        "midealocal ist im aktuellen Python-Interpreter nicht installiert "
+        "(falsches venv aktiv?)"),
+    "err_discover_start": (
+        "The discover command could not be started (%s: %s).",
+        "discover-Befehl konnte nicht gestartet werden (%s: %s)."),
+    "err_discover_exit": (
+        "The discover command exited with code %s. Last output: %s",
+        "discover-Befehl endete mit Exit-Code %s. Letzte Ausgabe: %s"),
+    "err_no_tokenlist": (
+        "No tokenlist entry found in the output. Last output: %s",
+        "Kein tokenlist-Eintrag in der Ausgabe gefunden. Letzte Ausgabe: %s"),
+    "err_no_output": (
+        "(no output)",
+        "(keine Ausgabe)"),
+    "dev_unknown_name": (
+        "unknown",
+        "unbekannt"),
+    # --- CLI ---------------------------------------------------------------
+    "cli_description": (
+        "Fetches fresh Midea token/key pairs via discover --debug, verifies "
+        "them, and updates devices.json.",
+        "Holt frische Midea Token/Key-Paare per discover --debug, verifiziert "
+        "sie, und aktualisiert devices.json."),
+    "cli_help_all": (
+        "Update all devices from devices.json",
+        "Alle Geraete aus devices.json aktualisieren"),
+    "cli_help_name": (
+        "Name of the device (new or existing)",
+        "Name des Geraets (neu oder bestehend)"),
+    "cli_help_host": (
+        "IP address (only together with --name, for NEW devices)",
+        "IP-Adresse (nur zusammen mit --name fuer NEUE Geraete)"),
 }
 
 
@@ -337,33 +421,28 @@ def _run_discover(host: str) -> subprocess.CompletedProcess:
     try:
         tmpdir = tempfile.mkdtemp(prefix="midea-local-discover-")
     except OSError as exc:
-        raise RuntimeError("Temporaeres Arbeitsverzeichnis fuer discover konnte nicht "
-                           f"angelegt werden ({type(exc).__name__}: {exc}).") from exc
+        raise RuntimeError(t("err_tempdir", type(exc).__name__, exc)) from exc
     try:
         try:
             _atomic_write_json(Path(tmpdir) / "midea-local.json", {})
         except OSError as exc:
-            raise RuntimeError("Isolations-Konfig fuer discover konnte nicht geschrieben "
-                               f"werden ({type(exc).__name__}: {exc}).") from exc
+            raise RuntimeError(t("err_isolation_config", type(exc).__name__, exc)) from exc
         try:
             return subprocess.run(cmd, capture_output=True, text=True,
                                   timeout=SUBPROCESS_TIMEOUT, cwd=tmpdir)
         except subprocess.TimeoutExpired as exc:
-            raise RuntimeError(f"discover-Befehl hat nach {SUBPROCESS_TIMEOUT}s nicht reagiert "
-                                f"(Geraet unter {host} erreichbar?)") from exc
+            raise RuntimeError(t("err_discover_timeout", SUBPROCESS_TIMEOUT, host)) from exc
         except FileNotFoundError as exc:
             # FileNotFoundError ist eine OSError-Unterklasse und MUSS vor dem
             # generischen 'except OSError' stehen, damit hier die spezifische
             # Meldung ("midealocal nicht installiert") greift.
-            raise RuntimeError("midealocal ist im aktuellen Python-Interpreter nicht installiert "
-                                "(falsches venv aktiv?)") from exc
+            raise RuntimeError(t("err_midealocal_missing")) from exc
         except OSError as exc:
             # Jeder sonstige Startfehler des Unterprozesses (z.B. PermissionError)
             # wird ebenfalls als RuntimeError gewrappt - update_device faengt nur
             # RuntimeError; ohne dieses Wrapping schluege ein solcher Fehler als
             # roher Traceback durch und beendete einen ganzen 'all'-Lauf.
-            raise RuntimeError("discover-Befehl konnte nicht gestartet werden "
-                               f"({type(exc).__name__}: {exc}).") from exc
+            raise RuntimeError(t("err_discover_start", type(exc).__name__, exc)) from exc
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -373,13 +452,12 @@ def _parse_discover_output(result: subprocess.CompletedProcess) -> tuple[list[tu
     Ergebnis. Wirft RuntimeError bei Nicht-Null-Exit oder fehlender tokenlist."""
     combined_output = result.stdout + result.stderr
     if result.returncode != 0:
-        tail = combined_output[-800:] if combined_output else "(keine Ausgabe)"
-        raise RuntimeError(f"discover-Befehl endete mit Exit-Code {result.returncode}. "
-                            f"Letzte Ausgabe: {tail}")
+        tail = combined_output[-800:] if combined_output else t("err_no_output")
+        raise RuntimeError(t("err_discover_exit", result.returncode, tail))
     matches = extract_token_key_pairs(combined_output)
     if not matches:
-        tail = combined_output[-800:] if combined_output else "(keine Ausgabe)"
-        raise RuntimeError(f"Kein tokenlist-Eintrag in der Ausgabe gefunden. Letzte Ausgabe: {tail}")
+        tail = combined_output[-800:] if combined_output else t("err_no_output")
+        raise RuntimeError(t("err_no_tokenlist", tail))
     appliance_ids = APPLIANCE_ID_RE.findall(combined_output)
     return matches, (appliance_ids[0] if appliance_ids else None)
 
@@ -408,7 +486,8 @@ def fetch_candidate_credentials(host: str) -> tuple[list[tuple[str, str]], str |
 #   'Error packet received.'          <- Geraet sendet einen ERROR-Frame (0x8370.. type 0xF)
 #   'No response from host.'          <- Geraet nimmt an, antwortet aber nicht
 #   'Transport is closing or closed.' <- Verbindung abgebrochen/zurueckgesetzt
-#   'Connect failed.'                 <- Port nicht erreichbar
+#   'Connect failed.'                 <- Verbindung aktiv abgewiesen/nicht routbar
+#   'Connect timeout.'                <- Verbindungsaufbau lief in msmart-ngs 5s-Limit
 # Aendert msmart-ng die Formulierung, greift der Rueckfall VERIFY_OTHER, der
 # den Originaltext ungekuerzt weiterreicht - es geht dann Einordnung verloren,
 # aber nie Information.
@@ -416,17 +495,26 @@ def fetch_candidate_credentials(host: str) -> tuple[list[tuple[str, str]], str |
 VERIFY_REJECTED = "rejected"        # Geraet lehnt den Token aktiv ab
 VERIFY_SILENT = "silent"            # Verbindung steht, keine Antwort
 VERIFY_RESET = "reset"              # Verbindung abgebrochen
-VERIFY_UNREACHABLE = "unreachable"  # Port/Host nicht erreichbar
+VERIFY_UNREACHABLE = "unreachable"  # Host/Port gar nicht erreichbar
 VERIFY_CAP = "cap"                  # unser eigenes VERIFY_TIMEOUT hat gegriffen
 VERIFY_OTHER = "other"              # nicht eingeordnet - Originaltext bleibt erhalten
 
 # Textmarke -> (Diagnose-Code, Katalog-Schluessel). Bewusst der SCHLUESSEL und
 # nicht der fertige Text: so wird die Sprache erst beim Aufruf aufgeloest.
+#
+# 'connect timeout' und 'connect failed' teilen sich den Code VERIFY_UNREACHABLE
+# (beide heissen "es kam gar keine Verbindung zustande" und fuehren zum selben
+# Gesamthinweis), bekommen aber UNTERSCHIEDLICHE Klartexte: abgewiesen bedeutet,
+# dass etwas geantwortet hat - eine Zeitueberschreitung dagegen, dass unter der
+# Adresse niemand ist. Das ist fuer die Fehlersuche ein realer Unterschied.
+# Die Marken sind disjunkt (keine ist Teilzeichenkette einer anderen), die
+# Reihenfolge dieser Tabelle ist daher nicht bedeutungstragend.
 _FAILURE_MARKERS = (
     ("error packet", VERIFY_REJECTED, "diag_rejected"),
     ("no response from host", VERIFY_SILENT, "diag_silent"),
     ("transport is closing", VERIFY_RESET, "diag_reset"),
     ("connect failed", VERIFY_UNREACHABLE, "diag_unreachable"),
+    ("connect timeout", VERIFY_UNREACHABLE, "diag_unreachable_timeout"),
 )
 
 
@@ -444,17 +532,24 @@ def classify_verify_failure(exc: BaseException) -> tuple[str, str]:
     Ein bereits von uns gesetztes Zeitlimit (asyncio.wait_for -> TimeoutError)
     wird bewusst getrennt ausgewiesen, damit es nicht mit einem stummen Geraet
     verwechselt wird."""
-    # Zuerst der eigene Deckel: asyncio.wait_for wirft einen nackten
-    # TimeoutError. msmart-ngs eigene Fehler sind AuthenticationError (kein
-    # TimeoutError), diese Klausel greift also nicht faelschlich fuer sie.
-    if isinstance(exc, TimeoutError):
-        return VERIFY_CAP, t("diag_cap", VERIFY_TIMEOUT)
-
     text = str(exc).strip()
     haystack = text.lower()
+
+    # Textmarken ZUERST, Ausnahmetyp erst danach. Grund: msmart-ng benennt seine
+    # Ursachen im Meldungstext, wrappt sie aber nicht immer gleich - 'Connect
+    # timeout.' etwa entsteht als TimeoutError und wird in Device.authenticate zu
+    # einem AuthenticationError umgehaengt, in anderen Pfaden aber nicht. Wuerde
+    # der isinstance-Test zuerst greifen, landete eine benannte Ursache je nach
+    # Aufrufweg mal richtig eingeordnet und mal pauschal als "unser Zeitlimit" -
+    # also genau die Vermengung, die diese Funktion beseitigen soll.
     for marker, code, message_key in _FAILURE_MARKERS:
         if marker in haystack:
             return code, t(message_key)
+
+    # Erst jetzt der eigene Deckel: asyncio.wait_for wirft einen TimeoutError
+    # OHNE Meldungstext, der oben folglich auf keine Marke passt.
+    if isinstance(exc, TimeoutError):
+        return VERIFY_CAP, t("diag_cap", VERIFY_TIMEOUT)
 
     # Rueckfall: der Originaltext von msmart-ng bleibt unveraendert erhalten -
     # er ist ohnehin englisch und wird daher NICHT uebersetzt.
@@ -480,7 +575,21 @@ def summarize_failure_hint(codes: list[str]) -> str | None:
     if unique == {VERIFY_UNREACHABLE}:
         return t("hint_all_unreachable")
 
-    if VERIFY_REJECTED in unique and (VERIFY_SILENT in unique or VERIFY_RESET in unique):
+    if unique == {VERIFY_RESET}:
+        return t("hint_all_reset")
+
+    if unique == {VERIFY_CAP}:
+        return t("hint_all_cap")
+
+    # "Erst abgelehnt, danach nicht mehr erreichbar": VERIFY_UNREACHABLE gehoert
+    # hier ausdruecklich dazu. Ein blockiertes Geraet nimmt die Verbindung
+    # irgendwann gar nicht mehr an, was als 'Connect timeout.' ankommt - also als
+    # UNREACHABLE. Eine falsche IP scheidet als Erklaerung aus: alle Kandidaten
+    # laufen gegen DIESELBE Adresse, und der erste hat dort nachweislich jemanden
+    # erreicht (er wurde ja aktiv abgelehnt). Die spaeteren Fehlschlaege koennen
+    # also nur am Geraet liegen, nicht an der Konfiguration.
+    if VERIFY_REJECTED in unique and unique & {VERIFY_SILENT, VERIFY_RESET,
+                                               VERIFY_UNREACHABLE, VERIFY_CAP}:
         return t("hint_mixed")
 
     return None
@@ -530,7 +639,7 @@ def update_device(dev_conf: dict) -> bool:
     True bei Erfolg, sonst False. Bestehende Werte werden NUR bei erfolgreicher
     Verifikation ueberschrieben - schlaegt alles fehl, bleibt dev_conf
     unveraendert (kein kaputter Eintrag nach einem Fehlversuch)."""
-    name = dev_conf.get("name", "unbekannt")
+    name = dev_conf.get("name", t("dev_unknown_name"))
     host = dev_conf.get("ip")
     if not host:
         print(t("dev_no_ip", name))
@@ -577,7 +686,7 @@ def update_device(dev_conf: dict) -> bool:
             return True
         failure_codes.append(code)
         suffix = t("dev_try_next") if idx < total else ""
-        print(t("dev_candidate_rejected", name, idx, total, detail, suffix))
+        print(t("dev_candidate_failed", name, idx, total, detail, suffix))
 
     print(t("dev_all_failed", name, total))
     hint = summarize_failure_hint(failure_codes)
@@ -594,13 +703,12 @@ def main() -> None:
     (msmart fehlt, leere Geraeteliste bei --all, neues Geraet ohne --host,
     Schreibfehler)."""
     parser = argparse.ArgumentParser(
-        description="Holt frische Midea Token/Key-Paare per discover --debug, "
-                    "verifiziert sie, und aktualisiert devices.json."
+        description=t("cli_description")
     )
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--all", action="store_true", help="Alle Geraete aus devices.json aktualisieren")
-    group.add_argument("--name", help="Name des Geraets (neu oder bestehend)")
-    parser.add_argument("--host", help="IP-Adresse (nur zusammen mit --name fuer NEUE Geraete)")
+    group.add_argument("--all", action="store_true", help=t("cli_help_all"))
+    group.add_argument("--name", help=t("cli_help_name"))
+    parser.add_argument("--host", help=t("cli_help_host"))
     args = parser.parse_args()
 
     # Fruehzeitige, klare Meldung statt eines rohen Tracebacks mitten im Lauf,
