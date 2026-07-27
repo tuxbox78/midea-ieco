@@ -159,15 +159,30 @@ echo "== exec: der Wrapper WIRD der Python-Prozess =="
 new_sandbox execpid
 PIDFILE="$WORK/child.pid"
 # Fake-Python, der seine eigene PID hinterlegt und dann wartet.
+#
+# Das 'exec' vor dem Schlafen ist wesentlich: der Schlafende IST danach dieser
+# Prozess und traegt dessen PID, nur so beendet ihn das 'kill' weiter unten
+# wirklich. Ohne exec ueberlebt der Schlaf als Kind, haelt das Schreibende der
+# Testausgabe offen und laesst jeden Aufrufer haengen, der die Ausgabe faengt -
+# Pipe, Kommandosubstitution, CI-Schrittprotokoll. Gemessen: 1,0 s in eine
+# Datei gegen 10,9 s gefangen.
+#
+# Der Erklaertext steht bewusst HIER und nicht im Heredoc: dieses Here-Dokument
+# ist unquotiert (es interpoliert PIDFILE), eine Kommandosubstitution im
+# Kommentar wuerde also beim Erzeugen ausgefuehrt.
 cat > "$SB/venv/bin/python3" <<EOF
 #!/usr/bin/env bash
 printf '%s' "\$\$" > "$PIDFILE"
-sleep 10
+exec sleep 5
 EOF
 chmod +x "$SB/venv/bin/python3"
 rm -f "$PIDFILE"
 
-bash "$SB/midea_ieco_ensure.sh" all --only-if-on &
+# Ausgabe umleiten: selbst wenn hier je wieder ein Nachkomme ueberlebt, kann er
+# das Schreibende der Testausgabe nicht halten. Zusammen mit dem 'exec' oben ist
+# der Stau strukturell ausgeschlossen; einzeln ist keine der beiden Haelften
+# durch einen Test falsifizierbar (siehe KNOWN_GAPS).
+bash "$SB/midea_ieco_ensure.sh" all --only-if-on >/dev/null 2>&1 &
 WRAPPER_PID=$!
 
 # Begrenztes Warten statt festem Schlafen: auf einer langsamen Maschine soll der

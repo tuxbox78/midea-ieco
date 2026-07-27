@@ -43,7 +43,22 @@ echo "### python unit tests ###"
 python3 -m unittest discover -s tests -p 'test_*.py' || fail=1
 
 echo "### midea_ieco_ensure.sh wrapper tests ###"
-bash tests/test_wrapper.sh || fail=1
+# Ausgabe bewusst FANGEN statt durchzureichen: laesst der Wrappertest einen
+# Nachkommen zurueck, der das Schreibende der Ausgabe offen haelt, blockiert
+# genau dieses Fangen - so wie es jede CI tut, die Schrittausgaben protokolliert.
+# Ohne die Zeitschranke waere das eine stille Verzoegerung von zehn Sekunden
+# statt eines Fehlers; genau so ist der Fall einmal in dieses Repo gelangt.
+wrapper_start=$SECONDS
+wrapper_out="$(bash tests/test_wrapper.sh 2>&1)" || fail=1
+printf '%s\n' "$wrapper_out"
+wrapper_elapsed=$((SECONDS - wrapper_start))
+# Grenze mit reichlich Luft: der Lauf braucht rund eine Sekunde, der bekannte
+# Fehlerfall rund elf.
+if [ "$wrapper_elapsed" -gt 8 ]; then
+    echo "FEHLER: test_wrapper.sh brauchte ${wrapper_elapsed}s (Grenze 8s) -" \
+         "haelt ein zurueckgelassener Prozess die Ausgabe offen?"
+    fail=1
+fi
 
 echo "### install.sh function tests ###"
 bash tests/test_install.sh || fail=1
