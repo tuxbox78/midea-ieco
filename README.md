@@ -521,9 +521,9 @@ German tech outlets that have covered this project or used its measurements:
 
 | Date | Outlet | Topic |
 |---|---|---|
+| 25 Jul 2026 | **techboys.de** — Gary Madeo | [Midea's token-API shutdown](https://www.techboys.de/portasplit-home-assistant) — a later update added this project's test protocol on which cloud still issues device tokens |
 | 26 Jul 2026 | **Caschy's Blog** — Carsten Knobloch | [Saving energy with iECO on the PortaSplit](https://stadt-bremerhaven.de/midea-portasplit-wie-ihr-mit-ieco-strom-spart/) — introduces the ECO/iECO distinction and links this project |
 | 26 Jul 2026 | **techboys.de** — Gary Madeo | [The iECO mode in practice](https://www.techboys.de/portasplit-ieco) — built on this project's consumption measurements (Shelly logs, day-by-day tables, the 2–3.8 kWh range) |
-| 26 Jul 2026 | **techboys.de** — Gary Madeo | [Midea's token-API shutdown](https://www.techboys.de/portasplit-home-assistant) — the update to the 25 July article includes this project's test protocol on which cloud still issues device tokens |
 
 For transparency: I supplied the measurement data, the API protocol and screenshots to `techboys.de` and am credited there as the source. The articles themselves were written and fact-checked independently by their authors — no money changed hands in either direction, and I had no say over the wording. The underlying raw data is described under [Background: ECO vs. iECO](#background-eco-vs-ieco); the measurement's limitations are stated there as openly as in the articles.
 

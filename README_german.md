@@ -520,9 +520,9 @@ Fachmedien, die über dieses Projekt berichtet oder seine Messungen verwendet ha
 
 | Datum | Medium | Thema |
 |---|---|---|
+| 25.07.2026 | **techboys.de** — Gary Madeo | [Mideas Token-API-Abschaltung](https://www.techboys.de/portasplit-home-assistant) — ein späteres Update ergänzte das Testprotokoll dieses Projekts dazu, welche Cloud noch Geräte-Token ausgibt |
 | 26.07.2026 | **Caschys Blog** — Carsten Knobloch | [Mit iECO Strom sparen bei der PortaSplit](https://stadt-bremerhaven.de/midea-portasplit-wie-ihr-mit-ieco-strom-spart/) — erklärt die ECO/iECO-Unterscheidung und verlinkt dieses Projekt |
 | 26.07.2026 | **techboys.de** — Gary Madeo | [Der iECO-Modus in der Praxis](https://www.techboys.de/portasplit-ieco) — aufgebaut auf den Verbrauchsmessungen dieses Projekts (Shelly-Logs, Tagestabellen, die Spanne 2–3,8 kWh) |
-| 26.07.2026 | **techboys.de** — Gary Madeo | [Mideas Token-API-Abschaltung](https://www.techboys.de/portasplit-home-assistant) — das Update zum Artikel vom 25.07. enthält das Testprotokoll dieses Projekts dazu, welche Cloud noch Geräte-Token ausgibt |
 
 Zur Transparenz: Messdaten, API-Protokoll und Screenshots habe ich `techboys.de` zur Verfügung gestellt und werde dort als Quelle genannt. Die Artikel selbst sind redaktionell unabhängig entstanden und wurden von den Autoren eigenständig nachgerechnet — es floss kein Geld, in keine Richtung, und ich hatte keinen Einfluss auf die Formulierungen. Die zugrunde liegenden Rohdaten sind unter [Hintergrund: ECO vs. iECO](#hintergrund-eco-vs-ieco) beschrieben; die Grenzen der Messung stehen dort genauso offen wie in den Artikeln.
 
