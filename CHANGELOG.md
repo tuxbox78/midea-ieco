@@ -12,9 +12,24 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the iECO line had since been deleted or commented out, the product silently did
   not run at all and nobody mentioned it. The notice lists exactly the missing
   lines and writes nothing: the messages next to it promise the crontab is left
-  untouched, and printing keeps that literally true while making a duplicate job
-  impossible. A job run through the documented `midea_ieco_ensure.sh` wrapper
-  counts as present.
+  untouched, and printing keeps that literally true. A job run through the
+  documented `midea_ieco_ensure.sh` wrapper or through the `midea-ieco` /
+  `midea-ieco-refresh-tokens` bin wrappers counts as present.
+
+  Two corrections to how this was first described. The notice was said to make
+  "a duplicate cron job structurally impossible" — true of the notice, which only
+  prints, and **not** true of the installer: with an *unmarked* pre-existing
+  `midea_ieco_ensure.py` cron line, a fresh onboarding run finds no marker and
+  appends its own marked line. Measured end to end: one job in, two out, with
+  "[OK] cron jobs installed". That is now recorded as its own gap in
+  `tests/KNOWN_GAPS.md`. And the tool detection first matched only the two script
+  names, so a crontab driving the **bin wrappers** — the commands this installer
+  creates and both READMEs document — was reported as having no jobs at all, and
+  the notice offered the installer's lines to add. Following that advice produced
+  the very duplicate the entry claimed to prevent. Fixed: detection now matches
+  the basename of each token in the command field, which is what keeps it working
+  for the default install directory `/opt/local/midea-ieco`, whose path contains
+  the wrapper name.
 - `tests/test_wrapper.sh`: functional tests for `midea_ieco_ensure.sh`. The wrapper
   is the second production path for `--only-if-on` (Siri shortcuts, SSH) and had no
   functional test at all — `bash -n` and `shellcheck` both stay green when `"$@"`
@@ -150,6 +165,16 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   as empty and replaced it with our three lines, reporting success. Reproduced end
   to end — three foreign lines in, zero out. The two cases need not be told apart;
   the crontab is now read twice and nothing is written when the results disagree.
+
+  What this does **not** cover, stated plainly because the entry above reads
+  stronger than it is: only a *flapping* read is caught. A `crontab -l` that fails
+  **persistently** while `crontab -` still works returns the same empty result
+  twice, the two reads agree, and the user's crontab is replaced exactly as
+  before — re-measured with a stub that always fails `-l`: three foreign lines in,
+  zero out, "[OK] cron jobs installed", identical at this commit and at its
+  parent. Closing that would mean distinguishing "no crontab" from "cannot read
+  it", which `crontab -l` does not offer. Left as is deliberately; recorded so the
+  guard is not mistaken for full protection.
 - **The cron language notice: a whitespace value is not a value, and the line
   wins.** `MIDEA_IECO_LANG='   '` counted as set although cron stores the spaces
   verbatim and `resolve_lang` strips them and falls back to English. And an
@@ -275,19 +300,60 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `install.sh` resolves its install directory from `MIDEA_IECO_RESOLVED_DIR` before
   anything else and exports that variable to child processes itself. Inherited from
   the environment, it aimed every end-to-end section at that directory: measured on
-  a victim, a complete venv of 898 files with msmart-ng and midea-local really
-  installed from PyPI, plus `devices.json`, plus a ZIP download from GitHub copied
-  over the target in the update path. The directory it hits is exactly the
-  `.git`-stripped copy this project's own mutation-testing recipe tells you to make.
-  The whole `MIDEA_IECO_*` family is now unset at the head of `tests/test_install.sh`;
-  `git`, `curl` and `unzip` are stubbed as loud failures in every end-to-end sandbox
-  as defence in depth. Worth knowing which is which: only the unset protects — the
-  venv is built by the venv's own `pip`, which no PATH stub can intercept.
+  a victim, a `venv/` was created there, along with `devices.json` and
+  `devices.json.bak`, and in the update path a ZIP download from GitHub was copied
+  over the target. The directory it hits is exactly the `.git`-stripped copy this
+  project's own mutation-testing recipe tells you to make.
+  The whole `MIDEA_IECO_*` family is now unset at the head of `tests/test_install.sh`.
+
+  Three claims from the first write-up of this fix, corrected against measurements:
+  - The victim was said to receive "a complete venv of **898 files** with msmart-ng
+    and midea-local really installed from PyPI". The count and that composition do
+    not demonstrably belong together: a **bare** `python3 -m venv`, offline and with
+    nothing installed into it, produces 871 files here (Python 3.14.6; 569 under
+    Apple's 3.9.6). 27 files is nowhere near two packages plus their dependencies,
+    so the number does not show that anything was fetched from PyPI. What is certain
+    about the hazard — a foreign directory is entered and written to, and the update
+    path downloads and copies over it — stands on its own; the count is dropped.
+  - "Zero `git`/`curl`/`unzip` calls" was wrong. An instrumented green run makes
+    **nine** of them (8 × `git`, 1 × `curl`, 0 × `unzip`). Every one is served by a
+    sandbox stub; the true statement is that none of them escapes the sandbox.
+  - "`git`, `curl` and `unzip` are stubbed as loud failures in every end-to-end
+    sandbox" holds only for the onboarding runs. In the temp-leak sandbox `curl` and
+    `unzip` are *silent* `exit 1` and `git` is a silent `exit 0`; in the `--update`
+    sandbox `git` is a functional shim that answers `diff --quiet`, `pull --ff-only`
+    and `rev-parse` with success.
+
+  Worth knowing which is which: only the unset protects. `python3 -m venv` creates
+  the venv, and `setup_venv_and_deps` then sources `venv/bin/activate`, which puts
+  `venv/bin` in front of `PATH` — from there on the *venv's own* `pip` installs the
+  packages and a `pip` stub on `PATH` never fires. (In the sandboxes the fake
+  `activate` leaves `PATH` alone, which is why the `pip` stub does run there: 51
+  calls in the same instrumented run.)
 - **The wrapper test left a `sleep` holding the suite's stdout**, so anything
   capturing the output — a pipe, a command substitution, a CI step log — waited ten
   seconds: 1.0 s redirected to a file against 10.9 s captured. Fixed on both sides,
-  and `run_all.sh` now captures that test the way CI does and fails above 8 seconds,
-  which guards the pair permanently.
+  and `run_all.sh` now captures that test the way CI does and fails above a time
+  limit, which guards the pair permanently.
+
+  That guard did not work as written, in both directions, and has been repaired.
+  The same change had shortened the fake Python's sleep to 5 s, so reintroducing
+  the fault stalled only 6.0 s — under the 8 s limit, and the suite reported ALL
+  GREEN. Meanwhile the wrapper test's own start budget was 100 × 0.1 s = 10 s,
+  *above* the limit, so a merely slow start produced a red run carrying the
+  misleading message about a left-behind process. The three quantities now stand
+  in the only order that works — start budget 4 s < limit 8 s < the 20 s stall the
+  fault produces — the limit lives in `run_all.sh` alone and is handed to the test,
+  and the test asserts the ordering itself, so moving any one of them turns the
+  suite red at the assertion that names them. Measured: normal run 1.0 s; the
+  reintroduced fault 21 s, caught by the guard; a fake Python needing 12 s to start
+  fails with its own assertion and never reaches the limit.
+- **A newly added assertion was vacuous.** "`shell_quote_for_cron`: the error text
+  does not end up in the returned value" is a bare negative: replacing the abort in
+  `install.sh` with `: "$(t err_cron_newline)"` — the catalogue key stays referenced,
+  the branch does nothing — left all 220 assertions green. Two positive counterparts
+  now stand next to it: that path must exit non-zero, and the catalogue text must
+  appear on stderr while doing so.
 - **Both call sites of the cron language notice are now exercised, not counted.**
   Reachability rested on a source-text `grep -c`, which stays green when a call site
   is emptied. Two end-to-end runs replace it, and they assert on the warning text
