@@ -245,6 +245,30 @@ Remember log rotation, for example with `logrotate` or simply:
 0 0 1 * * truncate -s 0 /opt/local/midea-ieco/ieco.log /opt/local/midea-ieco/refresh.log
 ```
 
+### What the installer says about an existing crontab
+
+When `install.sh` runs on a machine that is already set up — most often a plain
+re-run of the `curl … | bash` one-liner — it reads your crontab and may print one of
+the notices below. **None of them changes anything.** The installer never rewrites an
+existing crontab; it only ever prints the line for you to copy.
+
+- **"at least one job is not active"** — your crontab carries the
+  `# midea-ieco-managed` marker, so the installer counts it as already set up and
+  writes nothing. But one of the two jobs has since been deleted or commented out,
+  which means that part of the product silently does not run at all. The missing line
+  is printed ready to paste. A job that runs through `midea_ieco_ensure.sh` or through
+  the `midea-ieco` / `midea-ieco-refresh-tokens` commands counts as active — you are
+  not being asked to add a second one.
+- **"reading the current crontab returned different results twice in a row"** — this
+  appears only if you answer *yes* to the cron question. `crontab -l` reports "there
+  is no crontab" and "I could not read it" in exactly the same way, and mistaking the
+  second for the first would mean replacing your crontab with our three lines. The
+  installer therefore reads it twice and, if the two results disagree, writes nothing
+  and asks you to add the lines by hand.
+- **"your existing cron jobs do not set `MIDEA_IECO_LANG`"** — the jobs predate the
+  language pass-through and log in English, because cron runs without a locale. The
+  corrected lines are printed; whether to adopt them is your call.
+
 ## Logs
 
 The cron jobs are the only thing that writes log files. `midea_ieco_ensure.py` and `midea_refresh_tokens.py` just print to standard output/error; the cron lines above redirect that into files with `>> …log 2>&1`. **Run either script manually (or over SSH/Siri) and nothing is written to a file** — the output goes to your terminal instead. If you never set up cron, no log files exist.

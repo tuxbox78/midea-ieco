@@ -246,6 +246,33 @@ Log-Rotation nicht vergessen, z. B. mit `logrotate` oder einfach:
 0 0 1 * * truncate -s 0 /opt/local/midea-ieco/ieco.log /opt/local/midea-ieco/refresh.log
 ```
 
+### Was der Installer zu einer bestehenden Crontab sagt
+
+Läuft `install.sh` auf einem bereits eingerichteten Rechner — meist als schlichter
+erneuter Aufruf des `curl … | bash`-Einzeilers —, liest er deine Crontab und zeigt
+unter Umständen einen der folgenden Hinweise. **Keiner davon ändert etwas.** Der
+Installer schreibt eine bestehende Crontab nie um; er zeigt die Zeile nur zum
+Übernehmen an.
+
+- **„mindestens ein Job ist nicht aktiv"** — deine Crontab trägt den Marker
+  `# midea-ieco-managed`, gilt dem Installer damit als eingerichtet und wird nicht
+  angefasst. Einer der beiden Jobs wurde aber inzwischen gelöscht oder
+  auskommentiert, dieser Teil des Produkts läuft also still gar nicht. Die fehlende
+  Zeile wird fertig zum Einfügen angezeigt. Ein Job, der über `midea_ieco_ensure.sh`
+  oder über die Befehle `midea-ieco` / `midea-ieco-refresh-tokens` läuft, zählt als
+  aktiv — du wirst also nicht aufgefordert, eine zweite Zeile anzulegen.
+- **„Das Lesen der aktuellen Crontab lieferte zweimal hintereinander
+  Unterschiedliches"** — erscheint nur, wenn du die Cron-Frage mit *ja* beantwortest.
+  `crontab -l` meldet „es gibt keine Crontab" und „ich konnte sie nicht lesen" auf
+  genau dieselbe Weise; hielte man den zweiten Fall für den ersten, würde deine
+  Crontab durch unsere drei Zeilen ersetzt. Der Installer liest sie deshalb zweimal
+  und schreibt bei abweichendem Ergebnis nichts, sondern bittet dich, die Zeilen von
+  Hand zu ergänzen.
+- **„Deine bestehenden Cron-Jobs setzen `MIDEA_IECO_LANG` nicht"** — die Jobs stammen
+  aus der Zeit vor der Sprachweitergabe und protokollieren auf Englisch, weil Cron
+  ohne Locale läuft. Die korrigierten Zeilen werden angezeigt; ob du sie übernimmst,
+  entscheidest du.
+
 ## Logs
 
 Die Cron-Jobs sind das Einzige, was überhaupt Logdateien schreibt. `midea_ieco_ensure.py` und `midea_refresh_tokens.py` geben nur auf die Standard-Aus-/Fehlerausgabe aus; die Cron-Zeilen oben lenken das per `>> …log 2>&1` in Dateien um. **Ein manueller Aufruf (oder per SSH/Siri) schreibt nichts in eine Datei** — die Ausgabe landet stattdessen im Terminal. Ohne eingerichteten Cron-Job existieren keine Logdateien.
