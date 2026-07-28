@@ -170,6 +170,23 @@ assert "$rc" "shell_quote_for_cron: der Fehlertext landet nicht im Ergebniswert"
 rc=0; [ -n "$SQ_ERRTEXT" ] || rc=1
 assert "$rc" "Gegenprobe: der erwartete Fehlertext ist ueberhaupt nicht leer"
 
+# Die beiden Zusicherungen oben sind fuer sich VAKUUM-gruen: sie sagen nur, wo
+# der Text NICHT steht. Ersetzt man den Abbruch in install.sh durch
+# ': "$(t err_cron_newline)"' - der Katalogschluessel bleibt referenziert, der
+# Zweig tut nichts mehr -, blieben sie gruen und die ganze Suite ebenso
+# (gemessen: 220/220). Deshalb die positive Gegenprobe: der Fall MUSS abbrechen,
+# und der Text MUSS dabei auf stderr erscheinen.
+sq_rc=0
+sq_err="$( ( set -u
+             eval "$(grep -m1 '^RED=' "$INSTALL")"
+             eval "$(grep -m1 '^error()' "$INSTALL")"
+             eval "$(extract_func shell_quote_for_cron "$INSTALL")"
+             shell_quote_for_cron "$(printf 'a\nb')" ) 2>&1 >/dev/null )" || sq_rc=$?
+rc=0; [ "$sq_rc" -ne 0 ] || rc=1
+assert "$rc" "shell_quote_for_cron: Pfad mit Zeilenumbruch bricht ab (Exit $sq_rc)"
+rc=0; case "$sq_err" in *"$SQ_ERRTEXT"*) : ;; *) rc=1 ;; esac
+assert "$rc" "shell_quote_for_cron: der Fehlertext erscheint auf stderr"
+
 # ---------------------------------------------------------------------------
 echo "== shell_quote_for_cron (#4) =="
 # ---------------------------------------------------------------------------
