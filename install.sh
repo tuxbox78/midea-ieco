@@ -661,20 +661,61 @@ print_cron_lang_hint() {   # $1 = bestehende Crontab
 #
 # Ohne Marker wird geschwiegen: wer seine Anlagen ueber Siri oder systemd
 # steuert, hat bewusst keinen Cron-Job und braucht keinen Rat dazu.
+#
+# Erkannt wird der Aufruf am BASISNAMEN eines Kommandofeld-Tokens, nicht an
+# einem Vorkommen irgendwo in der Zeile. Der Unterschied ist hier keine Feinheit:
+# das Standard-Installationsverzeichnis heisst /opt/local/midea-ieco und der
+# Marker selbst enthaelt "midea-ieco". Eine Suche ueber die ganze Zeile hielte
+# also bei JEDER Standardinstallation jede verwaltete Zeile - auch die
+# Logrotate-Zeile - fuer den iECO-Job und der Hinweis waere tot.
+#
+# Wo die Pruefung unsicher ist, zaehlt der Job als VORHANDEN (Quotes werden
+# abgestreift, Skriptnamen nur mit Praefix verglichen). Die verbleibende
+# Fehlrichtung ist damit Schweigen, nicht falscher Rat: ein fehlender Hinweis
+# kostet nichts, der Rat zu einer zweiten Zeile dagegen zwei Verbindungen alle
+# 20 Minuten auf Anlagen, die nur EINE vertragen.
 cron_missing_managed_lines() {   # $1 = bestehende Crontab
     CRON_MISSING_IECO=0
     CRON_MISSING_REFRESH=0
     case "$1" in *"$CRON_MARKER"*) : ;; *) return 0 ;; esac
-    local line trimmed have_ieco=0 have_refresh=0
+    local line trimmed rest tok prev base have_ieco=0 have_refresh=0
+    local -a toks=()
     while IFS= read -r line; do
         trimmed="${line#"${line%%[![:space:]]*}"}"
         case "$trimmed" in '#'*) continue ;; esac
         case "$line" in *"$CRON_MARKER"*) : ;; *) continue ;; esac
-        # Praefix ohne Endung: deckt midea_ieco_ensure.py UND den dokumentierten
-        # Wrapper midea_ieco_ensure.sh ab. Wer seinen Job ueber den Wrapper
-        # faehrt, soll keinen Rat bekommen, eine zweite Zeile anzulegen.
-        case "$line" in *midea_ieco_ensure*)    have_ieco=1 ;; esac
-        case "$line" in *midea_refresh_tokens*) have_refresh=1 ;; esac
+        # Alles ab dem Marker abschneiden: /bin/sh behandelt es als Kommentar,
+        # es wird also nichts davon ausgefuehrt. Was ein Nutzer dort notiert
+        # ("frueher: midea-ieco all"), darf keinen Job vortaeuschen.
+        rest="${line%%"$CRON_MARKER"*}"
+        # 'read -a' statt unquotiertem $rest: es zerlegt an Leerraum, expandiert
+        # dabei aber KEINE Glob-Zeichen - und Zeitfelder wie */20 bestehen genau
+        # daraus. Der Rueckgabewert wird bewusst verworfen (set -e).
+        toks=()
+        read -r -a toks <<< "$rest" || true
+        prev=""
+        # Leeres Array + 'set -u': die Laengenpruefung ist noetig, weil bash 3.2
+        # (macOS-Standard) bei "${toks[@]}" sonst abbricht.
+        if [[ "${#toks[@]}" -gt 0 ]]; then
+            for tok in "${toks[@]}"; do
+                # Der Operand von 'cd' ist ein Verzeichnis, kein Aufruf. Ohne
+                # diese Ausnahme zaehlte 'cd /opt/local/midea-ieco' in der
+                # Refresh-Zeile als iECO-Job - beim Standardpfad also immer.
+                if [[ "$prev" == "cd" ]]; then prev="$tok"; continue; fi
+                base="${tok//\'/}"; base="${base//\"/}"
+                base="${base##*/}"
+                # Praefix bei den Skriptnamen: deckt midea_ieco_ensure.py UND
+                # den dokumentierten Wrapper midea_ieco_ensure.sh ab. Die
+                # bin-Wrapper werden exakt verglichen - 'midea-ieco-update' ist
+                # keiner der beiden Jobs, und der laengere Refresh-Name darf
+                # nicht als der kuerzere durchgehen.
+                case "$base" in
+                    midea_ieco_ensure*|midea-ieco)                   have_ieco=1 ;;
+                    midea_refresh_tokens*|midea-ieco-refresh-tokens) have_refresh=1 ;;
+                esac
+                prev="$tok"
+            done
+        fi
     done <<< "$1"
     [[ "$have_ieco" -eq 0 ]] && CRON_MISSING_IECO=1
     [[ "$have_refresh" -eq 0 ]] && CRON_MISSING_REFRESH=1

@@ -1534,6 +1534,57 @@ assert_missing "*/20 * * * * cd /opt && MIDEA_IECO_LANG=de /opt/midea_ieco_ensur
 $CL_NEW_REFRESH
 $CL_LOGROT" "" "Job ueber den .sh-Wrapper zaehlt als vorhanden"
 
+# --- die bin-Wrapper aus BIN_DIR -------------------------------------------
+# Dieselbe Falle eine Ebene weiter: 'midea-ieco' und 'midea-ieco-refresh-tokens'
+# sind die Befehle, die install.sh selbst anlegt und die beide READMEs zeigen.
+# Wer seine Cron-Zeilen darauf umstellt, bekam den Rat, eine zweite Zeile
+# anzulegen. Naiv reparieren kann man das nicht: der Marker selbst enthaelt
+# "midea-ieco", und beim Standardpfad /opt/local/midea-ieco tut es jeder
+# Log- und cd-Pfad ebenfalls. Deshalb die Fixtures fuer beide Richtungen.
+assert_missing "*/20 * * * * /opt/local/bin/midea-ieco all --only-if-on >> /opt/ieco.log 2>&1 $CRON_MARKER
+0 3 * * 0 /opt/local/bin/midea-ieco-refresh-tokens --all >> /opt/refresh.log 2>&1 $CRON_MARKER
+$CL_LOGROT" "" "Jobs ueber die bin-Wrapper zaehlen als vorhanden"
+
+# Der Wrapper liegt im PATH - dann steht in der Zeile nur der nackte Name.
+assert_missing "*/20 * * * * midea-ieco all --only-if-on $CRON_MARKER
+0 3 * * 0 midea-ieco-refresh-tokens --all $CRON_MARKER" "" \
+    "bin-Wrapper ohne Pfadangabe (BIN_DIR im PATH) zaehlt ebenfalls"
+
+# Der laengere Name enthaelt den kuerzeren: eine Crontab mit NUR der
+# Refresh-Zeile darf den iECO-Job nicht als vorhanden ausweisen, sonst schwiege
+# der Hinweis genau dort, wo das Produkt nicht laeuft.
+assert_missing "0 3 * * 0 /opt/local/bin/midea-ieco-refresh-tokens --all $CRON_MARKER
+$CL_LOGROT" "ZEILE_IECO" "der Refresh-Wrapper zaehlt NICHT als iECO-Job"
+
+# 'midea-ieco-update' ist der dritte erzeugte Wrapper und keiner der beiden
+# Jobs - eine Crontab, die nur ihn faehrt, laesst das Produkt nicht laufen.
+assert_missing "0 4 * * * /opt/local/bin/midea-ieco-update $CRON_MARKER
+$CL_LOGROT" "ZEILE_IECO
+ZEILE_REFRESH" "'midea-ieco-update' ist keiner der beiden Jobs"
+
+# Standardpfad: hier enthaelt JEDE verwaltete Zeile die Zeichenfolge
+# 'midea-ieco' im Verzeichnis. Die Logrotate-Zeile ruft trotzdem kein Werkzeug.
+DEF_LOGROT="0 0 1 * * truncate -s 0 '/opt/local/midea-ieco'/ieco.log '/opt/local/midea-ieco'/refresh.log $CRON_MARKER"
+assert_missing "$DEF_LOGROT" "ZEILE_IECO
+ZEILE_REFRESH" "Standardpfad: die Logrotate-Zeile ist kein Job"
+
+# Und dasselbe fuer den cd-Operanden: das ist die Zeile, die der Installer beim
+# Standardpfad selbst schreibt. Wuerde ihr 'cd'-Ziel als Aufruf gelten, waere der
+# Hinweis fuer jede Standardinstallation stumm.
+assert_missing "0 3 * * 0 cd '/opt/local/midea-ieco' && MIDEA_IECO_LANG=de venv/bin/python3 midea_refresh_tokens.py --all >> '/opt/local/midea-ieco'/refresh.log 2>&1 $CRON_MARKER
+$DEF_LOGROT" "ZEILE_IECO" "Standardpfad: der cd-Operand ist kein Aufruf"
+
+# Ein in Quotes geschriebener Wrapperaufruf zaehlt ebenfalls - die Quotes
+# gehoeren der Shell, nicht dem Namen.
+assert_missing "*/20 * * * * '/opt/local/bin/midea-ieco' all --only-if-on $CRON_MARKER
+$CL_NEW_REFRESH
+$CL_LOGROT" "" "gequoteter Wrapperaufruf zaehlt als vorhanden"
+
+# Was hinter dem Marker steht, ist fuer /bin/sh Kommentar und laeuft nicht.
+assert_missing "0 0 1 * * truncate -s 0 /opt/ieco.log /opt/refresh.log $CRON_MARKER # frueher: midea-ieco all" \
+    "ZEILE_IECO
+ZEILE_REFRESH" "Text hinter dem Marker taeuscht keinen Job vor"
+
 # ---------------------------------------------------------------------------
 echo "== PATH-Aufnahme: _path_rc_file / _write_path_block / ensure_bin_on_path =="
 # ---------------------------------------------------------------------------
