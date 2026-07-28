@@ -37,20 +37,39 @@ Contents:
   whole `MIDEA_IECO_*` family at the head of the file — `install.sh` resolves its
   install directory from `MIDEA_IECO_RESOLVED_DIR` first and exports that variable
   itself, so an inherited value aims every end-to-end run at a foreign directory.
-  On top of that, `git`, `curl` and `unzip` are stubbed as loud failures in every
-  end-to-end sandbox; that is defence in depth, not the protection (the venv is
-  built by the venv's own `pip`, which no PATH stub intercepts). Each sandbox also
-  stubs what it drives: `python3` and `pip` everywhere, `crontab` in the onboarding
-  runs. The onboarding `python3` stub answers only the installer's probe calls and
-  delegates the `devices.json` write to the real interpreter, so the test does not
-  merely check its own stub.
+
+  The network commands are stubbed on top of that, as defence in depth — but not
+  uniformly, and it is worth knowing which sandbox does what:
+
+  | sandbox | `python3` | `pip` | `crontab` | `git` | `curl` / `unzip` |
+  |---|---|---|---|---|---|
+  | onboarding | probe answers, real interpreter otherwise | yes | yes | loud failure | loud failure |
+  | `--update` | yes | yes | — | functional shim, exits 0 | loud failure |
+  | temp-leak | yes | — | — | silent `exit 0` | silent `exit 1` |
+
+  A green run does *invoke* those stubs — measured with instrumented stubs: nine
+  calls in total (8 × `git`, 1 × `curl`, 0 × `unzip`). What holds is not that there
+  are none, but that none of them reaches the real binary.
+
+  The stubbing is also not what keeps a *real* run inside its directory:
+  `python3 -m venv` creates the venv, and `setup_venv_and_deps` then sources
+  `venv/bin/activate`, which puts `venv/bin` in front of `PATH` — the packages are
+  installed by the *venv's own* `pip`, which a `PATH` stub cannot intercept. Inside
+  these sandboxes the fake `activate` leaves `PATH` alone, so there the `PATH` stub
+  does fire (51 calls in the same run). The onboarding `python3` stub answers only
+  the installer's probe calls and delegates the `devices.json` write to the real
+  interpreter, so the test does not merely check its own stub.
 - `test_wrapper.sh` — functional tests for `midea_ieco_ensure.sh`, the wrapper
   behind the Siri shortcuts and SSH calls: that every argument (especially
   `--only-if-on`) reaches Python unchanged, that the exit code is passed through,
   that a missing venv produces a clear error instead of a cryptic `exec` failure,
   and that the wrapper *becomes* the Python process (same PID) rather than forking
   — the property `exec` is there for. The wrapper runs as a copy in a sandbox
-  against a fake venv Python.
+  against a fake venv Python. Three time quantities in here hang together and are
+  asserted to: the start budget for that fake Python (4 s) must stay below the time
+  limit `run_all.sh` applies to this file (8 s), which must stay well below the
+  stall a left-behind process produces (20 s). Get that order wrong and the guard
+  in `run_all.sh` stops catching its own fault — which is what happened once.
 - `KNOWN_GAPS.md` — behaviour that still survives deliberate mutation, with the
   cost of each gap and the cheapest way to close it. Read it before assuming a
   green run means a behaviour is covered, and update it whenever you close one.
