@@ -46,16 +46,22 @@ echo "### midea_ieco_ensure.sh wrapper tests ###"
 # Ausgabe bewusst FANGEN statt durchzureichen: laesst der Wrappertest einen
 # Nachkommen zurueck, der das Schreibende der Ausgabe offen haelt, blockiert
 # genau dieses Fangen - so wie es jede CI tut, die Schrittausgaben protokolliert.
-# Ohne die Zeitschranke waere das eine stille Verzoegerung von zehn Sekunden
-# statt eines Fehlers; genau so ist der Fall einmal in dieses Repo gelangt.
+# Ohne die Zeitschranke waere das eine stille Verzoegerung statt eines Fehlers;
+# genau so ist der Fall einmal in dieses Repo gelangt.
+#
+# Diese Zahl ist die MITTLERE von dreien und gehoert deshalb hierher, an genau
+# eine Stelle: das Startbudget des Wrappertests muss darunter liegen (ein bloss
+# langsamer Start soll mit der Zusicherung scheitern, die ihn benennt), der Stau
+# des bekannten Defekts deutlich darueber (sonst faengt der Waechter ihn nicht).
+# test_wrapper.sh bekommt den Wert und sichert die Ordnung selbst zu - beide
+# Nachbarzahlen stehen dort. Gemessen: normaler Lauf rund 1 s, Defekt rund 21 s.
+WRAPPER_TIME_LIMIT=8
 wrapper_start=$SECONDS
-wrapper_out="$(bash tests/test_wrapper.sh 2>&1)" || fail=1
+wrapper_out="$(MIDEA_IECO_TEST_TIME_LIMIT="$WRAPPER_TIME_LIMIT" bash tests/test_wrapper.sh 2>&1)" || fail=1
 printf '%s\n' "$wrapper_out"
 wrapper_elapsed=$((SECONDS - wrapper_start))
-# Grenze mit reichlich Luft: der Lauf braucht rund eine Sekunde, der bekannte
-# Fehlerfall rund elf.
-if [ "$wrapper_elapsed" -gt 8 ]; then
-    echo "FEHLER: test_wrapper.sh brauchte ${wrapper_elapsed}s (Grenze 8s) -" \
+if [ "$wrapper_elapsed" -gt "$WRAPPER_TIME_LIMIT" ]; then
+    echo "FEHLER: test_wrapper.sh brauchte ${wrapper_elapsed}s (Grenze ${WRAPPER_TIME_LIMIT}s) -" \
          "haelt ein zurueckgelassener Prozess die Ausgabe offen?"
     fail=1
 fi

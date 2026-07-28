@@ -20,6 +20,36 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WRAPPER="$REPO/midea_ieco_ensure.sh"
 pass=0; fail=0
 
+# ---------------------------------------------------------------------------
+# Die drei Zeitgroessen dieser Datei - sie haengen zusammen und muessen es auch
+# bleiben. Der Laufzeitwaechter in tests/run_all.sh faengt den Defekt, den der
+# 'exec'-Abschnitt unten beschreibt (ein zurueckgelassener Nachkomme haelt das
+# Schreibende der Testausgabe offen), NUR wenn gilt:
+#
+#   Startbudget  <  Zeitschranke in run_all.sh  <  Stau, den der Defekt erzeugt
+#
+# Waren die Zahlen einmal falsch geordnet, war der Waechter in BEIDE Richtungen
+# unbrauchbar: der wiedereingebaute Defekt staute nur rund 6 s und blieb unter
+# der 8-s-Schranke (gemessen, die Suite meldete ALL GREEN), waehrend ein bloss
+# LANGSAMER Start das Budget von 10 s ausschoepfte und damit ueber die Schranke
+# lief - der Lauf wurde rot mit der irrefuehrenden Meldung ueber einen
+# zurueckgelassenen Prozess. Deshalb wird die Ordnung unten zugesichert.
+#
+# Zum Startbudget: die Schleife kostet je Runde etwas mehr als die 0,1 s Schlaf
+# (gemessen rund 14 % Aufschlag), 40 Runden sind also knapp 4,6 s echte Zeit.
+# Zusammen mit rund 1 s fuer den Rest der Datei bleibt genug Abstand zur
+# 8-s-Schranke. Beobachtet startet der Fake-Python nach 3 Runden.
+START_BUDGET_TICKS=40
+# Wie lange der Fake-Python nach dem Hinterlegen seiner PID schlaeft. Bei
+# korrektem Code kostet das nichts: der Schlafende IST der Wrapper-Prozess und
+# wird unten sofort erschlagen. Erst der Defekt macht daraus einen Stau - und
+# der muss deutlich ueber der Zeitschranke liegen, sonst faellt er nicht auf.
+ORPHAN_SLEEP_SECONDS=20
+# Die Zeitschranke gehoert run_all.sh; von dort kommt sie als Umgebungsvariable.
+# Der Standardwert gilt nur fuer den Direktaufruf dieser Datei - im Suitenlauf
+# (und damit in der CI) entscheidet immer der uebergebene Wert.
+OUTER_TIME_LIMIT="${MIDEA_IECO_TEST_TIME_LIMIT:-8}"
+
 # Gleiches Muster wie in test_install.sh: 'rc' wird vorher gesetzt, damit weder
 # SC2015 (A && B || C) noch SC2319 ($? einer Bedingung) noetig werden.
 assert() {
@@ -164,16 +194,28 @@ PIDFILE="$WORK/child.pid"
 # Prozess und traegt dessen PID, nur so beendet ihn das 'kill' weiter unten
 # wirklich. Ohne exec ueberlebt der Schlaf als Kind, haelt das Schreibende der
 # Testausgabe offen und laesst jeden Aufrufer haengen, der die Ausgabe faengt -
-# Pipe, Kommandosubstitution, CI-Schrittprotokoll. Gemessen: 1,0 s in eine
-# Datei gegen 10,9 s gefangen.
+# Pipe, Kommandosubstitution, CI-Schrittprotokoll. So ist der Fall einmal in
+# dieses Repo gelangt (damals gemessen: 1,0 s in eine Datei gegen 10,9 s
+# gefangen, bei 10 s Schlafdauer). Der Stau folgt der Schlafdauer, deshalb legt
+# ORPHAN_SLEEP_SECONDS oben fest, wie deutlich er die Zeitschranke ueberschreitet.
 #
 # Der Erklaertext steht bewusst HIER und nicht im Heredoc: dieses Here-Dokument
-# ist unquotiert (es interpoliert PIDFILE), eine Kommandosubstitution im
-# Kommentar wuerde also beim Erzeugen ausgefuehrt.
+# ist unquotiert (es interpoliert PIDFILE und die Schlafdauer), eine
+# Kommandosubstitution im Kommentar wuerde also beim Erzeugen ausgefuehrt.
+#
+# Zuerst die Ordnung der drei Zahlen zusichern - ohne sie sagt alles Weitere in
+# diesem Abschnitt nichts mehr aus. Zugesichert wird die konservative Form
+# (Schranke < reine Schlafdauer); der echte Stau ist um die Laufzeit der uebrigen
+# Faelle laenger.
+rc=0
+{ [ "$((START_BUDGET_TICKS / 10))" -lt "$OUTER_TIME_LIMIT" ] \
+  && [ "$OUTER_TIME_LIMIT" -lt "$ORPHAN_SLEEP_SECONDS" ]; } || rc=1
+assert "$rc" "Zeitordnung: Startbudget $((START_BUDGET_TICKS / 10))s < Schranke ${OUTER_TIME_LIMIT}s < Stau ${ORPHAN_SLEEP_SECONDS}s"
+
 cat > "$SB/venv/bin/python3" <<EOF
 #!/usr/bin/env bash
 printf '%s' "\$\$" > "$PIDFILE"
-exec sleep 5
+exec sleep $ORPHAN_SLEEP_SECONDS
 EOF
 chmod +x "$SB/venv/bin/python3"
 rm -f "$PIDFILE"
@@ -186,9 +228,13 @@ bash "$SB/midea_ieco_ensure.sh" all --only-if-on >/dev/null 2>&1 &
 WRAPPER_PID=$!
 
 # Begrenztes Warten statt festem Schlafen: auf einer langsamen Maschine soll der
-# Test nicht falsch-rot werden, und im Fehlerfall nicht ewig haengen.
+# Test nicht falsch-rot werden, und im Fehlerfall nicht ewig haengen. Das Budget
+# liegt UNTER der Zeitschranke von run_all.sh (siehe Kopf): ein wirklich langsamer
+# Start soll mit der Zusicherung direkt darunter scheitern, die den Fall benennt,
+# nicht mit der Sammelmeldung des Laufzeitwaechters ueber einen
+# zurueckgelassenen Prozess.
 waited=0
-while [ ! -s "$PIDFILE" ] && [ "$waited" -lt 100 ]; do
+while [ ! -s "$PIDFILE" ] && [ "$waited" -lt "$START_BUDGET_TICKS" ]; do
     sleep 0.1
     waited=$((waited + 1))
 done
