@@ -721,11 +721,11 @@ cron_tokenize_line() {   # $1 = Cron-Zeile; Ergebnis in CTL_TOKS/CTL_SEP/CTL_RED
                 CTL_TOKS+=("$ch"); CTL_SEP+=(1); CTL_RED+=(0); pend_red=0 ;;
             # '<' trennt, setzt aber KEIN Umleitungs-Flag: der Operand einer
             # Eingabeumleitung ist manchmal das Programm selbst ('sh < skript').
-            # Diese Zeile hat KEINEN eigenen Test - der Subsplit weiter unten
-            # zerlegt inzwischen ebenfalls an '<', und beide zusammen ergeben in
-            # jedem geprueften Fall dieselbe Antwort. Sie bleibt, weil sie die
-            # Trennung schon im Tokenizer erledigt und damit unabhaengig von
-            # jenem Subsplit richtig bleibt.
+            # Diese Zeile hat inzwischen einen eigenen Kill: 'cd /opt</x/midea-ieco'
+            # haengt an ihr allein. Der Subsplit weiter unten zerlegt zwar
+            # ebenfalls an '<', kommt aber genau dann nicht mehr dazu, wenn das
+            # ungetrennte Token dem cd-Skip zum Opfer faellt - der Skip steht
+            # vor ihm.
             '<')
                 if [ "$started" -eq 1 ]; then
                     CTL_TOKS+=("$cur"); CTL_SEP+=(0); CTL_RED+=("$pend_red")

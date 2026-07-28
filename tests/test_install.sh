@@ -1510,6 +1510,24 @@ assert_hint "MIDEA_IECO_LANG=de
 assert_hint "*/20 * * * * cd /opt && venv/bin/python3 midea_ieco_ensure.py all --only-if-on" \
     "" "unmarkierte Zeile mit unserem Werkzeug loest keinen Hinweis aus"
 
+# --- Wrapper-Blindheit: bewusst so, und deshalb festgehalten ----------------
+# Der Sprachhinweis sucht woertlich nach den beiden SKRIPTNAMEN. Die Wrapper,
+# die derselbe Installer anlegt und beide READMEs empfehlen, sieht er dadurch
+# nicht - gemessen fuer beide Werkzeugseiten, also auch fuer
+# midea-ieco-refresh-tokens. Der Hinweis auf einen nicht aktiven Job dagegen
+# erkennt seit der Tokenizer-Runde am Basisnamen der Kommandofeld-Tokens und
+# sieht dieselben Zeilen sehr wohl (Zusicherungen weiter unten). Diese
+# Asymmetrie ist die guenstige Richtung (ein fehlender Hinweis kostet nichts,
+# ein falscher Rat zwei Verbindungen alle 20 Minuten) und steht als solche in
+# KNOWN_GAPS. Die beiden Zusicherungen halten den Ist-Zustand fest: wer die
+# Erkennung hier erweitert, faellt hierueber und zieht die Doku mit.
+assert_hint "*/20 * * * * /usr/local/bin/midea-ieco all --only-if-on $CRON_MARKER" \
+    "" "bin-Wrapper ohne Sprachvariable: der Sprachhinweis sieht ihn nicht"
+# Bewusst ein Pfad OHNE 'midea-ieco' darin: sonst haelte die Zusicherung schon
+# am Verzeichnisnamen, und nicht am Namen des Wrappers, um den es geht.
+assert_hint "*/20 * * * * /opt/tools/midea_ieco_ensure.sh all $CRON_MARKER" \
+    "" ".sh-Wrapper ohne Sprachvariable: der Sprachhinweis sieht ihn ebenfalls nicht"
+
 # ---------------------------------------------------------------------------
 echo "== Hinweis auf einen nicht aktiven verwalteten Job =="
 # ---------------------------------------------------------------------------
@@ -1824,6 +1842,12 @@ assert_missing "*/20 * * * * cd /opt/local/bin;./midea-ieco all $CRON_MARKER
 0 3 * * 0 midea-ieco-refresh-tokens --all $CRON_MARKER" "" "angeklebtes Semikolon: Job zaehlt als vorhanden"
 assert_missing "*/20 * * * * cd /opt&&./midea-ieco all $CRON_MARKER
 0 3 * * 0 midea-ieco-refresh-tokens --all $CRON_MARKER" "" "angeklebtes && : Job zaehlt als vorhanden"
+# Der dritte Trenner der Familie. Ohne eigene Zusicherung ueberlebte das
+# Entfernen von '|' aus dem Trenner-Fall die ganze Suite - gemessen, und die
+# Fehlrichtung ist die teure: der cd-Skip verschlaenge den angeklebten Aufruf
+# als vermeintlichen Operanden, der laufende Job gaelte als fehlend.
+assert_missing "*/20 * * * * cd /opt|./midea-ieco all $CRON_MARKER
+0 3 * * 0 midea-ieco-refresh-tokens --all $CRON_MARKER" "" "angeklebte Pipe: Job zaehlt als vorhanden"
 assert_missing "*/20 * * * * cd; ./midea-ieco all $CRON_MARKER
 0 3 * * 0 midea-ieco-refresh-tokens --all $CRON_MARKER" "" "cd ohne Operand vor Trenner"
 assert_missing "*/20 * * * * midea-ieco>>/opt/i.log $CRON_MARKER
@@ -1865,15 +1889,52 @@ assert_missing "*/20 * * * * sh -c \"cd /opt && '/opt/local/bin/midea-ieco' all\
 
 assert_missing "*/20 * * * * /bin/sh < /opt/local/midea-ieco/midea_ieco_ensure.sh $CRON_MARKER
 0 3 * * 0 midea-ieco-refresh-tokens --all $CRON_MARKER" "" "Skript ueber '<' eingelesen: der Operand IST hier das Programm"
+# Derselbe Trenner, aber hinter 'cd' - und erst diese Form haengt WIRKLICH am
+# '<'-Zweig des Tokenizers. Ohne ihn bleibt '/opt</x/midea-ieco' ein einziges
+# Token, das der cd-Skip als Operanden verschluckt - und damit kommt der
+# Subsplit, der sonst ebenfalls an '<' zerlegt, hier nicht mehr zum Zug.
+# Gemessen: mit Zweig "vorhanden", ohne ihn "fehlend". Die Zeile darueber
+# allein liess den Zweig ungeprueft.
+assert_missing "*/20 * * * * cd /opt</x/midea-ieco all $CRON_MARKER
+0 3 * * 0 midea-ieco-refresh-tokens --all $CRON_MARKER" "" "'<' hinter dem cd-Operanden trennt wirklich"
 
-# Eine Zeile mit einem Pfad an der Systemgrenze (PATH_MAX 4096) misst rund
-# 8000 Zeichen. Die Notbremse gegen absurd lange Zeilen darf sie NICHT
-# ueberspringen: eine uebersprungene Zeile laesst ihren Job als fehlend
-# gelten - also den Rat, eine zweite anzulegen.
+# Die Zeile hat die Form, die der Installer selbst schreibt: der gequotete Pfad
+# steht ZWEIMAL darin (cd-Ziel und Log-Pfad). Genau daran haengt ihre Groesse -
+# mit dem Pfad nur einmal mass sie 4089 statt der hier noetigen 8146 Zeichen,
+# und eine auf PATH_MAX (4096) gesenkte Schranke blieb unbemerkt. Die Notbremse
+# darf sie NICHT ueberspringen: eine uebersprungene Zeile laesst ihren Job als
+# fehlend gelten - also den Rat, eine zweite anzulegen.
+# Preis dieser Zusicherung: rund 1,3 s unter einer UTF-8-Locale und damit rund
+# 1 s mehr als die kuerzere Vorform (beides gemessen; der Split kostet
+# quadratisch mit der Zeilenlaenge, unter LC_ALL=C rund ein Viertel davon).
+# Sie sichert die Schranke damit im Bereich bis 8146; darueber bis 65535 bleibt
+# sie ungeprueft - eine Zusicherung am Worst Case (32904 Zeichen, siehe
+# KNOWN_GAPS Luecke 10) kostete ein Vielfaches und waere den Lauf nicht wert.
 sc_long="$(printf 'a%.0s' $(seq 1 4000))"
-assert_missing "*/20 * * * * cd '/opt/$sc_long' && venv/bin/python3 midea_ieco_ensure.py all $CRON_MARKER
+sc_lq="'/opt/$sc_long'"
+sc_longline="*/20 * * * * cd $sc_lq && MIDEA_IECO_LANG=de venv/bin/python3 midea_ieco_ensure.py all --only-if-on >> $sc_lq/ieco.log 2>&1 $CRON_MARKER"
+rc=0; [ "${#sc_longline}" -eq 8146 ] || rc=1
+assert "$rc" "die lange Fixture-Zeile misst wirklich ${#sc_longline} Zeichen (erwartet 8146)"
+assert_missing "$sc_longline
 0 3 * * 0 midea-ieco-refresh-tokens --all $CRON_MARKER" "" \
     "sehr langer Installationspfad wird noch zerlegt (nicht uebersprungen)"
+
+# Die Gegenrichtung derselben Schranke: JENSEITS von ihr wird nicht mehr
+# zerlegt, und der Job auf dieser Zeile gilt dann als fehlend. Das ist die
+# teure Richtung und deshalb hier festgehalten statt nur beschrieben
+# (KNOWN_GAPS Luecke 10). Fuer den normalen Lauf ist die Zusicherung fast
+# gratis - uebersprungen wird in einem Schritt. Erst die Mutante, die die
+# Schranke entfernt, zerlegt die Zeile wirklich: gemessen 98 s unter einer
+# UTF-8-Locale (unter LC_ALL=C rund ein Viertel davon), womit die Schranke
+# ihren Zweck belegt.
+sc_over="$(printf 'a%.0s' $(seq 1 65540))"
+sc_overline="*/20 * * * * cd /opt/$sc_over && venv/bin/python3 midea_ieco_ensure.py all $CRON_MARKER"
+rc=0; [ "${#sc_overline}" -gt 65536 ] || rc=1
+assert "$rc" "die ueberlange Fixture-Zeile liegt mit ${#sc_overline} Zeichen ueber der Schranke"
+assert_missing "$sc_overline
+0 3 * * 0 midea-ieco-refresh-tokens --all $CRON_MARKER" "ZEILE_IECO" \
+    "Zeile jenseits der Schranke: ihr Job gilt als fehlend"
+unset sc_long sc_lq sc_longline sc_over sc_overline
 
 # --- Selbstkonsistenz: was der Installer SELBST schreibt, erkennt er wieder ---
 # Die Erkennung darf an keiner Zeile scheitern, die install.sh fuer ein
