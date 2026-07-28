@@ -38,6 +38,25 @@ one phase at a time. What was **measured** at the end, rather than argued:
   `tr_TR.UTF-8`, `MIDEA_IECO_LANG=de` and under Python 3.9, and `shellcheck` 0.9.0
   (the version CI runs) reports nothing on any of the five shell files.
 
+The round after *that* one was a repair round: two independent reviews found that
+three things added in the previous round did not hold up. What was measured this
+time:
+
+- the runtime guard for the wrapper test caught neither its own fault (6.0 s stall
+  against an 8 s limit — suite green) nor a slow start cleanly (the internal budget
+  of 10 s exceeded the limit, so the guard's message appeared instead of the
+  assertion that names the case). Both repaired and re-measured, plus three
+  mutations that move one of the three numbers, each red at the new ordering
+  assertion;
+- the inactive-job notice reported a crontab driving the **bin wrappers** as having
+  no jobs and offered to add duplicates. Eight fixtures now pin it, and five
+  mutations of the new predicate — reverting it, and dropping each of the marker
+  cut, the `cd`-operand skip, the quote stripping and the basename step — each turn
+  a fixture red that names the case;
+- one new assertion was vacuous and now has a positive counterpart;
+- five documentation claims were measured and corrected rather than argued (see the
+  corrections section at the end and `CHANGELOG.md`).
+
 None of that says the suite is complete — only that these specific things were
 checked. What is known to be open is below.
 
@@ -181,8 +200,31 @@ the shapes below are measured and written down instead:
 | `… >> /opt/MIDEA_IECO_LANG=de.log 2>&1` | silent | job logs English |
 
 All four need a hand-edited crontab, and the cost is a missing hint — never a
-wrong action. The reverse direction exists too and is the safe one: a token after
-the command word with an *empty* value produces a superfluous notice.
+wrong action.
+
+The reverse direction exists too, and it is narrower than this file used to say.
+"A token after the command word with an *empty* value produces a superfluous
+notice" holds **only when an effective assignment stands above the job**. Without
+one the notice is correct, because nothing sets the language and the job really
+does log in English. Measured with `… midea_ieco_ensure.py --note MIDEA_IECO_LANG=
+all …`: no assignment above → notice, and the job logs English; `MIDEA_IECO_LANG=de`
+above → notice, and the job logs German (that one is the superfluous case).
+
+One shape *changed* with the "a whitespace value is not a value, and the line
+wins" fix, in the direction of a new false positive — measured against that
+commit's parent:
+
+| line, with `MIDEA_IECO_LANG=de` above it | before | now | truth |
+|---|---|---|---|
+| `… # midea-ieco-managed # MIDEA_IECO_LANG=de` | silent | silent | job logs German |
+| `… # midea-ieco-managed # MIDEA_IECO_LANG=`  | silent | **notice** | job logs German |
+
+`/bin/sh` treats everything from the `#` as a comment, so neither trailing token
+assigns anything and the outer assignment applies. The second row therefore gets
+a notice it does not need. It is the price of letting a line-local assignment
+override the environment, which is what shell precedence actually does; the cost
+is one paragraph of unnecessary advice on a hand-edited line, and nothing is ever
+rewritten.
 
 A related, deliberate boundary: a value that is present but not one this project
 understands (`MIDEA_IECO_LANG=de # x`, which cron stores verbatim, or `fr`)
@@ -195,29 +237,74 @@ second-guessing a value the user typed would nag whoever chose
 - **The wrapper test's `exec sleep` and its `>/dev/null`** each remove the stall
   on their own, so neither can be killed individually. What is guarded is the
   conjunction: `tests/run_all.sh` captures the wrapper test's output the way CI
-  does and fails above 8 seconds (normal ≈ 1 s, the known fault ≈ 11 s).
-- **The `git`/`curl`/`unzip` stubs in the end-to-end sandboxes** cannot be killed
-  either: with the `MIDEA_IECO_*` unset in place the suite makes no such calls
-  anyway. The `unset` itself *is* killable — removing it and pointing
-  `MIDEA_IECO_RESOLVED_DIR` at a victim directory fills it with 898 files.
-  Whether the suite still writes outside its sandbox is a checkpoint someone has
-  to run, not a permanent assertion; a permanent one would need a recursion guard
-  and roughly half again the runtime.
+  does and fails above a time limit. That guard only works if three numbers stay
+  in order — start budget 4 s < limit 8 s < the 20 s stall the fault produces — and
+  they did not: the fault stalled 6.0 s, under the limit, and the suite reported
+  ALL GREEN, while the start budget of 10 s sat *above* the limit so a slow start
+  produced the guard's message instead of its own. The ordering is now asserted
+  inside `tests/test_wrapper.sh`, so moving any one of the three turns the suite
+  red. Measured after the repair: normal run 1.0 s, reintroduced fault 21 s (red,
+  by the guard), a 12-second start red by its own assertion at 40×0.1 s.
+- **The `git`/`curl`/`unzip` stubs in the end-to-end sandboxes** cannot be killed:
+  every call a green run makes is already served by a stub, so removing one only
+  changes what the stub does, not what escapes. To be exact about "no such calls",
+  which this file used to claim: a green run makes **nine** of them (8 × `git`,
+  1 × `curl`, 0 × `unzip`), all intercepted. The `unset` itself *is* killable —
+  remove it, point `MIDEA_IECO_RESOLVED_DIR` at a victim directory, and the run
+  creates a `venv/` and a `devices.json` there. (The file count once quoted here,
+  898, is dropped: a bare offline `python3 -m venv` already produces 871 files, so
+  the number never showed what it was cited for.) Whether the suite still writes
+  outside its sandbox is a checkpoint someone has to run, not a permanent
+  assertion; a permanent one would need a recursion guard and roughly half again
+  the runtime.
 
 ### 8. What the inactive-job notice cannot see
 
-`print_cron_missing_hint` matches the prefixes `midea_ieco_ensure` and
-`midea_refresh_tokens` on marked, active lines. Consequences, all print-only:
+`print_cron_missing_hint` looks at marked, active lines, cuts each at the marker,
+splits the rest into whitespace-separated tokens and compares each token's
+**basename** — `midea_ieco_ensure*` / `midea-ieco` and `midea_refresh_tokens*` /
+`midea-ieco-refresh-tokens`, with the operand of `cd` skipped and quotes stripped.
+Whole-line substring matching is not an option: the marker itself contains
+`midea-ieco` and so does the default install directory `/opt/local/midea-ieco`, so
+it would count every managed line of every default installation as the iECO job.
 
-- a hand-written marked line invoking the **`midea-ieco` bin wrapper** is not
-  recognised, so the notice fires although the job exists (superfluous advice —
-  the marker text itself contains `midea-ieco`, so matching it would hit every
-  managed line);
-- an install directory whose *path* contains `midea_ieco_ensure` makes every
-  marked line look like the iECO job, silencing that half of the notice;
+What that leaves, all print-only and all re-measured against the current code:
+
+- an invocation under a name the check cannot know — a personal wrapper script, a
+  `$VARIABLE`, an alias — makes the notice fire although the job exists. This is
+  the one remaining case in the *advice* direction, and it cannot be closed without
+  executing the line;
+- a token whose basename merely *starts with* `midea_ieco_ensure` — a log file
+  called `midea_ieco_ensure.log`, say — counts as the iECO job and silences that
+  half. An install *directory* of that name no longer does: the basename of
+  `/opt/midea_ieco_ensure/ieco.log` is `ieco.log`;
+- the wrapper name appearing as a plain argument (`echo midea-ieco`) counts as the
+  job, likewise silencing that half;
 - a foreign line carrying our marker makes the notice fire for both tools;
 - the notice is not suppressible: a user who removed the jobs but left a
   marker-bearing comment sees it on every run.
+
+Where the check is unsure it therefore counts a job as present. That direction is
+chosen deliberately: a missing hint costs nothing, whereas advice to add a second
+line costs two jobs hitting the same units every 20 minutes — the exact thing the
+firmware notes warn about.
+
+### 9. The installer still creates a duplicate job for an unmarked existing line
+
+`fc51679`'s commit message says the notice makes "a duplicate cron job structurally
+impossible". That is true of the notice, which only prints, and not of the
+installer. The write branch decides on the marker alone (`grep -qF "$CRON_MARKER"`),
+so a crontab that already runs `midea_ieco_ensure.py` from a **hand-written,
+unmarked** line looks untouched to it: a fresh onboarding run appends its own
+marked line on top. Measured end to end — one job in, two out, with an
+"[OK] cron jobs installed" message.
+
+*Cost:* real, not cosmetic — two jobs every 20 minutes against units that tolerate
+a single local connection. *Cheapest fix:* have the write branch run the same
+token check as the notice over the whole crontab, marked or not, and skip the line
+whose tool is already scheduled. Not done here because it moves a decision from
+"did we write this?" to "does something like this exist?", which needs its own
+round of fixtures; written down rather than left to be rediscovered.
 
 ## Equivalent mutants (survive by design, not by omission)
 
@@ -302,11 +389,29 @@ Recorded so the same wrong statements do not get re-derived from the history:
 - **The header claimed the round's 88 mutations covered "every finding except the
   ones listed below".** Two mutations derived from those findings survived without
   being listed. Corrected at the top of this file.
-- **`tests/README.md` listed `git` among the onboarding sandbox's PATH stubs.** It
-  is not one there — it is simply never called, because without a `.git` directory
-  `fetch_project_files` takes another branch. `git` *is* a stub in the `--update`
-  sandbox, and `crontab` is not needed there. The sentence now describes each
-  sandbox separately.
+- **`tests/README.md` listed `git` among the onboarding sandbox's PATH stubs.** That
+  correction has itself gone stale and is withdrawn: `bc75850` added `git`, `curl`
+  and `unzip` stubs to the onboarding sandbox, so `git` *is* one there now. What
+  remains true from it is that `git` is never *called* in the onboarding runs —
+  without a `.git` directory `fetch_project_files` takes another branch — and the
+  measured call counts in gap 7 bear that out. `tests/README.md` now carries a
+  per-sandbox table instead of a sentence.
+- **"Zero `git`/`curl`/`unzip` calls" (gap 7 and `bc75850`).** A green run makes
+  nine, all intercepted by stubs. Corrected in gap 7 above; the claim worth making
+  is that none of them escapes the sandbox.
+- **The "898 files" figure** attached to the sandbox-escape hazard does not support
+  what it was cited for. A bare, offline `python3 -m venv` produces 871 files
+  (Python 3.14.6; 569 under Apple's 3.9.6), so the number is not evidence that
+  msmart-ng and midea-local were installed from PyPI. Dropped; the hazard itself is
+  unaffected and still reproducible.
+- **The runtime guard for the wrapper test did not catch its own fault.** It was
+  added together with a change that shortened the stall it was meant to see, and
+  the wrapper test's start budget sat above the guard's limit. Both directions were
+  measured and repaired; see gap 7.
+- **"A token after the command word with an empty value produces a superfluous
+  notice"** (gap 6) was stated without its condition. It only holds when an
+  effective assignment stands above the job; without one the notice is correct.
+  Corrected in gap 6, together with the one shape that newly warns.
 - The `--reconfigure` re-run had no `.bak` assertion, and the "commented-out
   environment line does not count" fixture passed for a different reason than its
   name suggested (the variable name check rejects `# MIDEA_IECO_LANG` before the
