@@ -1848,6 +1848,52 @@ assert_missing "*/20 * * * * cd /opt&&./midea-ieco all $CRON_MARKER
 # als vermeintlichen Operanden, der laufende Job gaelte als fehlend.
 assert_missing "*/20 * * * * cd /opt|./midea-ieco all $CRON_MARKER
 0 3 * * 0 midea-ieco-refresh-tokens --all $CRON_MARKER" "" "angeklebte Pipe: Job zaehlt als vorhanden"
+
+# --- Klammern: sh trennt an ihnen, der Tokenizer tat es nicht --------------
+# Wer eine Umleitung fuer eine ganze Gruppe setzen will, klammert sie - und
+# genau die vom Projekt empfohlene Aufrufform (bin-Wrapper OHNE Pfadangabe)
+# verlor dadurch ihren Basisnamen: '(midea-ieco' kennt der Exaktvergleich
+# nicht, der laufende Job galt als fehlend, und der Installer bot seine Zeile
+# zum Anlegen an. Mit Pfad davor blieb der Fall verborgen, weil der
+# Basisname-Schnitt die Klammer mit abschneidet.
+assert_missing "*/20 * * * * (midea-ieco all --only-if-on) $CRON_MARKER
+0 3 * * 0 midea-ieco-refresh-tokens --all $CRON_MARKER" "" "geklammerter Aufruf zaehlt als vorhanden"
+# Schliessende Klammer eigens: ohne sie hiesse das Token 'midea-ieco)'.
+assert_missing "*/20 * * * * (foo; midea-ieco) $CRON_MARKER
+0 3 * * 0 midea-ieco-refresh-tokens --all $CRON_MARKER" "" "schliessende Klammer trennt ebenfalls"
+# Die realistische Form: Gruppe geklammert, Umleitung dahinter.
+assert_missing "*/20 * * * * (midea-ieco all) >> /o/i.log 2>&1 $CRON_MARKER
+0 3 * * 0 midea-ieco-refresh-tokens --all $CRON_MARKER" "" "geklammerte Gruppe mit Umleitung"
+# Auch die Refresh-Seite, die einen eigenen Wrapper-Namen hat.
+assert_missing "*/20 * * * * midea-ieco all $CRON_MARKER
+0 3 * * 0 (midea-ieco-refresh-tokens --all) $CRON_MARKER" "" "geklammerter Refresh-Aufruf zaehlt als vorhanden"
+# Zwei Formen im gequoteten Sub-Kommando, und sie bewachen VERSCHIEDENE
+# Stellen des Subsplits - deshalb stehen beide hier:
+#
+# Ohne jeden Leerraum haengt alles daran, dass die Klammer den Subsplit
+# ueberhaupt AUSLOEST. Faellt sie aus seiner Trigger-Klasse, bleibt
+# '(midea-ieco)' unzerlegt und der laufende Job gilt als fehlend.
+assert_missing "*/20 * * * * sh -c '(midea-ieco)' $CRON_MARKER
+0 3 * * 0 midea-ieco-refresh-tokens --all $CRON_MARKER" "" "Klammern ohne Leerraum loesen den Subsplit aus"
+# Mit Leerraum loest schon dieser den Subsplit aus; hier wird die ERSETZUNG
+# gebraucht. Diese Zusicherung ist damit der Waechter ueber die Backslashes in
+# ihrer Zeichenklasse: ohne sie liest bash '>(' als Prozess-Substitution, die
+# Klasse zerfaellt still, und die Ersetzung tut gar nichts.
+assert_missing "*/20 * * * * sh -c '(midea-ieco all)' $CRON_MARKER
+0 3 * * 0 midea-ieco-refresh-tokens --all $CRON_MARKER" "" "Klammern mit Leerraum: die Ersetzung greift"
+# Gegenprobe zur bewussten Grenze: '{' und '}' sind fuer sh reservierte
+# Woerter, keine Metazeichen. Die Gruppe trennt hier der Leerraum, und der
+# Tokenizer braucht dafuer keine eigene Regel.
+assert_missing "*/20 * * * * { midea-ieco all ; } $CRON_MARKER
+0 3 * * 0 midea-ieco-refresh-tokens --all $CRON_MARKER" "" "geschweifte Gruppe: der Leerraum trennt"
+# Und die Gegenrichtung, die als EINZIGE an der Klammerregel des Tokenizers
+# selbst haengt: klebt '(' am 'cd', heisst das Token '(cd' und der cd-Skip
+# greift nicht mehr - der Installationspfad dahinter zaehlt dann als Aufruf
+# und verschweigt ein fehlendes iECO. Der Subsplit rettet das NICHT, denn er
+# zerlegt zwar '(cd' zu 'cd', der Merker liest aber das Originaltoken.
+# Genau deshalb steht die Regel im Tokenizer und nicht nur dort unten.
+assert_missing "0 3 * * 0 (cd /opt/local/midea-ieco && venv/bin/python3 midea_refresh_tokens.py --all) $CRON_MARKER
+0 0 1 * * truncate -s 0 /o/i.log $CRON_MARKER" "ZEILE_IECO" "geklammertes 'cd': der Operand bleibt ein Verzeichnis"
 assert_missing "*/20 * * * * cd; ./midea-ieco all $CRON_MARKER
 0 3 * * 0 midea-ieco-refresh-tokens --all $CRON_MARKER" "" "cd ohne Operand vor Trenner"
 assert_missing "*/20 * * * * midea-ieco>>/opt/i.log $CRON_MARKER
@@ -1973,12 +2019,14 @@ done <<'SCEOF'
 /opt/a"b/midea-ieco
 /opt/Kueche Buero/midea-ieco
 /opt/midea_ieco_ensure/inst
+/opt/a(b)/midea-ieco
+/opt/(x)/midea-ieco
 SCEOF
 # Die ANZAHL wird mitgezaehlt und zugesichert: eine leergelaufene Schleife
 # meldete sonst "0 Fehler" und die Zusicherung waere gruen, ohne einen
 # einzigen Pfad geprueft zu haben.
-rc=0; { [ "$sc_bad" -eq 0 ] && [ "$sc_n" -eq 13 ]; } || rc=1
-assert "$rc" "Selbstkonsistenz: $sc_n von 13 Installationspfaden geprueft, Fehler=$sc_bad"
+rc=0; { [ "$sc_bad" -eq 0 ] && [ "$sc_n" -eq 15 ]; } || rc=1
+assert "$rc" "Selbstkonsistenz: $sc_n von 15 Installationspfaden geprueft, Fehler=$sc_bad"
 
 echo ""
 echo "RESULT(test_install.sh): $pass passed, $fail failed"

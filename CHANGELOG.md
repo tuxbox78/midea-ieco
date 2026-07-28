@@ -6,6 +6,39 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **A cron job wrapped in parentheses counted as missing.** The inactive-job
+  notice tokenizes the command field the way `/bin/sh` reads it, but its list of
+  separators left out `(` and `)`. Anyone who groups the call to redirect it as a
+  whole — `*/20 * * * * (midea-ieco all) >> ieco.log 2>&1` — produced the token
+  `(midea-ieco`, which no comparison recognises, so a **running** job was reported
+  as not active and the installer offered its own line to add. Following that
+  advice leaves two jobs against units that tolerate a single local connection.
+  The form is exactly the one both READMEs recommend: the bin wrapper without a
+  path, which is what makes the missing basename fatal here — with a path in front
+  the basename step cuts the parenthesis off and the case stays invisible.
+
+  Measured against an execution oracle (each line run through `/bin/sh` in a stub
+  sandbox, observing which tool really ran) over 2200 generated lines: 60 such
+  cases before, none after, and **no new case in the other direction**. Eight
+  false "present" verdicts disappear as well, because `(cd /opt/local/midea-ieco`
+  used to defeat the `cd`-operand skip and let the install directory count as a
+  call. `{` and `}` are deliberately left out — they are reserved words rather
+  than metacharacters, so whitespace already separates them.
+
+  One consequence is named rather than buried, and it is the cheap direction: an
+  install directory whose name wraps the tool name — literally
+  `/opt/(midea-ieco)/inst` — now lets the logrotate line count as the iECO job, so
+  the notice stays silent about a job that is not there. `tests/KNOWN_GAPS.md`
+  gap 8 records it.
+
+  A detail worth keeping for whoever edits that code next: in the sub-split's
+  character class the backslashes in `[;&|<>\(\)]` are load-bearing. Directly
+  after `<` or `>`, bash reads `<(` and `>(` as the start of a process
+  substitution, the class falls apart silently, and the replacement then does
+  nothing at all — no syntax error points at it. Measured on bash 3.2, where
+  `[;&|<>()]` returns `(midea-ieco all)` unchanged.
+
 ### Added
 - **The installer now says so when a managed cron job is not active.** A crontab
   carrying our marker counts as "already set up", so nothing more is written — if

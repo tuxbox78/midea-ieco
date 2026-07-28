@@ -252,6 +252,18 @@ second-guessing a value the user typed would nag whoever chose
   1–2 s (up to 3.5 s under fourfold load), reintroduced fault 21 s caught by the
   guard, a slow start red by its own assertion. Four mutations — budget 0, 1, 8,
   and a 7 s stall — each turn the suite red.
+- **The tokenizer's closing parenthesis** has no kill of its own, and this time
+  the reason was measured rather than assumed: after `)` the sh grammar requires a
+  separator anyway — `(cd /tmp)echo x` is a syntax error — so the case that would
+  distinguish the rule from the sub-split cannot occur in a line that runs. Over
+  2262 cases (the 2200-line fuzz corpus and the 62 calibration fixtures) the
+  variant without `)` returns identical verdicts. The rule stays because `)` *is*
+  a shell metacharacter and the split then holds independently of what the
+  sub-split does later. Its sibling, the **opening** parenthesis, does have a kill:
+  glued to `cd` it turns the token into `(cd`, the cd-operand skip stops working,
+  and the install directory behind it counts as a call. Same shape as the `<`
+  branch two entries above — with the difference that `<` has a reachable
+  divergence and `)` does not.
 - **The `git`/`curl`/`unzip` stubs in the end-to-end sandboxes** cannot be killed:
   every call a green run makes is already served by a stub, so removing one only
   changes what the stub does, not what escapes. To be exact about "no such calls",
@@ -269,8 +281,8 @@ second-guessing a value the user typed would nag whoever chose
 
 `print_cron_missing_hint` looks at marked, active lines and splits each into tokens
 the way `/bin/sh` would: single and double quotes group, a backslash escapes the
-next character, `;`, `&`, `|`, `<` and `>` separate, and an unquoted `#` at the
-start of a word ends the line. It then compares each token's **basename** —
+next character, `;`, `&`, `|`, `<`, `>`, `(` and `)` separate, and an unquoted `#`
+at the start of a word ends the line. It then compares each token's **basename** —
 `midea_ieco_ensure*` / `midea-ieco` and `midea_refresh_tokens*` /
 `midea-ieco-refresh-tokens` — skipping the operand of `cd` and the target of an
 output redirection. Whole-line substring matching is not an option: the marker
@@ -299,6 +311,14 @@ What that leaves, all print-only:
   job, likewise silencing that half;
 - a redirection glued inside a quoted word with no separator of its own
   (`sh -c 'foo >/opt/x/midea-ieco'`) counts the target as a job;
+- an install directory whose own name carries the parentheses — literally
+  `/opt/(midea-ieco)/inst` — makes the logrotate line count as the iECO job.
+  The sub-split replaces `(` and `)` with spaces, so `…/(midea-ieco)/inst/ieco.log`
+  yields a fragment whose basename is `midea-ieco`. This one arrived **with** the
+  parenthesis support and is the price for it: `sh -c '(midea-ieco)'` — a running
+  job — used to count as missing, which is the expensive direction, while this is
+  silence about a job that is not there. A directory named `/opt/a(b)/midea-ieco`
+  is not affected (measured); the name has to wrap the tool name itself;
 - a foreign line carrying our marker makes the notice fire for both tools;
 - a line longer than 65536 characters is skipped untokenized (see gap 10);
 - the notice is not suppressible: a user who removed the jobs but left a
@@ -410,6 +430,16 @@ Recorded so the same wrong statements do not get re-derived from the history:
   replaced it. The rewrite above is not a correction of a wrong statement but of a
   statement that the code outgrew — noted here because the two are easy to confuse
   when reading the history.
+- **Gap 8 claimed the line was split "the way `/bin/sh` would" and then listed
+  `;`, `&`, `|`, `<` and `>`.** That list was incomplete: `/bin/sh` separates at
+  `(` and `)` as well, and the tokenizer did not. A running job written as
+  `(midea-ieco all) # marker` — the bin wrapper both READMEs recommend, wrapped in
+  parentheses to redirect the group — therefore counted as **missing**, and the
+  installer offered its line to add. That is the expensive direction, measured
+  against an execution oracle over 2200 generated lines: 60 such cases before the
+  fix, none after, and the fix introduced no case in the other direction. Fixed,
+  and the list above now names the two characters. The claim itself is the lesson: a sentence that says "the way sh
+  does" is only as true as the enumeration next to it.
 - **Gap 7 quoted `40×0.1 s` and a start budget in ticks.** Both are gone: the loop
   now bounds itself by wall time. The measurement that produced the old numbers was
   correct for its commit.

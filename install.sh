@@ -713,7 +713,29 @@ cron_tokenize_line() {   # $1 = Cron-Zeile; Ergebnis in CTL_TOKS/CTL_SEP/CTL_RED
                     CTL_TOKS+=("$cur"); CTL_SEP+=(0); CTL_RED+=("$pend_red")
                     pend_red=0; cur=""; started=0
                 fi ;;
-            ';'|'&'|'|')
+            # '(' und ')' gehoeren dazu: /bin/sh trennt an ihnen wie an ';'.
+            # Ohne sie blieb '(midea-ieco all)' EIN Token, dessen Basisname
+            # '(midea-ieco' der Exaktvergleich nicht kennt - ein LAUFENDER Job
+            # galt als fehlend, und das ist die teure Richtung (Rat zu einer
+            # zweiten Zeile). Betroffen war genau die Aufrufform, die beide
+            # READMEs empfehlen: der bin-Wrapper ohne Pfadangabe, in Klammern
+            # gefasst, um eine Umleitung fuer die ganze Gruppe zu setzen.
+            # '{' und '}' bleiben bewusst AUSSEN vor: sie sind fuer sh
+            # reservierte WOERTER, keine Metazeichen - '{midea-ieco}' ist auch
+            # fuer sh ein einziges Wort, und '{ midea-ieco ; }' trennt schon
+            # der Leerraum.
+            #
+            # Nur die OEFFNENDE Klammer hat einen eigenen Kill (die Zusicherung
+            # zum geklammerten 'cd': klebt '(' am 'cd', greift der cd-Skip
+            # nicht mehr). Fuer die schliessende gibt es keinen, und das liegt
+            # nicht an fehlenden Fixtures: hinter ')' verlangt die sh-Grammatik
+            # ohnehin einen Trenner - '(cd /tmp)echo x' ist ein Syntaxfehler -,
+            # und alles andere faengt der Subsplit ab. Gemessen: ueber 2262
+            # Faelle (Fuzz-Korpus und Kalibrierung) liefert die Variante ohne
+            # ')' Zeichen fuer Zeichen dieselben Verdikte. Sie bleibt trotzdem,
+            # weil ')' fuer sh ein Metazeichen IST und die Trennung hier
+            # unabhaengig davon richtig bleibt, was der Subsplit spaeter tut.
+            ';'|'&'|'|'|'('|')')
                 if [ "$started" -eq 1 ]; then
                     CTL_TOKS+=("$cur"); CTL_SEP+=(0); CTL_RED+=("$pend_red")
                     cur=""; started=0
@@ -801,9 +823,22 @@ cron_scan_tools() {   # $1 = Crontab; Gate (Marker vorhanden?) liegt beim Aufruf
                 # das waere der Basisname 'null' und der laufende Job gaelte als
                 # fehlend. Der Subsplit kann nur Treffer HINZUFUEGEN, seine
                 # Fehlrichtung ist damit Schweigen.
+                # Klammern gehoeren in beide Zeichenklassen: ein gequotetes
+                # Sub-Kommando kann '(midea-ieco)' ohne jeden Leerraum tragen,
+                # und ohne sie bliebe der Aufruf darin unsichtbar.
+                #
+                # Die Backslashes vor '(' und ')' in der ERSETZUNG sind NICHT
+                # schmueckend, auch wenn Klammern in einer Zeichenklasse sonst
+                # fuer sich stehen: unmittelbar hinter '<' oder '>' liest bash
+                # '<(' bzw. '>(' als Beginn einer Prozess-Substitution, die
+                # Klasse zerfaellt still, und die Ersetzung tut dann GAR
+                # nichts - gemessen an bash 3.2 mit [;&|<>()], das
+                # '(midea-ieco all)' unveraendert zurueckgibt. Wer sie
+                # entfernt, macht den Subsplit fuer Klammern wirkungslos, ohne
+                # dass ein Syntaxfehler darauf hinweist.
                 case "${CTL_TOKS[i]}" in
-                    *[[:space:]\;\&\|\<\>]*)
-                        parts=(); read -r -a parts <<< "${CTL_TOKS[i]//[;&|<>]/ }" || true ;;
+                    *[[:space:]\;\&\|\<\>\(\)]*)
+                        parts=(); read -r -a parts <<< "${CTL_TOKS[i]//[;&|<>\(\)]/ }" || true ;;
                 esac
                 if [ "${#parts[@]}" -gt 0 ]; then
                     for part in "${parts[@]}"; do
