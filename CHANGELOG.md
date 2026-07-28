@@ -155,6 +155,37 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   why not every owner runs into this. No change to how the tool behaves.
 
 ### Fixed
+- **The inactive-job notice split cron lines blind to quoting, and was wrong in
+  both directions.** A quoted install path containing a space fell apart into
+  fragments whose basename happened to be `midea-ieco`, so a job that had been
+  commented out still counted as present and the notice stayed silent. In the other
+  and more expensive direction, `cd /opt/local/bin;./midea-ieco all` — a semicolon
+  with no space around it — was swallowed whole as a supposed `cd` operand, so a
+  *running* job counted as missing and the installer offered its own line to add.
+  Following that advice leaves two jobs hitting the same units every 20 minutes,
+  which is what this project's firmware notes warn against.
+
+  The command field is now tokenized the way `/bin/sh` reads it: single and double
+  quotes group, a backslash escapes the next character, `;`, `&`, `|`, `<` and `>`
+  separate, and an unquoted `#` at the start of a word ends the line. The operand of
+  `cd` and the target of an output redirection are skipped; a quoted sub-command
+  (`sh -c '…'`) is split once more so the call inside it is seen. Also fixed by the
+  same change: a quoted `"cd"`, a note placed *before* the marker (`… # earlier:
+  midea-ieco all # midea-ieco-managed`), a path escaped with backslashes, and a
+  redirection glued to the command word.
+
+  Two consequences worth naming rather than burying. A tokenizer has to know about
+  backslashes, or it breaks on lines this installer writes itself:
+  `shell_quote_for_cron` expands `'` to `'\''`, leaving an odd number of quotes, and
+  a first draft without that rule read the rest of such a line as one quoted token
+  and advised adding both jobs. (The old whitespace split had no trouble here — it
+  never looked at quotes at all.) A self-consistency assertion now runs the
+  installer's own three lines for 13 hostile install directories through the
+  detector. And the notice now speaks in two cases where it used to stay
+  silent by accident — text behind a comment character, and a redirection target —
+  which is the expensive direction and is recorded in `tests/KNOWN_GAPS.md` gap 8.
+  A line beyond 65536 characters is skipped untokenized (the split is quadratic);
+  that threshold sits above anything this installer can produce, derived in gap 10.
 - **`error()` writes to stderr.** Several functions are called inside command
   substitutions; on stdout their error message ended up inside the captured value
   instead of on screen, and `set -euo pipefail` then aborted completely silently —
@@ -296,6 +327,25 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   thank you.
 
 ### Testing
+- **The wrapper guard's ordering assertion compared an integer division.** It
+  checked `START_BUDGET_TICKS / 10` against the time limit, so a budget of 79 ticks
+  stayed green ("7 s < 8 s") while 79 ticks really cost 8.6 s — and `run_all.sh`
+  then failed with its misleading message about a left-behind process. The loop now
+  bounds itself by wall time via `SECONDS` differences (never a reset, so a
+  `SECONDS=1000` inherited from the environment cannot skew it), the ordering
+  assertion carries a lower bound as well — a budget of 0 or 1 made the test flaky
+  without ever going red — and the file measures its own total runtime against the
+  same limit, so a merely slow file fails with an assertion that names it. Measured:
+  normal run 1–2 s, up to 3.5 s under fourfold load; the reintroduced fault 21 s,
+  caught by the guard.
+- **Five of the new assertions were decoration.** An independent audit ran a kill
+  mutation against each and found five that could not go red for the property their
+  name claimed — among them a self-consistency loop that stayed green with an empty
+  input list while still reporting "13 install paths". They were sharpened (the loop
+  now counts and asserts the count) or dropped. A later pass found two rules with no
+  test at all — the tokenizer's double-quote state and the reset of the `cd` marker
+  — and closed both. One branch is documented as having no kill of its own, because
+  the sub-split covers it.
 - **The test suite could write outside its sandbox — and download to do it.**
   `install.sh` resolves its install directory from `MIDEA_IECO_RESOLVED_DIR` before
   anything else and exports that variable to child processes itself. Inherited from
@@ -328,7 +378,7 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the venv, and `setup_venv_and_deps` then sources `venv/bin/activate`, which puts
   `venv/bin` in front of `PATH` — from there on the *venv's own* `pip` installs the
   packages and a `pip` stub on `PATH` never fires. (In the sandboxes the fake
-  `activate` leaves `PATH` alone, which is why the `pip` stub does run there: 51
+  `activate` leaves `PATH` alone, which is why the `pip` stub does run there: 55
   calls in the same instrumented run.)
 - **The wrapper test left a `sleep` holding the suite's stdout**, so anything
   capturing the output — a pipe, a command substitution, a CI step log — waited ten
@@ -343,9 +393,14 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   *above* the limit, so a merely slow start produced a red run carrying the
   misleading message about a left-behind process. The three quantities now stand
   in the only order that works — start budget 4 s < limit 8 s < the 20 s stall the
-  fault produces — the limit lives in `run_all.sh` alone and is handed to the test,
-  and the test asserts the ordering itself, so moving any one of them turns the
-  suite red at the assertion that names them. Measured: normal run 1.0 s; the
+  fault produces — the limit is handed to the test from `run_all.sh`, which is
+  where it is set — a fallback of the same value also lives in
+  `tests/test_wrapper.sh` for a direct call, so "in one place only" was too
+  strong. The test asserts the ordering itself. "Moving any one of them turns
+  the suite red" was likewise too strong for the version written then: it held
+  for the limit and the stall, not for every neighbouring budget value. The
+  rewritten assertion (see above) is bounded on both sides and was re-measured
+  against budgets of 0, 1 and 8. Measured: normal run 1.0 s; the
   reintroduced fault 21 s, caught by the guard; a fake Python needing 12 s to start
   fails with its own assertion and never reaches the limit.
 - **A newly added assertion was vacuous.** "`shell_quote_for_cron`: the error text

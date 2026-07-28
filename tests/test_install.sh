@@ -4,7 +4,9 @@
 # Isolierte Funktionstests fuer install.sh. Einzelne Funktionen werden aus
 # install.sh extrahiert und mit gestubbten Hilfsfunktionen gesourct, damit die
 # Logik ohne einen echten (interaktiven, sudo-behafteten) Installer-Lauf
-# pruefbar ist. Der Installer selbst wird NIE ausgefuehrt.
+# pruefbar ist. Weiter unten laeuft der Installer dann sehr wohl - aber nur
+# als KOPIE in einer Sandbox mit gestubbten Werkzeugen, nie die Installation
+# des Ausfuehrenden (siehe den End-to-End-Abschnitt und das 'unset' unten).
 #
 # Dateiweite, bewusst begruendete shellcheck-Ausnahmen (VOR dem ersten Kommando,
 # damit sie fuer die ganze Datei gelten):
@@ -1318,6 +1320,8 @@ eval "$(extract_func _lang_value_is_effective "$INSTALL")"
 eval "$(extract_func _cron_line_sets_lang_inline "$INSTALL")"
 eval "$(extract_func cron_lines_needing_lang "$INSTALL")"
 eval "$(extract_func print_cron_lang_hint "$INSTALL")"
+eval "$(extract_func cron_tokenize_line "$INSTALL")"
+eval "$(extract_func cron_scan_tools "$INSTALL")"
 eval "$(extract_func cron_missing_managed_lines "$INSTALL")"
 eval "$(extract_func print_cron_missing_hint "$INSTALL")"
 eval "$(grep '^CRON_MARKER=' "$INSTALL")"
@@ -1804,6 +1808,116 @@ assert "$rc" "--lang --help zeigt die Hilfe (verschluckt --help nicht)"
 help_out2="$(LANG=C bash "$INSTALL" --lang de --help 2>&1)"; hrc2=$?
 rc=0; { [ "$hrc2" -eq 0 ] && printf '%s' "$help_out2" | grep -q -- '--update'; } || rc=1
 assert "$rc" "--lang de --help zeigt die Hilfe (gueltiger Wert konsumiert, Option erkannt)"
+
+# --- Runde 5: quote-bewusste Erkennung -------------------------------------
+assert_missing "# */20 * * * * cd '/U/My T/midea-ieco' && venv/bin/python3 midea_ieco_ensure.py all $CRON_MARKER
+0 3 * * 0 cd '/U/My T/midea-ieco' && venv/bin/python3 midea_refresh_tokens.py --all $CRON_MARKER" "ZEILE_IECO" "5.1 Space-Pfad: iECO auskommentiert wird gemeldet"
+# Scharfe Fassung: der Werkzeugname steht NUR im gequoteten cd-Pfad. Zerlegt
+# der Tokenizer dort an Leerraum, entsteht ein Fragment mit Basisnamen
+# "midea-ieco" - ein iECO-Job, den es nicht gibt.
+assert_missing "0 3 * * 0 cd '/opt/a midea-ieco' && venv/bin/python3 midea_refresh_tokens.py --all $CRON_MARKER
+0 0 1 * * truncate -s 0 /o/i.log $CRON_MARKER" "ZEILE_IECO" \
+    "Leerzeichen im gequoteten cd-Pfad erzeugt keinen Phantom-Job"
+assert_missing "*/20 * * * * cd '/opt/Frank'\''s/midea-ieco' && venv/bin/python3 midea_ieco_ensure.py all $CRON_MARKER
+0 3 * * 0 cd '/opt/Frank'\''s/midea-ieco' && venv/bin/python3 midea_refresh_tokens.py --all $CRON_MARKER" "" "Apostroph-Pfad (Installer-Escape) zaehlt als vorhanden"
+assert_missing "*/20 * * * * cd /opt/local/bin;./midea-ieco all $CRON_MARKER
+0 3 * * 0 midea-ieco-refresh-tokens --all $CRON_MARKER" "" "angeklebtes Semikolon: Job zaehlt als vorhanden"
+assert_missing "*/20 * * * * cd /opt&&./midea-ieco all $CRON_MARKER
+0 3 * * 0 midea-ieco-refresh-tokens --all $CRON_MARKER" "" "angeklebtes && : Job zaehlt als vorhanden"
+assert_missing "*/20 * * * * cd; ./midea-ieco all $CRON_MARKER
+0 3 * * 0 midea-ieco-refresh-tokens --all $CRON_MARKER" "" "cd ohne Operand vor Trenner"
+assert_missing "*/20 * * * * midea-ieco>>/opt/i.log $CRON_MARKER
+0 3 * * 0 midea-ieco-refresh-tokens --all $CRON_MARKER" "" "angeklebter Redirect: Job zaehlt als vorhanden"
+assert_missing "0 0 1 * * truncate -s 0 /o/i.log # frueher: midea-ieco all $CRON_MARKER" "ZEILE_IECO
+ZEILE_REFRESH" "Notiz VOR dem Marker taeuscht keinen Job vor"
+assert_missing "0 3 * * 0 \"cd\" '/opt/local/midea-ieco' && venv/bin/python3 midea_refresh_tokens.py --all $CRON_MARKER
+0 0 1 * * truncate -s 0 '/opt/local/midea-ieco'/i.log $CRON_MARKER" "ZEILE_IECO" "gequotetes \"cd\": Operand ist kein Aufruf"
+assert_missing "0 3 * * 0 cd /My\\ T/midea-ieco && venv/bin/python3 midea_refresh_tokens.py --all $CRON_MARKER
+0 0 1 * * truncate -s 0 /o/i.log $CRON_MARKER" "ZEILE_IECO" "Backslash-cd-Pfad: Operand ist kein Aufruf"
+assert_missing "0 0 1 * * truncate -s 0 /o/i.log $CRON_MARKER
+0 9 * * * /usr/bin/foo >> /opt/midea_ieco_ensure.log $CRON_MARKER" "ZEILE_IECO
+ZEILE_REFRESH" "Redirect-ZIEL ist kein Aufruf"
+assert_missing "*/20 * * * * sh -c 'midea-ieco all' $CRON_MARKER
+0 3 * * 0 sh -c 'midea-ieco-refresh-tokens --all' $CRON_MARKER" "" "sh -c '...' zaehlt als vorhanden"
+assert_missing "*/20 * * * * '/opt/Kueche Buero/midea-ieco/x.sh' all $CRON_MARKER
+0 3 * * 0 cd '/opt/Kueche Buero/midea-ieco' && venv/bin/python3 midea_refresh_tokens.py --all $CRON_MARKER" "ZEILE_IECO" "Umlaut+Space-Pfad: fremdes Kommando ist kein Job"
+assert_missing "*/20 * * * * cd '/opt/c#d/midea-ieco' && venv/bin/python3 midea_ieco_ensure.py all $CRON_MARKER
+0 3 * * 0 cd '/opt/c#d/midea-ieco' && venv/bin/python3 midea_refresh_tokens.py --all $CRON_MARKER" "" "'#' im gequoteten Pfad schneidet nicht ab"
+# Dasselbe in DOPPELTEN Anfuehrungszeichen: der Tokenizer fuehrt fuer sie einen
+# eigenen Zustand, und ohne ihn zerfaellt der Pfad genauso in Fragmente.
+assert_missing "0 3 * * 0 cd \"/opt/a midea-ieco\" && venv/bin/python3 midea_refresh_tokens.py --all $CRON_MARKER
+0 0 1 * * truncate -s 0 /o/i.log $CRON_MARKER" "ZEILE_IECO" \
+    "Leerzeichen im DOPPELT gequoteten cd-Pfad erzeugt keinen Phantom-Job"
+assert_missing "0 3 * * 0 cd '/opt/a;midea-ieco' && venv/bin/python3 midea_refresh_tokens.py --all $CRON_MARKER
+0 0 1 * * truncate -s 0 /o/i.log $CRON_MARKER" "ZEILE_IECO" \
+    "';' im gequoteten cd-Pfad erzeugt keinen Phantom-Job"
+# Nur der ERSTE Operand hinter 'cd' wird uebersprungen. Ohne das Zuruecksetzen
+# des Merkers verschluckte die Pruefung alles bis zum naechsten Trenner - hier
+# den Aufruf selbst. (/bin/sh lehnt zwei cd-Operanden ab; die Regel haelt den
+# Scanner trotzdem vorhersagbar.)
+assert_missing "*/20 * * * * cd /opt midea-ieco all $CRON_MARKER
+0 3 * * 0 midea-ieco-refresh-tokens --all $CRON_MARKER" "" \
+    "nur der erste Operand hinter 'cd' wird uebersprungen"
+assert_missing "*/20 * * * * sh -c '\"/opt/x/midea-ieco\" all' $CRON_MARKER
+0 3 * * 0 midea-ieco-refresh-tokens --all $CRON_MARKER" "" "verschachtelte Quotes im sh -c: Job zaehlt als vorhanden"
+assert_missing "*/20 * * * * sh -c \"cd /opt && '/opt/local/bin/midea-ieco' all\" $CRON_MARKER
+0 3 * * 0 midea-ieco-refresh-tokens --all $CRON_MARKER" "" "einfache Quotes IN doppelten: Job zaehlt als vorhanden"
+
+assert_missing "*/20 * * * * /bin/sh < /opt/local/midea-ieco/midea_ieco_ensure.sh $CRON_MARKER
+0 3 * * 0 midea-ieco-refresh-tokens --all $CRON_MARKER" "" "Skript ueber '<' eingelesen: der Operand IST hier das Programm"
+
+# Eine Zeile mit einem Pfad an der Systemgrenze (PATH_MAX 4096) misst rund
+# 8000 Zeichen. Die Notbremse gegen absurd lange Zeilen darf sie NICHT
+# ueberspringen: eine uebersprungene Zeile laesst ihren Job als fehlend
+# gelten - also den Rat, eine zweite anzulegen.
+sc_long="$(printf 'a%.0s' $(seq 1 4000))"
+assert_missing "*/20 * * * * cd '/opt/$sc_long' && venv/bin/python3 midea_ieco_ensure.py all $CRON_MARKER
+0 3 * * 0 midea-ieco-refresh-tokens --all $CRON_MARKER" "" \
+    "sehr langer Installationspfad wird noch zerlegt (nicht uebersprungen)"
+
+# --- Selbstkonsistenz: was der Installer SELBST schreibt, erkennt er wieder ---
+# Die Erkennung darf an keiner Zeile scheitern, die install.sh fuer ein
+# boesartiges Installationsverzeichnis erzeugt - sonst raet der Hinweis dem
+# Nutzer, eine zweite Zeile fuer einen laufenden Job anzulegen.
+sc_bad=0
+sc_n=0
+while IFS= read -r sc_dir; do
+    [ -n "$sc_dir" ] || continue
+    sc_n=$((sc_n + 1))
+    sc_q="$(shell_quote_for_cron "$sc_dir")"
+    sc_i="*/20 * * * * cd $sc_q && MIDEA_IECO_LANG=de venv/bin/python3 midea_ieco_ensure.py all --only-if-on >> $sc_q/ieco.log 2>&1 $CRON_MARKER"
+    sc_r="0 3 * * 0 cd $sc_q && MIDEA_IECO_LANG=de venv/bin/python3 midea_refresh_tokens.py --all >> $sc_q/refresh.log 2>&1 $CRON_MARKER"
+    sc_l="0 0 1 * * truncate -s 0 $sc_q/ieco.log $sc_q/refresh.log $CRON_MARKER"
+    cron_missing_managed_lines "$sc_i
+$sc_r
+$sc_l"
+    if [ "$CRON_MISSING_IECO" -ne 0 ] || [ "$CRON_MISSING_REFRESH" -ne 0 ]; then
+        sc_bad=$((sc_bad + 1)); echo "    beide aktiv, aber gemeldet: $sc_dir"
+    fi
+    cron_missing_managed_lines "$sc_l"
+    if [ "$CRON_MISSING_IECO" -ne 1 ] || [ "$CRON_MISSING_REFRESH" -ne 1 ]; then
+        sc_bad=$((sc_bad + 1)); echo "    nur Logrotate, aber still: $sc_dir"
+    fi
+done <<'SCEOF'
+/opt/local/midea-ieco
+/opt/My Tools/midea-ieco
+/opt/Frank's/midea-ieco
+/opt/50% off/midea-ieco
+/opt/a#b/midea-ieco
+/opt/a;b/midea-ieco
+/opt/a&b/midea-ieco
+/opt/a|b/midea-ieco
+/opt/a>b/midea-ieco
+/opt/a$b/midea-ieco
+/opt/a"b/midea-ieco
+/opt/Kueche Buero/midea-ieco
+/opt/midea_ieco_ensure/inst
+SCEOF
+# Die ANZAHL wird mitgezaehlt und zugesichert: eine leergelaufene Schleife
+# meldete sonst "0 Fehler" und die Zusicherung waere gruen, ohne einen
+# einzigen Pfad geprueft zu haben.
+rc=0; { [ "$sc_bad" -eq 0 ] && [ "$sc_n" -eq 13 ]; } || rc=1
+assert "$rc" "Selbstkonsistenz: $sc_n von 13 Installationspfaden geprueft, Fehler=$sc_bad"
 
 echo ""
 echo "RESULT(test_install.sh): $pass passed, $fail failed"

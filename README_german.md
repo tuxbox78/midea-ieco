@@ -250,9 +250,16 @@ Log-Rotation nicht vergessen, z. B. mit `logrotate` oder einfach:
 
 Läuft `install.sh` auf einem bereits eingerichteten Rechner — meist als schlichter
 erneuter Aufruf des `curl … | bash`-Einzeilers —, liest er deine Crontab und zeigt
-unter Umständen einen der folgenden Hinweise. **Keiner davon ändert etwas.** Der
-Installer schreibt eine bestehende Crontab nie um; er zeigt die Zeile nur zum
-Übernehmen an.
+unter Umständen einen der folgenden Hinweise. **Keiner der drei Hinweise ändert
+etwas** — sie zeigen nur Zeilen zum Übernehmen an.
+
+Das ist eine Aussage über die Hinweise, nicht über den Installer insgesamt. Trägt
+deine Crontab den Marker `# midea-ieco-managed`, wird gar nichts hineingeschrieben.
+Trägt sie ihn **nicht** und du beantwortest die Cron-Frage mit *ja*, hängt der
+Installer seine drei Zeilen an das an, was schon darin steht. Er hängt an, statt zu
+ersetzen, und er schreibt nichts, wenn zweimaliges Lesen der Crontab
+Unterschiedliches ergab — aber er schreibt. Für eine Crontab, an der dir liegt,
+lohnt vorher ein `crontab -l > crontab.backup`.
 
 - **„mindestens ein Job ist nicht aktiv"** — deine Crontab trägt den Marker
   `# midea-ieco-managed`, gilt dem Installer damit als eingerichtet und wird nicht
@@ -314,13 +321,22 @@ Ein Gerät, das in einem Modus läuft, der iECO nicht trägt, wird benannt und i
 
 Jede Zeile mit **FEHLER** kennzeichnet ein Problem bei genau diesem Gerät; `Gesamtergebnis: FEHLER` bedeutet, dass mindestens ein Gerät nicht in Ordnung war. Da die Cron-Zeilen `2>&1` nutzen, landen auch Warnungen der zugrunde liegenden `msmart-ng`-Bibliothek in derselben Datei. Die Logs enthalten Gerätenamen, IP-Adressen und den Ein-/iECO-Zustand — **niemals** deine Geräte-Token oder Keys (die stehen ausschließlich in der `chmod 600`-`devices.json`).
 
+> **In welcher Sprache deine Logs stehen.** Beide Werkzeuge sind zweisprachig und
+> nutzen **Englisch** als Voreinstellung; Deutsch erscheint nur, wenn
+> `MIDEA_IECO_LANG=de` gesetzt ist (oder die Locale `de_*` lautet). Der Installer
+> schreibt die bei der Einrichtung ermittelte Sprache in die Cron-Zeile, deine
+> Logdateien behalten sie also bei. Richtest du auf einem System mit englischer
+> Locale ein — etwa einem Raspberry Pi mit `en_GB` —, stehen dort `Status before
+> action`, `OK: iECO is active`, `Overall result: OK.` und im Fehlerfall `ERROR`.
+> Die Suchbefehle unten decken deshalb beide Sprachen ab.
+
 ### Lesen und Beobachten
 
 ```bash
 tail -n 40 /opt/local/midea-ieco/ieco.log     # letzter Lauf (neueste Zeilen unten)
 tail -f  /opt/local/midea-ieco/ieco.log       # live mitverfolgen
-grep -n FEHLER /opt/local/midea-ieco/*.log    # direkt zu Problemen springen
-grep Gesamtergebnis /opt/local/midea-ieco/ieco.log | tail -n 5   # letzte Gesamtergebnisse
+grep -nE 'FEHLER|ERROR' /opt/local/midea-ieco/*.log    # direkt zu Problemen springen
+grep -E 'Gesamtergebnis|Overall result' /opt/local/midea-ieco/ieco.log | tail -n 5
 ```
 
 > **Keine Zeitstempel.** Die Skripte geben kein Datum/keine Uhrzeit aus; Einträge sind nur nach Anhänge-Reihenfolge sortiert (neueste unten). Zum Voranstellen eines Zeitstempels durch `ts` leiten (aus dem Paket `moreutils`) — Achtung: Cron behandelt `%` besonders, daher als `\%` escapen:

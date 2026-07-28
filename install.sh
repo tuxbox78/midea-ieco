@@ -663,64 +663,185 @@ print_cron_lang_hint() {   # $1 = bestehende Crontab
 # steuert, hat bewusst keinen Cron-Job und braucht keinen Rat dazu.
 #
 # Erkannt wird der Aufruf am BASISNAMEN eines Kommandofeld-Tokens, nicht an
-# einem Vorkommen irgendwo in der Zeile. Der Unterschied ist hier keine Feinheit:
-# das Standard-Installationsverzeichnis heisst /opt/local/midea-ieco und der
-# Marker selbst enthaelt "midea-ieco". Eine Suche ueber die ganze Zeile hielte
-# also bei JEDER Standardinstallation jede verwaltete Zeile - auch die
+# einem Vorkommen irgendwo in der Zeile. Der Unterschied ist hier keine
+# Feinheit: das Standard-Installationsverzeichnis heisst /opt/local/midea-ieco
+# und der Marker selbst enthaelt "midea-ieco". Eine Suche ueber die ganze Zeile
+# hielte also bei JEDER Standardinstallation jede verwaltete Zeile - auch die
 # Logrotate-Zeile - fuer den iECO-Job und der Hinweis waere tot.
 #
-# Wo die Pruefung unsicher ist, zaehlt der Job als VORHANDEN (Quotes werden
-# abgestreift, Skriptnamen nur mit Praefix verglichen). Die verbleibende
-# Fehlrichtung ist damit Schweigen, nicht falscher Rat: ein fehlender Hinweis
-# kostet nichts, der Rat zu einer zweiten Zeile dagegen zwei Verbindungen alle
-# 20 Minuten auf Anlagen, die nur EINE vertragen.
-cron_missing_managed_lines() {   # $1 = bestehende Crontab
-    CRON_MISSING_IECO=0
-    CRON_MISSING_REFRESH=0
-    case "$1" in *"$CRON_MARKER"*) : ;; *) return 0 ;; esac
-    local line trimmed rest tok prev base have_ieco=0 have_refresh=0
-    local -a toks=()
+# Die Zerlegung in Tokens ist quote-bewusst (cron_tokenize_line): ein
+# gequoteter Pfad mit Leerzeichen bleibt EIN Token, ein angeklebtes ';' trennt
+# trotzdem. Ein blosser Whitespace-Split lag in BEIDE Richtungen falsch - er
+# zerlegte gequotete Pfade in Fragmente, deren Basisname zufaellig passte
+# (Schweigen, obwohl der Job fehlt), und verschluckte 'cd /pfad;./midea-ieco'
+# als vermeintlichen cd-Operanden ganz (Rat zu einer zweiten Zeile).
+#
+# Wo die Pruefung unsicher ist, zaehlt der Job im Zweifel als VORHANDEN
+# (Skriptnamen werden nur mit Praefix verglichen, ein gequoteter Aufruf zaehlt).
+# Zwei Faelle sind davon bewusst ausgenommen, weil dort MESSBAR kein Job laeuft:
+# was hinter einem Kommentarzeichen steht, und das Ziel einer Ausgabeumleitung.
+# Der Grund fuer die Vorsicht bleibt: ein fehlender Hinweis kostet nichts, der
+# Rat zu einer zweiten Zeile dagegen zwei Verbindungen alle 20 Minuten auf
+# Anlagen, die nur EINE vertragen.
+cron_tokenize_line() {   # $1 = Cron-Zeile; Ergebnis in CTL_TOKS/CTL_SEP/CTL_RED
+    CTL_TOKS=(); CTL_SEP=(); CTL_RED=()
+    local s="$1" n i ch state=0 cur="" started=0 pend_red=0
+    n=${#s}
+    for (( i=0; i<n; i++ )); do
+        ch="${s:i:1}"
+        if [ "$state" -eq 1 ]; then
+            case "$ch" in
+                "'") state=0 ;;
+                *)   cur="$cur$ch" ;;
+            esac
+            continue
+        fi
+        if [ "$state" -eq 2 ]; then
+            case "$ch" in
+                \\)  i=$((i + 1)); cur="$cur${s:i:1}" ;;
+                '"') state=0 ;;
+                *)   cur="$cur$ch" ;;
+            esac
+            continue
+        fi
+        case "$ch" in
+            \\)  i=$((i + 1)); cur="$cur${s:i:1}"; started=1 ;;
+            "'") state=1; started=1 ;;
+            '"') state=2; started=1 ;;
+            ' '|$'\t')
+                if [ "$started" -eq 1 ]; then
+                    CTL_TOKS+=("$cur"); CTL_SEP+=(0); CTL_RED+=("$pend_red")
+                    pend_red=0; cur=""; started=0
+                fi ;;
+            ';'|'&'|'|')
+                if [ "$started" -eq 1 ]; then
+                    CTL_TOKS+=("$cur"); CTL_SEP+=(0); CTL_RED+=("$pend_red")
+                    cur=""; started=0
+                fi
+                CTL_TOKS+=("$ch"); CTL_SEP+=(1); CTL_RED+=(0); pend_red=0 ;;
+            # '<' trennt, setzt aber KEIN Umleitungs-Flag: der Operand einer
+            # Eingabeumleitung ist manchmal das Programm selbst ('sh < skript').
+            # Diese Zeile hat KEINEN eigenen Test - der Subsplit weiter unten
+            # zerlegt inzwischen ebenfalls an '<', und beide zusammen ergeben in
+            # jedem geprueften Fall dieselbe Antwort. Sie bleibt, weil sie die
+            # Trennung schon im Tokenizer erledigt und damit unabhaengig von
+            # jenem Subsplit richtig bleibt.
+            '<')
+                if [ "$started" -eq 1 ]; then
+                    CTL_TOKS+=("$cur"); CTL_SEP+=(0); CTL_RED+=("$pend_red")
+                    cur=""; started=0
+                fi
+                pend_red=0 ;;
+            '>')
+                if [ "$started" -eq 1 ]; then
+                    CTL_TOKS+=("$cur"); CTL_SEP+=(0); CTL_RED+=("$pend_red")
+                    cur=""; started=0
+                fi
+                pend_red=1 ;;
+            '#')
+                if [ "$started" -eq 0 ]; then break; fi
+                cur="$cur$ch"; started=1 ;;
+            *) cur="$cur$ch"; started=1 ;;
+        esac
+    done
+    if [ "$started" -eq 1 ]; then CTL_TOKS+=("$cur"); CTL_SEP+=(0); CTL_RED+=("$pend_red"); fi
+    return 0
+}
+
+cron_scan_tools() {   # $1 = Crontab; Gate (Marker vorhanden?) liegt beim Aufrufer
+    CRON_MISSING_IECO=0; CRON_MISSING_REFRESH=0
+    local line trimmed i base part have_ieco=0 have_refresh=0 prev_was_cd=0
+    # Die drei Token-Arrays gehoeren dem Tokenizer, leben aber nur fuer diesen
+    # Aufruf: bash reicht 'local' dynamisch an die gerufene Funktion weiter, so
+    # bleibt kein Zustand zurueck (install.sh laeuft unter 'set -u').
+    local -a CTL_TOKS=() CTL_SEP=() CTL_RED=() parts=()
     while IFS= read -r line; do
         trimmed="${line#"${line%%[![:space:]]*}"}"
         case "$trimmed" in '#'*) continue ;; esac
         case "$line" in *"$CRON_MARKER"*) : ;; *) continue ;; esac
-        # Alles ab dem Marker abschneiden: /bin/sh behandelt es als Kommentar,
-        # es wird also nichts davon ausgefuehrt. Was ein Nutzer dort notiert
-        # ("frueher: midea-ieco all"), darf keinen Job vortaeuschen.
-        rest="${line%%"$CRON_MARKER"*}"
-        # 'read -a' statt unquotiertem $rest: es zerlegt an Leerraum, expandiert
-        # dabei aber KEINE Glob-Zeichen - und Zeitfelder wie */20 bestehen genau
-        # daraus. Der Rueckgabewert wird bewusst verworfen (set -e).
-        toks=()
-        read -r -a toks <<< "$rest" || true
-        prev=""
-        # Leeres Array + 'set -u': die Laengenpruefung ist noetig, weil bash 3.2
-        # (macOS-Standard) bei "${toks[@]}" sonst abbricht.
-        if [[ "${#toks[@]}" -gt 0 ]]; then
-            for tok in "${toks[@]}"; do
-                # Der Operand von 'cd' ist ein Verzeichnis, kein Aufruf. Ohne
-                # diese Ausnahme zaehlte 'cd /opt/local/midea-ieco' in der
+        # Notbremse gegen eine absurd lange Zeile: die Zerlegung kostet
+        # quadratisch mit der Zeilenlaenge, und der Hinweis laeuft bei jedem
+        # Start des Installers. Gemessen fuer 16000 Zeichen: 1,5 s unter
+        # LC_ALL=C, aber 6,2 s unter einer UTF-8-Locale - die teurere Zahl
+        # gilt, weil das der Normalfall ist.
+        #
+        # Die Schranke muss ueber allem liegen, was hier entstehen kann, denn
+        # Ueberspringen ist NICHT die harmlose Richtung: eine uebersprungene
+        # Zeile laesst ihren Job als fehlend gelten, also den Rat zu einer
+        # zweiten. Was entstehen kann, folgt aus der Quotierung:
+        # shell_quote_for_cron blaeht jedes ' auf '\'' (Faktor 4) und jedes %
+        # auf \% (Faktor 2), und der gequotete Pfad steht ZWEIMAL in der Zeile
+        # (cd-Ziel und Log-Pfad). Mit L = Pfadlaenge, q = Apostrophe und
+        # p = Prozentzeichen misst die Zeile 136 + 2*L + 6*q + 2*p Zeichen.
+        # Den Ausschlag gibt der Apostroph (8 Zeichen je Zeichen gegen 4);
+        # bei L an der Linux-Grenze PATH_MAX (4096) und lauter Apostrophen
+        # sind das 32904 (gemessen 32880 fuer 4093 Apostrophe). Die Schranke
+        # liegt daher bei 65536, dem naechsten Zweierwert darueber.
+        #
+        # Sie gilt PRO ZEILE: viele knapp unterschwellige Zeilen summieren
+        # sich weiterhin. Der ehrliche Preis der Schranke: eine handgeschriebene
+        # Zeile knapp darunter kostet je Installerstart bis zu rund 100 s.
+        # Der Installer selbst erzeugt so etwas nicht.
+        if [ "${#line}" -gt 65536 ]; then continue; fi
+        cron_tokenize_line "$line"
+        prev_was_cd=0
+        if [ "${#CTL_TOKS[@]}" -gt 0 ]; then
+            for (( i=0; i<${#CTL_TOKS[@]}; i++ )); do
+                if [ "${CTL_SEP[i]}" -eq 1 ]; then prev_was_cd=0; continue; fi
+                if [ "$prev_was_cd" -eq 1 ]; then prev_was_cd=0; continue; fi
+                # Der Operand von 'cd' ist ein Verzeichnis, kein Aufruf.
+                # Ohne diese Ausnahme zaehlte 'cd /opt/local/midea-ieco' in der
                 # Refresh-Zeile als iECO-Job - beim Standardpfad also immer.
-                if [[ "$prev" == "cd" ]]; then prev="$tok"; continue; fi
-                base="${tok//\'/}"; base="${base//\"/}"
-                base="${base##*/}"
-                # Praefix bei den Skriptnamen: deckt midea_ieco_ensure.py UND
-                # den dokumentierten Wrapper midea_ieco_ensure.sh ab. Die
-                # bin-Wrapper werden exakt verglichen - 'midea-ieco-update' ist
-                # keiner der beiden Jobs, und der laengere Refresh-Name darf
-                # nicht als der kuerzere durchgehen.
-                case "$base" in
-                    midea_ieco_ensure*|midea-ieco)                   have_ieco=1 ;;
-                    midea_refresh_tokens*|midea-ieco-refresh-tokens) have_refresh=1 ;;
+                # (Der Sprung steht oben; hier faellt das Ziel einer
+                # Ausgabeumleitung heraus, das ebenfalls kein Aufruf ist.)
+                if [ "${CTL_RED[i]}" -eq 1 ]; then continue; fi
+                parts=("${CTL_TOKS[i]}")
+                # Auch an Umleitungszeichen zerlegen: 'sh -c "…/midea-ieco>/dev/null"'
+                # traegt den Aufruf und das Ziel in EINEM gequoteten Token. Ohne
+                # das waere der Basisname 'null' und der laufende Job gaelte als
+                # fehlend. Der Subsplit kann nur Treffer HINZUFUEGEN, seine
+                # Fehlrichtung ist damit Schweigen.
+                case "${CTL_TOKS[i]}" in
+                    *[[:space:]\;\&\|\<\>]*)
+                        parts=(); read -r -a parts <<< "${CTL_TOKS[i]//[;&|<>]/ }" || true ;;
                 esac
-                prev="$tok"
+                if [ "${#parts[@]}" -gt 0 ]; then
+                    for part in "${parts[@]}"; do
+                        # Innere Quotes entfernen: der Tokenizer nimmt nur die
+                        # AEUSSEREN weg, ein 'sh -c "..."' traegt seine eigenen
+                        # im Inhalt. Ohne diesen Schnitt ist der Basename von
+                        # "/opt/x/midea-ieco" das Wort midea-ieco" - und die
+                        # Zeile gaelte als fehlend, obwohl der Job laeuft.
+                        base="${part//\'/}"; base="${base//\"/}"
+                        base="${base##*/}"
+                        # Praefix bei den Skriptnamen: deckt midea_ieco_ensure.py
+                        # UND den dokumentierten Wrapper midea_ieco_ensure.sh ab.
+                        # Die bin-Wrapper werden EXAKT verglichen -
+                        # 'midea-ieco-update' ist keiner der beiden Jobs, und der
+                        # laengere Refresh-Name darf nicht als der kuerzere
+                        # durchgehen.
+                        case "$base" in
+                            midea_ieco_ensure*|midea-ieco)                   have_ieco=1 ;;
+                            midea_refresh_tokens*|midea-ieco-refresh-tokens) have_refresh=1 ;;
+                        esac
+                    done
+                fi
+                if [ "${CTL_TOKS[i]}" = "cd" ]; then prev_was_cd=1; fi
             done
         fi
     done <<< "$1"
-    [[ "$have_ieco" -eq 0 ]] && CRON_MISSING_IECO=1
-    [[ "$have_refresh" -eq 0 ]] && CRON_MISSING_REFRESH=1
+    if [ "$have_ieco" -eq 0 ]; then CRON_MISSING_IECO=1; fi
+    if [ "$have_refresh" -eq 0 ]; then CRON_MISSING_REFRESH=1; fi
     # Explizit 0: unter 'set -e' wuerde ein falscher letzter Test den Installer
     # an beiden Aufrufstellen abbrechen.
+    return 0
+}
+
+cron_missing_managed_lines() {   # $1 = bestehende Crontab
+    CRON_MISSING_IECO=0
+    CRON_MISSING_REFRESH=0
+    case "$1" in *"$CRON_MARKER"*) : ;; *) return 0 ;; esac
+    cron_scan_tools "$1"
     return 0
 }
 

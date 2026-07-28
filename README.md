@@ -249,8 +249,16 @@ Remember log rotation, for example with `logrotate` or simply:
 
 When `install.sh` runs on a machine that is already set up — most often a plain
 re-run of the `curl … | bash` one-liner — it reads your crontab and may print one of
-the notices below. **None of them changes anything.** The installer never rewrites an
-existing crontab; it only ever prints the line for you to copy.
+the notices below. **None of the three notices changes anything** — they only print
+lines for you to copy.
+
+That is a statement about the notices, not about the installer as a whole. If your
+crontab already carries the `# midea-ieco-managed` marker, nothing is written to it
+at all. If it does **not** carry the marker and you answer *yes* to the cron
+question, the installer appends its three lines to whatever your crontab already
+contains. It appends rather than replaces, and it refuses to write when reading the
+crontab twice gave different results — but it does write. A crontab you care about
+is worth a `crontab -l > crontab.backup` beforehand.
 
 - **"at least one job is not active"** — your crontab carries the
   `# midea-ieco-managed` marker, so the installer counts it as already set up and
@@ -308,7 +316,19 @@ A unit running in a mode that cannot carry iECO is reported plainly and left alo
 [Buero] --only-if-on aktiv: keine Aktion, kein Fehler.
 ```
 
-> **The scripts log in German.** Key phrases: *Status vor/nach Aktion* = state before/after the action · *OK: iECO ist aktiv* = iECO confirmed on · *Geraet ist aus* = unit is off, skipped · *Bereits im gewuenschten Zustand* = already correct, nothing to do · *Betriebsmodus … unterstuetzt kein iECO* = wrong operating mode, skipped · *Gesamtergebnis: OK.* = the whole run succeeded. Any line containing **FEHLER** ("error") is a failure for that unit; `Gesamtergebnis: FEHLER` means at least one unit had a problem.
+> **Which language your logs are in.** Both tools are bilingual and default to
+> **English**; German appears only when `MIDEA_IECO_LANG=de` is set (or the locale
+> is `de_*`). The installer writes the language it resolved at setup time into the
+> cron line, so your log files keep speaking that language. The samples above are
+> from a German installation — an English one prints `Status before action`,
+> `OK: iECO is active`, `Overall result: OK.` and, on failure, `ERROR`.
+>
+> The German phrases mean: *Status vor/nach Aktion* = state before/after the action ·
+> *OK: iECO ist aktiv* = iECO confirmed on · *Geraet ist aus* = unit is off, skipped ·
+> *Bereits im gewuenschten Zustand* = already correct, nothing to do ·
+> *Betriebsmodus … unterstuetzt kein iECO* = wrong operating mode, skipped ·
+> *Gesamtergebnis: OK.* = the whole run succeeded. A line containing **FEHLER**
+> (German) or **ERROR** (English) is a failure for that unit.
 
 Because the cron lines use `2>&1`, warnings from the underlying `msmart-ng` library land in the same file. Logs contain device names, IP addresses, and power/iECO state — **never** your device tokens or keys (those live only in the `chmod 600` `devices.json`).
 
@@ -317,8 +337,8 @@ Because the cron lines use `2>&1`, warnings from the underlying `msmart-ng` libr
 ```bash
 tail -n 40 /opt/local/midea-ieco/ieco.log     # last run (newest lines at the bottom)
 tail -f  /opt/local/midea-ieco/ieco.log       # follow live
-grep -n FEHLER /opt/local/midea-ieco/*.log    # jump straight to problems
-grep Gesamtergebnis /opt/local/midea-ieco/ieco.log | tail -n 5   # recent run verdicts
+grep -nE 'FEHLER|ERROR' /opt/local/midea-ieco/*.log    # jump straight to problems
+grep -E 'Gesamtergebnis|Overall result' /opt/local/midea-ieco/ieco.log | tail -n 5
 ```
 
 > **No timestamps.** The scripts don't print the date/time, so entries are ordered only by append (newest last). To stamp each line, pipe through `ts` (from the `moreutils` package) — but note that cron treats `%` specially, so escape it as `\%`:

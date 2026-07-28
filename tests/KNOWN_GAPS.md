@@ -242,9 +242,16 @@ second-guessing a value the user typed would nag whoever chose
   they did not: the fault stalled 6.0 s, under the limit, and the suite reported
   ALL GREEN, while the start budget of 10 s sat *above* the limit so a slow start
   produced the guard's message instead of its own. The ordering is now asserted
-  inside `tests/test_wrapper.sh`, so moving any one of the three turns the suite
-  red. Measured after the repair: normal run 1.0 s, reintroduced fault 21 s (red,
-  by the guard), a 12-second start red by its own assertion at 40×0.1 s.
+  inside `tests/test_wrapper.sh`. That assertion has since been rewritten: it
+  compared `START_BUDGET_TICKS / 10` — an integer division — so a budget of 79
+  ticks stayed green ("7 s < 8 s") while 79 ticks really cost 8.6 s. The loop now
+  bounds itself by wall time (`SECONDS` differences, never a reset, so a poisoned
+  `SECONDS=1000` from the environment cannot skew it), the ordering assertion has
+  a lower bound as well (a budget of 0 or 1 made the test flaky), and the file
+  measures its own total runtime against the same limit. Measured: normal run
+  1–2 s (up to 3.5 s under fourfold load), reintroduced fault 21 s caught by the
+  guard, a slow start red by its own assertion. Four mutations — budget 0, 1, 8,
+  and a 7 s stall — each turn the suite red.
 - **The `git`/`curl`/`unzip` stubs in the end-to-end sandboxes** cannot be killed:
   every call a green run makes is already served by a stub, so removing one only
   changes what the stub does, not what escapes. To be exact about "no such calls",
@@ -260,34 +267,52 @@ second-guessing a value the user typed would nag whoever chose
 
 ### 8. What the inactive-job notice cannot see
 
-`print_cron_missing_hint` looks at marked, active lines, cuts each at the marker,
-splits the rest into whitespace-separated tokens and compares each token's
-**basename** — `midea_ieco_ensure*` / `midea-ieco` and `midea_refresh_tokens*` /
-`midea-ieco-refresh-tokens`, with the operand of `cd` skipped and quotes stripped.
-Whole-line substring matching is not an option: the marker itself contains
-`midea-ieco` and so does the default install directory `/opt/local/midea-ieco`, so
-it would count every managed line of every default installation as the iECO job.
+`print_cron_missing_hint` looks at marked, active lines and splits each into tokens
+the way `/bin/sh` would: single and double quotes group, a backslash escapes the
+next character, `;`, `&`, `|`, `<` and `>` separate, and an unquoted `#` at the
+start of a word ends the line. It then compares each token's **basename** —
+`midea_ieco_ensure*` / `midea-ieco` and `midea_refresh_tokens*` /
+`midea-ieco-refresh-tokens` — skipping the operand of `cd` and the target of an
+output redirection. Whole-line substring matching is not an option: the marker
+itself contains `midea-ieco` and so does the default install directory
+`/opt/local/midea-ieco`, so it would count every managed line of every default
+installation as the iECO job.
 
-What that leaves, all print-only and all re-measured against the current code:
+A plain whitespace split, which is what this did before, was wrong in *both*
+directions: it tore quoted paths into fragments whose basename happened to match
+(silence although the job was gone) and swallowed `cd /path;./midea-ieco` whole as
+a supposed `cd` operand (advice to add a second line).
+
+What that leaves, all print-only:
 
 - an invocation under a name the check cannot know — a personal wrapper script, a
-  `$VARIABLE`, an alias — makes the notice fire although the job exists. This is
-  the one remaining case in the *advice* direction, and it cannot be closed without
-  executing the line;
+  `$VARIABLE`, an alias, `` `which midea-ieco` `` — makes the notice fire although
+  the job exists. This is the remaining case in the *advice* direction, and it
+  cannot be closed without executing the line;
 - a token whose basename merely *starts with* `midea_ieco_ensure` — a log file
-  called `midea_ieco_ensure.log`, say — counts as the iECO job and silences that
-  half. An install *directory* of that name no longer does: the basename of
-  `/opt/midea_ieco_ensure/ieco.log` is `ieco.log`;
+  called `midea_ieco_ensure.log` passed as a plain **argument**, say — counts as
+  the iECO job and silences that half. As a redirection *target*
+  (`>> …/midea_ieco_ensure.log`) it no longer does, and an install *directory* of
+  that name never did (the basename of `/opt/midea_ieco_ensure/ieco.log` is
+  `ieco.log`);
 - the wrapper name appearing as a plain argument (`echo midea-ieco`) counts as the
   job, likewise silencing that half;
+- a redirection glued inside a quoted word with no separator of its own
+  (`sh -c 'foo >/opt/x/midea-ieco'`) counts the target as a job;
 - a foreign line carrying our marker makes the notice fire for both tools;
+- a line longer than 65536 characters is skipped untokenized (see gap 10);
 - the notice is not suppressible: a user who removed the jobs but left a
   marker-bearing comment sees it on every run.
 
-Where the check is unsure it therefore counts a job as present. That direction is
-chosen deliberately: a missing hint costs nothing, whereas advice to add a second
-line costs two jobs hitting the same units every 20 minutes — the exact thing the
-firmware notes warn about.
+Where the check is unsure it counts a job as present — with two deliberate
+exceptions, because there nothing measurably runs: what stands behind a comment
+character, and the target of an output redirection. Both used to be counted as
+jobs and therefore silenced the notice; both now let it speak. That is a change of
+direction and it is the expensive one, so it is named rather than buried: a user
+whose crontab happens to redirect an unrelated job into a file called
+`midea_ieco_ensure.log` used to be silenced by accident and is now advised to add
+a line. Following that advice costs two jobs against units that tolerate one local
+connection — the notice therefore quotes nothing and only prints.
 
 ### 9. The installer still creates a duplicate job for an unmarked existing line
 
@@ -305,6 +330,22 @@ token check as the notice over the whole crontab, marked or not, and skip the li
 whose tool is already scheduled. Not done here because it moves a decision from
 "did we write this?" to "does something like this exist?", which needs its own
 round of fixtures; written down rather than left to be rediscovered.
+
+### 10. A line beyond the length guard is treated as missing
+
+`cron_scan_tools` skips any crontab line longer than 65536 characters without
+tokenizing it, because the split costs quadratic time in the line length (measured
+under a UTF-8 locale: 6.2 s at 16000 characters, and the guard's own threshold
+would cost roughly 100 s). Skipping is **not** the harmless direction: the job on
+that line then counts as missing, which is advice to add a second one.
+
+The threshold sits far above anything this installer can produce.
+`shell_quote_for_cron` expands each `'` to `'\''` and each `%` to `\%`, and the
+quoted path appears twice per line, so a line measures `136 + 2*L + 6*q + 2*p`
+characters (L = path length, q = apostrophes, p = percent signs). At the Linux
+`PATH_MAX` of 4096 with nothing but apostrophes that is 32904 — measured 32880 for
+4093 of them. A hand-written line long enough to be skipped is possible; one this
+installer wrote is not.
 
 ## Equivalent mutants (survive by design, not by omission)
 
@@ -364,6 +405,27 @@ listed it as equivalent, and that no longer holds.
 ## Corrections to earlier versions of this file
 
 Recorded so the same wrong statements do not get re-derived from the history:
+
+- **Gap 8 described a whitespace split.** It did, accurately, until the tokenizer
+  replaced it. The rewrite above is not a correction of a wrong statement but of a
+  statement that the code outgrew — noted here because the two are easy to confuse
+  when reading the history.
+- **Gap 7 quoted `40×0.1 s` and a start budget in ticks.** Both are gone: the loop
+  now bounds itself by wall time. The measurement that produced the old numbers was
+  correct for its commit.
+- **"The installer itself is NEVER executed"** (head of `tests/test_install.sh`).
+  It is — as a copy in a sandbox, in the end-to-end sections of that very file, and
+  once directly for `--help`. The sentence predated those sections.
+- **"The scripts log in German"** (both READMEs). They are bilingual and default to
+  English; the installer writes the resolved language into the cron line. The
+  monitoring commands the README recommended (`grep FEHLER`, `grep Gesamtergebnis`)
+  therefore never matched on an English installation — a silent monitoring failure,
+  now covered by patterns for both languages.
+- **"The installer never rewrites an existing crontab"** (both READMEs). True of
+  the three notices, which only print; false of the installer, whose write branch
+  appends three lines when the marker is absent. See gap 9.
+- **"51 pip calls"** (`tests/README.md`, `CHANGELOG.md`). Measured today: 55. The
+  `onbwackel` sandbox added in `33aef36` contributes four.
 
 - The header used to read "165 mutations (111 caught, 51 survived)". Those numbers do
   not add up (111 + 51 = 162) and the three excluded equivalent mutants were missing

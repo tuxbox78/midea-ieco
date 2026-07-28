@@ -1,7 +1,11 @@
 # Tests
 
-Stdlib-only tests — no external dependencies, no AC hardware or Midea Cloud
-account required. Run everything with:
+Stdlib-only tests — no Python packages beyond the standard library, no AC
+hardware and no Midea Cloud account required. One external tool *is* needed:
+`run_all.sh` lints all five shell files with **shellcheck** and fails without it
+(`shellcheck: command not found`, exit 1). Install it (`brew install shellcheck`,
+`apt install shellcheck`) or run the other parts individually.
+Run everything with:
 
 ```bash
 bash tests/run_all.sh
@@ -27,7 +31,9 @@ Contents:
   the pipefail-safe version extraction, the shell-safe wrapper-heredoc quoting
   for all three generated wrappers, rejection of the reserved device names
   `all`/`list`, the obsolete-`credentials.json` hint that never deletes, the
-  per-line cron language check, and the i18n catalog check in both directions).
+  per-line cron language check, the notice about a managed cron job that is no
+  longer active — including the quote-aware tokenizer behind it — and the i18n
+  catalog check in both directions).
   It also runs the **real installer end-to-end** in a fully stubbed sandbox —
   `--update`, and onboarding with and without discovered devices, with an empty
   crontab and with foreign jobs already in it — and asserts what actually reaches
@@ -56,7 +62,7 @@ Contents:
   `venv/bin/activate`, which puts `venv/bin` in front of `PATH` — the packages are
   installed by the *venv's own* `pip`, which a `PATH` stub cannot intercept. Inside
   these sandboxes the fake `activate` leaves `PATH` alone, so there the `PATH` stub
-  does fire (51 calls in the same run). The onboarding `python3` stub answers only
+  does fire (55 calls in the same run). The onboarding `python3` stub answers only
   the installer's probe calls and delegates the `devices.json` write to the real
   interpreter, so the test does not merely check its own stub.
 - `test_wrapper.sh` — functional tests for `midea_ieco_ensure.sh`, the wrapper
@@ -65,10 +71,12 @@ Contents:
   that a missing venv produces a clear error instead of a cryptic `exec` failure,
   and that the wrapper *becomes* the Python process (same PID) rather than forking
   — the property `exec` is there for. The wrapper runs as a copy in a sandbox
-  against a fake venv Python. Three time quantities in here hang together and are
-  asserted to: the start budget for that fake Python (4 s) must stay below the time
-  limit `run_all.sh` applies to this file (8 s), which must stay well below the
-  stall a left-behind process produces (20 s). Get that order wrong and the guard
+  against a fake venv Python. Four time quantities in here hang together and are
+  asserted to: the start budget for that fake Python (4 s, and at least 2 s) must
+  stay below the time limit `run_all.sh` applies to this file (8 s), which must stay
+  well below the stall a left-behind process produces (20 s); on top of that the file
+  measures its own total runtime against that same limit, so a merely slow file fails
+  with an assertion naming it rather than with the guard's collective message. Get that order wrong and the guard
   in `run_all.sh` stops catching its own fault — which is what happened once.
 - `KNOWN_GAPS.md` — behaviour that still survives deliberate mutation, with the
   cost of each gap and the cheapest way to close it. Read it before assuming a

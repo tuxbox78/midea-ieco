@@ -16,6 +16,14 @@
 # Fake-venv-Python) - nie gegen die echte Installation.
 set -uo pipefail
 
+# Referenzzeitpunkt der Datei - so frueh wie moeglich, damit die Zusicherung am
+# Dateiende WIRKLICH die ganze Datei misst und nicht erst ab hier. Bewusst eine
+# DIFFERENZ statt "SECONDS=0": SECONDS ist eine Sondervariable, die bash aus der
+# Umgebung uebernimmt (gemessen: "SECONDS=1000 bash datei.sh" startet den
+# Zaehler bei 1000), und ein Reset mitten in der Datei laesst jede spaetere
+# Messung nur noch die Zeit SEIT dem Reset sehen.
+FILE_START=$SECONDS
+
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WRAPPER="$REPO/midea_ieco_ensure.sh"
 pass=0; fail=0
@@ -39,7 +47,11 @@ pass=0; fail=0
 # (gemessen rund 14 % Aufschlag), 40 Runden sind also knapp 4,6 s echte Zeit.
 # Zusammen mit rund 1 s fuer den Rest der Datei bleibt genug Abstand zur
 # 8-s-Schranke. Beobachtet startet der Fake-Python nach 3 Runden.
-START_BUDGET_TICKS=40
+# Wandzeit statt Schleifenrunden: Runden kosten je nach Last 0,10-0,13 s, die
+# Umrechnung war deshalb schon einmal falsch. SECONDS ist sekundengenau, das
+# effektive Budget liegt also in (N-1, N] - bei beobachteten 0,32-0,59 s
+# Startzeit ist der Abstand rund sechsfach.
+START_BUDGET_SECONDS=4
 # Wie lange der Fake-Python nach dem Hinterlegen seiner PID schlaeft. Bei
 # korrektem Code kostet das nichts: der Schlafende IST der Wrapper-Prozess und
 # wird unten sofort erschlagen. Erst der Defekt macht daraus einen Stau - und
@@ -208,9 +220,10 @@ PIDFILE="$WORK/child.pid"
 # (Schranke < reine Schlafdauer); der echte Stau ist um die Laufzeit der uebrigen
 # Faelle laenger.
 rc=0
-{ [ "$((START_BUDGET_TICKS / 10))" -lt "$OUTER_TIME_LIMIT" ] \
+{ [ "$START_BUDGET_SECONDS" -ge 2 ] \
+  && [ "$START_BUDGET_SECONDS" -lt "$OUTER_TIME_LIMIT" ] \
   && [ "$OUTER_TIME_LIMIT" -lt "$ORPHAN_SLEEP_SECONDS" ]; } || rc=1
-assert "$rc" "Zeitordnung: Startbudget $((START_BUDGET_TICKS / 10))s < Schranke ${OUTER_TIME_LIMIT}s < Stau ${ORPHAN_SLEEP_SECONDS}s"
+assert "$rc" "Zeitordnung: 2 <= Startbudget ${START_BUDGET_SECONDS}s < Schranke ${OUTER_TIME_LIMIT}s < Stau ${ORPHAN_SLEEP_SECONDS}s"
 
 cat > "$SB/venv/bin/python3" <<EOF
 #!/usr/bin/env bash
@@ -234,14 +247,16 @@ WRAPPER_PID=$!
 # nicht mit der Sammelmeldung des Laufzeitwaechters ueber einen
 # zurueckgelassenen Prozess.
 waited=0
-while [ ! -s "$PIDFILE" ] && [ "$waited" -lt "$START_BUDGET_TICKS" ]; do
+wait_start=$SECONDS
+while [ ! -s "$PIDFILE" ] && [ "$((SECONDS - wait_start))" -lt "$START_BUDGET_SECONDS" ]; do
     sleep 0.1
     waited=$((waited + 1))
 done
+waited_s=$((SECONDS - wait_start))
 CHILD_PID="$(cat "$PIDFILE" 2>/dev/null || true)"
 
 rc=0; [ -n "$CHILD_PID" ] || rc=1
-assert "$rc" "der Fake-Python startet ueberhaupt (PID-Datei nach ${waited}x0.1s)"
+assert "$rc" "der Fake-Python startet ueberhaupt (PID-Datei nach ${waited_s}s / ${waited} Runden)"
 
 rc=0; [ "$CHILD_PID" = "$WRAPPER_PID" ] || rc=1
 assert "$rc" "Wrapper-PID ($WRAPPER_PID) IST die Python-PID ($CHILD_PID) - exec, kein Fork"
@@ -249,6 +264,21 @@ assert "$rc" "Wrapper-PID ($WRAPPER_PID) IST die Python-PID ($CHILD_PID) - exec,
 kill "$WRAPPER_PID" 2>/dev/null || true
 if [ -n "$CHILD_PID" ]; then kill "$CHILD_PID" 2>/dev/null || true; fi
 wait "$WRAPPER_PID" 2>/dev/null || true
+
+# Beide Schranken sind dieselbe Zahl, und das ist Absicht: greift sie, soll
+# DIESE Zusicherung zuerst sprechen (sie benennt den Fall), nicht die
+# Sammelmeldung des Waechters. Der Waechter bleibt fuer den Fall zustaendig,
+# in dem die Datei gar nicht zu Ende laeuft - dann wird diese Zeile nie
+# erreicht. Gemessen: normaler Lauf 1-2 s, unter vierfacher Last bis 3,5 s.
+#
+# Die Laufzeit dieser Datei wird GEMESSEN statt geschaetzt: der Waechter in
+# run_all.sh faengt einen zurueckgelassenen Prozess an derselben Schranke, und
+# eine hier notierte Konstante war genau deshalb schon einmal falsch. Im
+# Defektfall ist diese Zusicherung gruen (die Datei ist fertig, der Stau
+# entsteht beim Aufrufer) - die Arbeitsteilung ist also gewollt.
+file_elapsed=$((SECONDS - FILE_START))
+rc=0; [ "$file_elapsed" -lt "$OUTER_TIME_LIMIT" ] || rc=1
+assert "$rc" "Laufzeit dieser Datei (${file_elapsed}s) bleibt unter der Schranke ${OUTER_TIME_LIMIT}s"
 
 echo ""
 echo "RESULT(test_wrapper.sh): $pass passed, $fail failed"
