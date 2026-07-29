@@ -1364,6 +1364,7 @@ eval "$(grep '^CRON_MARKER=' "$INSTALL")"
 # End-to-End-Zusicherungen oben ab).
 CRON_LINE_IECO="ZEILE_IECO"
 CRON_LINE_REFRESH="ZEILE_REFRESH"
+CRON_LINE_REBOOT="ZEILE_REBOOT"
 LANG_CHOICE=de
 
 CL_OLD_IECO="*/20 * * * * cd /opt && venv/bin/python3 midea_ieco_ensure.py all --only-if-on >> /opt/ieco.log 2>&1 $CRON_MARKER"
@@ -1371,6 +1372,10 @@ CL_NEW_IECO="*/20 * * * * cd /opt && MIDEA_IECO_LANG=de venv/bin/python3 midea_i
 CL_OLD_REFRESH="0 3 * * 0 cd /opt && venv/bin/python3 midea_refresh_tokens.py --all >> /opt/refresh.log 2>&1 $CRON_MARKER"
 CL_NEW_REFRESH="0 3 * * 0 cd /opt && MIDEA_IECO_LANG=de venv/bin/python3 midea_refresh_tokens.py --all >> /opt/refresh.log 2>&1 $CRON_MARKER"
 CL_LOGROT="0 0 1 * * truncate -s 0 /opt/ieco.log /opt/refresh.log $CRON_MARKER"
+# Die Nachhol-Zeile ruft DASSELBE Werkzeug auf wie die Wochenzeile. Genau daran
+# haengen die beiden folgenden Zusicherungsgruppen.
+CL_OLD_REBOOT="@reboot sleep 120 && cd /opt && venv/bin/python3 midea_refresh_tokens.py --all --only-if-due >> /opt/refresh.log 2>&1 $CRON_MARKER"
+CL_NEW_REBOOT="@reboot sleep 120 && cd /opt && MIDEA_IECO_LANG=de venv/bin/python3 midea_refresh_tokens.py --all --only-if-due >> /opt/refresh.log 2>&1 $CRON_MARKER"
 
 # Prueft die Ausgabe des Hinweises gegen die erwarteten Sentinels.
 # $1 = Crontab, $2 = erwartete Ausgabe (leer = kein Hinweis), $3 = Beschriftung
@@ -1398,6 +1403,35 @@ $CL_LOGROT" "ZEILE_IECO" "nur die Refresh-Zeile migriert: Hinweis NUR fuer die i
 assert_hint "$CL_NEW_IECO
 $CL_OLD_REFRESH
 $CL_LOGROT" "ZEILE_REFRESH" "nur die iECO-Zeile migriert: Hinweis NUR fuer die Refresh-Zeile"
+
+# --- Wochenlauf und Nachholer sind ZWEI verschiedene Zeilen ------------------
+# Beide rufen midea_refresh_tokens.py auf. Wer nur auf den Skriptnamen sieht,
+# zeigt fuer eine sprachlose NACHHOL-Zeile die WOCHEN-Zeile zum Uebernehmen -
+# und wer diesen Rat befolgt, ersetzt seinen Nachholer durch eine zweite
+# Wochenzeile. Ein Hinweis, der zur falschen Zeile raet, ist schaedlicher als
+# gar keiner; deshalb steht diese Gruppe hier.
+assert_hint "$CL_NEW_IECO
+$CL_NEW_REFRESH
+$CL_OLD_REBOOT" "ZEILE_REBOOT" "sprachlose Nachhol-Zeile: gezeigt wird GENAU sie"
+
+assert_hint "$CL_NEW_IECO
+$CL_OLD_REFRESH
+$CL_NEW_REBOOT" "ZEILE_REFRESH" "sprachlose Wochenzeile neben migriertem Nachholer: nur die Wochenzeile"
+
+assert_hint "$CL_NEW_IECO
+$CL_OLD_REFRESH
+$CL_OLD_REBOOT" "ZEILE_REFRESH
+ZEILE_REBOOT" "beide Refresh-Zeilen ohne Sprache: beide werden genannt"
+
+assert_hint "$CL_NEW_IECO
+$CL_NEW_REFRESH
+$CL_NEW_REBOOT
+$CL_LOGROT" "" "alle drei Werkzeug-Zeilen migriert: kein Hinweis"
+
+# Ein Pfad, der die Zeichenfolge zufaellig enthaelt, macht aus der Wochenzeile
+# keinen Nachholer: erkannt wird das Flag mit umgebendem Leerraum.
+assert_hint "0 3 * * 0 cd '/opt/--only-if-due' && venv/bin/python3 midea_refresh_tokens.py --all >> /opt/refresh.log 2>&1 $CRON_MARKER" \
+    "ZEILE_REFRESH" "'--only-if-due' im Pfad deutet die Wochenzeile nicht um"
 
 assert_hint "MIDEA_IECO_LANG=de
 $CL_OLD_IECO

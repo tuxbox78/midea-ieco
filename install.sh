@@ -568,8 +568,8 @@ _cron_line_sets_lang_inline() {   # $1 = Cron-Zeile
 }
 
 # Ermittelt ZEILENWEISE, welche verwalteten Werkzeug-Zeilen ohne wirksame
-# Sprachvariable laufen (Ergebnis in CRON_NEEDS_IECO/CRON_NEEDS_REFRESH, global
-# wie DISC_IPS/DISC_IDS bei parse_discovered).
+# Sprachvariable laufen (Ergebnis in CRON_NEEDS_IECO/CRON_NEEDS_REFRESH/
+# CRON_NEEDS_REBOOT, global wie DISC_IPS/DISC_IDS bei parse_discovered).
 #
 # Warum mit Zustand statt zweier greps ueber die ganze Crontab: cron wendet eine
 # eigenstaendige Zuweisung NUR auf die DARUNTER stehenden Jobs an (man 5
@@ -586,6 +586,7 @@ _cron_line_sets_lang_inline() {   # $1 = Cron-Zeile
 cron_lines_needing_lang() {   # $1 = bestehende Crontab
     CRON_NEEDS_IECO=0
     CRON_NEEDS_REFRESH=0
+    CRON_NEEDS_REBOOT=0
     local line trimmed name env_effective=0
     while IFS= read -r line; do
         trimmed="${line#"${line%%[![:space:]]*}"}"
@@ -628,9 +629,29 @@ cron_lines_needing_lang() {   # $1 = bestehende Crontab
         esac
         # Die Logrotate-Zeile traegt keinen Skriptnamen und faellt hier korrekt
         # heraus: sie ruft kein Werkzeug auf und braucht keine Sprache.
+        #
+        # ZWEI verwaltete Zeilen rufen midea_refresh_tokens.py auf - der
+        # Wochenlauf und der '@reboot'-Nachholer. Ohne die innere Unterscheidung
+        # zeigte der Hinweis fuer eine sprachlose NACHHOL-Zeile die WOCHEN-Zeile
+        # zum Uebernehmen: wer sie so einsetzt, ersetzt seinen Nachholer durch
+        # eine zweite Wochenzeile. Ein Hinweis, der zur falschen Zeile raet, ist
+        # schlimmer als keiner.
+        #
+        # Erkannt wird die Nachhol-Zeile am Flag MIT umgebendem Leerraum, nicht
+        # als blosse Teilzeichenkette: ein Installationspfad, der zufaellig
+        # '--only-if-due' enthaelt, soll die Wochenzeile nicht umdeuten. Der
+        # Tokenizer aus cron_scan_tools waere noch genauer, ist hier aber
+        # unverhaeltnismaessig - diese Funktion arbeitet bewusst zeilenweise und
+        # billig, und ihr Ergebnis wird nur GEDRUCKT.
         case "$line" in
             *midea_ieco_ensure.py*)    CRON_NEEDS_IECO=1 ;;
-            *midea_refresh_tokens.py*) CRON_NEEDS_REFRESH=1 ;;
+            *midea_refresh_tokens.py*)
+                case "$line" in
+                    *[[:space:]]--only-if-due|*[[:space:]]--only-if-due[[:space:]]*)
+                        CRON_NEEDS_REBOOT=1 ;;
+                    *)  CRON_NEEDS_REFRESH=1 ;;
+                esac
+                ;;
         esac
     done <<< "$1"
 }
@@ -641,12 +662,14 @@ cron_lines_needing_lang() {   # $1 = bestehende Crontab
 # sagt ausdruecklich zu, sie nicht anzufassen.
 print_cron_lang_hint() {   # $1 = bestehende Crontab
     cron_lines_needing_lang "$1"
-    if [[ "$CRON_NEEDS_IECO" -eq 0 && "$CRON_NEEDS_REFRESH" -eq 0 ]]; then
+    if [[ "$CRON_NEEDS_IECO" -eq 0 && "$CRON_NEEDS_REFRESH" -eq 0 \
+          && "$CRON_NEEDS_REBOOT" -eq 0 ]]; then
         return 0
     fi
     warn "$(t cron_lang_missing "$LANG_CHOICE")"
     if [[ "$CRON_NEEDS_IECO" -eq 1 ]]; then echo "$CRON_LINE_IECO"; fi
     if [[ "$CRON_NEEDS_REFRESH" -eq 1 ]]; then echo "$CRON_LINE_REFRESH"; fi
+    if [[ "$CRON_NEEDS_REBOOT" -eq 1 ]]; then echo "$CRON_LINE_REBOOT"; fi
 }
 
 # Meldet verwaltete Werkzeug-Zeilen, die es nicht (mehr) gibt: entfernt oder
