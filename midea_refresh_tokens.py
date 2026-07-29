@@ -588,9 +588,20 @@ def _state_age_seconds(state: dict, key: str, now: float) -> float | None:
     value = state.get(key)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    if not math.isfinite(value):
+    # Erst nach float wandeln, DANN auf Endlichkeit pruefen. math.isfinite auf
+    # einem riesigen int (json.load liest beliebig lange Ganzzahlliterale
+    # klaglos) wandelt intern selbst nach float und wirft dabei OverflowError -
+    # ungefangen sonst genau im --only-if-due-Pfad, also bei jedem Start. Eine
+    # Zahl, die sich nicht als float darstellen laesst, ist als Epoche ohnehin
+    # unbrauchbar; unbrauchbar heisst hier None, und None gilt oben als
+    # "faellig"/"erlaubt" - die sichere Richtung.
+    try:
+        fv = float(value)
+    except OverflowError:
         return None
-    return now - float(value)
+    if not math.isfinite(fv):
+        return None
+    return now - fv
 
 
 def refresh_is_due(now: float, state: dict) -> bool:

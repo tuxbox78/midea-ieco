@@ -2900,6 +2900,18 @@ class StateAgeTests(unittest.TestCase):
                             json.loads('{"k": NaN}')["k"])   # NaN != NaN
         self.assertEqual(json.loads('{"k": Infinity}')["k"], float("inf"))
 
+    def test_an_int_too_large_for_float_is_unusable_not_a_crash(self):
+        # math.isfinite wandelt intern nach float und wirft bei einem riesigen
+        # int OverflowError; ungefangen traefe das den --only-if-due-Pfad bei
+        # jedem Start. json.load liest solche Literale klaglos ein.
+        for value in (10**400, -10**400):
+            with self.subTest(value=value):
+                self.assertIsNone(mrt._state_age_seconds({"k": value}, "k", 1.0))
+
+    def test_json_really_accepts_an_oversized_integer(self):
+        # Gegenprobe: ohne diese Eigenschaft waere der Schutz oben anlasslos.
+        self.assertEqual(json.loads('{"k": 1' + '0' * 400 + '}')["k"], 10**400)
+
 
 class RefreshIsDueTests(unittest.TestCase):
     """Die vollstaendige Entscheidungstabelle. NOW ist frei waehlbar, damit
@@ -2963,6 +2975,13 @@ class RefreshIsDueTests(unittest.TestCase):
         # Schweigen - wieder die stille Richtung.
         self.assertTrue(self.due(last_success_epoch=self.NOW - 30 * 86400,
                                  last_attempt_epoch="kaputt"))
+
+    def test_an_oversized_integer_stamp_does_not_crash_the_decision(self):
+        # Der Entscheidungspfad selbst darf an einem riesigen int nicht sterben:
+        # unbrauchbar -> Erfolg gilt als faellig, Versuch als nicht blockierend.
+        self.assertTrue(self.due(last_success_epoch=10**400))
+        self.assertTrue(self.due(last_success_epoch=self.NOW - 30 * 86400,
+                                 last_attempt_epoch=10**400))
 
     def test_the_two_thresholds_are_ordered_as_documented(self):
         # Ein Wiederholabstand groesser als das Faelligkeitsfenster hiesse: der
