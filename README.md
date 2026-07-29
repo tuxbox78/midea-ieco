@@ -266,9 +266,16 @@ is worth a `crontab -l > crontab.backup` beforehand.
   which means that part of the product silently does not run at all. The missing line
   is printed ready to paste. A job that runs through `midea_ieco_ensure.sh` or through
   the `midea-ieco` / `midea-ieco-refresh-tokens` commands counts as active — you are
-  not being asked to add a second one.
+  not being asked to add a second one. Two shapes can still fool it: a job started
+  from a line *without* our marker, and one invoked under a name the check cannot
+  know (a personal wrapper, a shell variable, a command substitution). Both make it
+  report a job that is in fact running, so check `crontab -l` before pasting —
+  adding a second line means two connections every 20 minutes to a unit that
+  tolerates one.
 - **"reading the current crontab returned different results twice in a row"** — this
-  appears only if you answer *yes* to the cron question. `crontab -l` reports "there
+  appears only if you answer *yes* to the cron question, which the plain re-run
+  described above never gets to ask: it stops before that point. You will see this
+  one during first-time setup, or with `--reconfigure`. `crontab -l` reports "there
   is no crontab" and "I could not read it" in exactly the same way, and mistaking the
   second for the first would mean replacing your crontab with our three lines. The
   installer therefore reads it twice and, if the two results disagree, writes nothing

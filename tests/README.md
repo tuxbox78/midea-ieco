@@ -38,11 +38,13 @@ Contents:
   `--update`, and onboarding with and without discovered devices, with an empty
   crontab and with foreign jobs already in it — and asserts what actually reaches
   `crontab -`, including that existing entries survive byte-identically. Nothing
-  leaves the sandbox: `HOME` and the install/bin directories point into a temp dir
-  and no network is touched. What actually keeps it there is the `unset` of the
-  whole `MIDEA_IECO_*` family at the head of the file — `install.sh` resolves its
-  install directory from `MIDEA_IECO_RESOLVED_DIR` first and exports that variable
-  itself, so an inherited value aims every end-to-end run at a foreign directory.
+  leaves the sandbox — though that is a checkpoint someone has to re-run rather
+  than a standing assertion the suite makes (`KNOWN_GAPS.md`, gap 7): `HOME` and
+  the install/bin directories point into a temp dir and no network is touched.
+  What actually keeps it there is the `unset` of the whole `MIDEA_IECO_*` family
+  at the head of the file — `install.sh` resolves its install directory from
+  `MIDEA_IECO_RESOLVED_DIR` first and exports that variable itself, so an
+  inherited value aims every end-to-end run at a foreign directory.
 
   The network commands are stubbed on top of that, as defence in depth — but not
   uniformly, and it is worth knowing which sandbox does what:
@@ -62,9 +64,11 @@ Contents:
   `venv/bin/activate`, which puts `venv/bin` in front of `PATH` — the packages are
   installed by the *venv's own* `pip`, which a `PATH` stub cannot intercept. Inside
   these sandboxes the fake `activate` leaves `PATH` alone, so there the `PATH` stub
-  does fire (55 calls in the same run). The onboarding `python3` stub answers only
-  the installer's probe calls and delegates the `devices.json` write to the real
-  interpreter, so the test does not merely check its own stub.
+  does fire — measured with instrumented stubs: **48** calls inside the two
+  end-to-end sandboxes (44 onboarding, 4 `--update`), and 55 in the whole run once
+  the three `pip`-snippet tests are counted in. The onboarding `python3` stub
+  answers only the installer's probe calls and delegates the `devices.json` write
+  to the real interpreter, so the test does not merely check its own stub.
 - `test_wrapper.sh` — functional tests for `midea_ieco_ensure.sh`, the wrapper
   behind the Siri shortcuts and SSH calls: that every argument (especially
   `--only-if-on`) reaches Python unchanged, that the exit code is passed through,

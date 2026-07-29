@@ -267,14 +267,22 @@ lohnt vorher ein `crontab -l > crontab.backup`.
   auskommentiert, dieser Teil des Produkts läuft also still gar nicht. Die fehlende
   Zeile wird fertig zum Einfügen angezeigt. Ein Job, der über `midea_ieco_ensure.sh`
   oder über die Befehle `midea-ieco` / `midea-ieco-refresh-tokens` läuft, zählt als
-  aktiv — du wirst also nicht aufgefordert, eine zweite Zeile anzulegen.
+  aktiv — du wirst also nicht aufgefordert, eine zweite Zeile anzulegen. Zwei Formen
+  täuschen die Prüfung trotzdem: ein Job aus einer Zeile *ohne* unseren Marker und
+  einer, der unter einem Namen läuft, den die Prüfung nicht kennen kann (ein eigenes
+  Wrapper-Skript, eine Shell-Variable, eine Kommandosubstitution). Beide lassen sie
+  einen Job melden, der in Wahrheit läuft — prüfe deshalb vor dem Übernehmen
+  `crontab -l`: eine zweite Zeile bedeutet zwei Verbindungen alle 20 Minuten auf
+  eine Anlage, die nur eine verträgt.
 - **„Das Lesen der aktuellen Crontab lieferte zweimal hintereinander
-  Unterschiedliches"** — erscheint nur, wenn du die Cron-Frage mit *ja* beantwortest.
-  `crontab -l` meldet „es gibt keine Crontab" und „ich konnte sie nicht lesen" auf
-  genau dieselbe Weise; hielte man den zweiten Fall für den ersten, würde deine
-  Crontab durch unsere drei Zeilen ersetzt. Der Installer liest sie deshalb zweimal
-  und schreibt bei abweichendem Ergebnis nichts, sondern bittet dich, die Zeilen von
-  Hand zu ergänzen.
+  Unterschiedliches"** — erscheint nur, wenn du die Cron-Frage mit *ja*
+  beantwortest, und die stellt der oben beschriebene schlichte erneute Aufruf nie:
+  er endet vorher. Zu sehen bekommst du diesen Hinweis bei der Ersteinrichtung
+  oder mit `--reconfigure`. `crontab -l` meldet „es gibt keine Crontab" und „ich
+  konnte sie nicht lesen" auf genau dieselbe Weise; hielte man den zweiten Fall
+  für den ersten, würde deine Crontab durch unsere drei Zeilen ersetzt. Der
+  Installer liest sie deshalb zweimal und schreibt bei abweichendem Ergebnis
+  nichts, sondern bittet dich, die Zeilen von Hand zu ergänzen.
 - **„Deine bestehenden Cron-Jobs setzen `MIDEA_IECO_LANG` nicht"** — die Jobs stammen
   aus der Zeit vor der Sprachweitergabe und protokollieren auf Englisch, weil Cron
   ohne Locale läuft. Die korrigierten Zeilen werden angezeigt; ob du sie übernimmst,

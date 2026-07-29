@@ -57,6 +57,17 @@ time:
 - five documentation claims were measured and corrected rather than argued (see the
   corrections section at the end and `CHANGELOG.md`).
 
+The round after that added a tool the earlier ones did not have: **an execution
+oracle**. Generated crontab lines were run through `/bin/sh` in a stubbed sandbox
+to observe which tool really ran, and the scanner's verdict was compared against
+that rather than against an expectation someone wrote down. It found what review
+had missed — `/bin/sh` separates words at `(` and `)` and the tokenizer did not, so
+a running job written as `(midea-ieco all)` counted as missing — and it is also
+where the "262 of 2200" and "60 of 2200" figures in gaps 8 and 9 come from. That
+round closed three unpinned rules in the suite, fixed the parenthesis defect, kept
+device tokens out of the log files, and corrected five more documentation claims
+(again in the corrections section at the end).
+
 None of that says the suite is complete — only that these specific things were
 checked. What is known to be open is below.
 
@@ -183,7 +194,7 @@ locale can arrive would widen the check for no practical gain.
 
 ---
 
-### 6. The cron language notice misjudges four shapes of hand-edited line
+### 6. The cron language notice: four misjudged shapes, and the wrappers it never sees
 
 The notice asks one question: does this managed cron line set `MIDEA_IECO_LANG`?
 Answering it exactly means parsing the command field the way `/bin/sh` does —
@@ -231,6 +242,29 @@ understands (`MIDEA_IECO_LANG=de # x`, which cron stores verbatim, or `fr`)
 counts as set. The notice reports "you never set it", not "you set it wrongly" —
 second-guessing a value the user typed would nag whoever chose
 `MIDEA_IECO_LANG=en` on purpose.
+
+**The notice does not see the wrappers at all**, and that is the widest shape of
+this gap rather than a fifth row in the table above. It matches the two script
+names literally (`*midea_ieco_ensure.py*`, `*midea_refresh_tokens.py*`), so a
+crontab driving the `midea-ieco` / `midea-ieco-refresh-tokens` commands — or the
+documented `midea_ieco_ensure.sh` — is passed over even when nothing sets the
+language, and those jobs then log in English without anyone saying so. Measured
+for both tool sides: the bin wrapper, the `.sh` wrapper, and the refresh wrapper
+each stay silent, while the installer's own line is reported correctly.
+
+This is the asymmetry worth naming: the *inactive-job* notice next door has been
+wrapper-aware since it started comparing basenames, so the same crontab is
+visible to one check and invisible to the other. It stays that way on purpose.
+The two checks answer different questions, and their error directions are not
+comparable — a missing language hint costs nothing, whereas the *other* check
+reporting a running job as missing costs two jobs against units that tolerate one
+local connection. Note that the safe direction differs between the two: over
+there, counting more shapes as present is the cautious move, while here it only
+decides whether one more paragraph of advice gets printed.
+Two assertions in `tests/test_install.sh` pin the current state — one for the bin
+wrapper, one for the `.sh` wrapper, each with a mutation that turns only it red —
+so whoever widens the detection here trips over them and updates this entry with
+it.
 
 ### 7. Where a test guards a conjunction rather than each half
 
@@ -311,18 +345,49 @@ What that leaves, all print-only:
   job, likewise silencing that half;
 - a redirection glued inside a quoted word with no separator of its own
   (`sh -c 'foo >/opt/x/midea-ieco'`) counts the target as a job;
-- an install directory whose own name carries the parentheses — literally
-  `/opt/(midea-ieco)/inst` — makes the logrotate line count as the iECO job.
-  The sub-split replaces `(` and `)` with spaces, so `…/(midea-ieco)/inst/ieco.log`
-  yields a fragment whose basename is `midea-ieco`. This one arrived **with** the
-  parenthesis support and is the price for it: `sh -c '(midea-ieco)'` — a running
-  job — used to count as missing, which is the expensive direction, while this is
-  silence about a job that is not there. A directory named `/opt/a(b)/midea-ieco`
-  is not affected (measured); the name has to wrap the tool name itself;
+- an install directory that carries a **separator right after** the path component
+  `midea-ieco` makes the logrotate line count as the iECO job: the sub-split turns
+  the separator into a space, so `…/midea-ieco 2/ieco.log` yields a fragment whose
+  basename is `midea-ieco`. Measured: `/opt/midea-ieco 2`, `/opt/midea-ieco alt`
+  and `/opt/midea-ieco;x` all do this, and they did so **before** the parenthesis
+  support as well — a plain space is enough. What the parentheses added is the
+  enclosing form `/opt/(midea-ieco)/inst`, and that one is the price for fixing the
+  expensive direction (`sh -c '(midea-ieco)'`, a running job, used to count as
+  missing). What decides it is whether the split leaves a fragment that *ends* in
+  `midea-ieco`, so a separator earlier in the path does not do it —
+  `/opt/a(b)/midea-ieco`, `/opt/a b/midea-ieco`, `/opt/x;midea-ieco` and
+  `/opt/mein midea-ieco/inst` were all measured as unaffected;
 - a foreign line carrying our marker makes the notice fire for both tools;
 - a line longer than 65536 characters is skipped untokenized (see gap 10);
 - the notice is not suppressible: a user who removed the jobs but left a
   marker-bearing comment sees it on every run.
+
+Three more of these were found by fuzzing against an execution oracle, and they
+deserve their own paragraph because — unlike the exotica above — they fire on the
+**default install directory**, where the basename is `midea-ieco`. All three
+silence a half of the notice that should have spoken, so a genuinely deleted iECO
+job goes unmentioned — which is the very situation the notice exists for (measured
+against the current code, each alongside the logrotate-only counter-check that
+still reports both jobs missing):
+
+- **A `cd` inside a quoted sub-command.** The sub-split re-splits `sh -c '…'` but
+  carries none of the scanner's context, so it has no `cd` rule:
+  `sh -c 'cd /opt/local/midea-ieco && venv/bin/python3 midea_refresh_tokens.py --all'`
+  counts the directory as the iECO job.
+- **`cd` with an option.** Only the *first* token after `cd` is skipped, so
+  `cd -P /opt/local/midea-ieco` skips `-P` and then scans the directory.
+- **An assignment line that carries the marker.** `FOO=/opt/local/midea-ieco` is
+  not a job at all — cron treats it as an environment assignment — but it is a
+  marked, non-comment line, so its value is tokenized like a command field. The
+  same holds for a value pointing into the default *bin* directory
+  (`/opt/local/bin/midea-ieco`), which is where the wrapper of that name actually
+  lives.
+
+None of the three is fixed here. The first two would each push the check further
+into re-implementing shell semantics, which this file's history shows to be where
+the defects come from; the third would mean teaching the scanner cron's own
+grammar for assignment lines. All three point the same, cheap way — silence about
+a job that is not running — which is why they are recorded instead.
 
 Where the check is unsure it counts a job as present — with two deliberate
 exceptions, because there nothing measurably runs: what stands behind a comment
@@ -351,6 +416,23 @@ whose tool is already scheduled. Not done here because it moves a decision from
 "did we write this?" to "does something like this exist?", which needs its own
 round of fixtures; written down rather than left to be rediscovered.
 
+Two things that were easy to assume otherwise, both checked in the code:
+
+- **Nothing else catches it either.** Both notices are gated on the marker
+  internally — the language check skips any line that lacks it, and the
+  inactive-job check returns early when no line in the crontab carries one — so an
+  unmarked pre-existing line is invisible at *both* call sites, the onboarding one
+  and the re-run one. The re-run does not compensate for the write branch with a
+  warning; it simply stays quiet too.
+- **The same blind spot has a mirror image on the notice side, and it points the
+  expensive way.** When a tool runs only from an unmarked line while some *other*
+  line carries the marker, the gate opens, the unmarked line is skipped, and the
+  notice reports the job as missing — advice to add a line for a job that is
+  already running, which is the one direction this project cannot afford. Fuzzing
+  against an execution oracle put 262 of 2200 generated cases in this class. It is
+  the same root cause as this gap, seen from the other end, and closing the write
+  branch as sketched above would not close this one.
+
 ### 10. A line beyond the length guard is treated as missing
 
 `cron_scan_tools` skips any crontab line longer than 65536 characters without
@@ -366,6 +448,32 @@ characters (L = path length, q = apostrophes, p = percent signs). At the Linux
 `PATH_MAX` of 4096 with nothing but apostrophes that is 32904 — measured 32880 for
 4093 of them. A hand-written line long enough to be skipped is possible; one this
 installer wrote is not.
+
+That formula describes the **iECO** line, which is the longest of the three; the
+refresh line starts from 128 and the logrotate line from 71. Using the longest is
+what makes it an upper bound, but the constant is not a property of "a managed
+line" in general.
+
+Two further things are true of the guard and are easier to write down than to
+rediscover:
+
+- **What counts as "longer than 65536" depends on the locale.** `${#line}` counts
+  characters under a UTF-8 locale and bytes under `LC_ALL=C`, so a line of 32868
+  umlauts — 65736 bytes — is tokenized under `de_DE.UTF-8` and skipped under
+  `LC_ALL=C` (measured, both). The skip is the expensive direction, so of the two
+  it is the C locale that misjudges such a line. Reaching it takes a hand-written
+  line of more than 32768 multi-byte characters, which is why it is recorded rather
+  than fixed: pinning the guard to bytes would change what the threshold means for
+  every ordinary line, in exchange for a shape this installer cannot produce.
+- **The assertions cover the guard only up to 8146 characters.** A fixture in the
+  installer's own line shape (path twice) pins that a line of that length is still
+  tokenized, and a second one pins that a line past the threshold counts as
+  missing. Between 8146 and 65535 the number can be moved without any assertion
+  noticing — measured by setting it to 20000, which leaves the suite green. That
+  gap is deliberate: a fixture at the worst case above (32904) would cost a
+  multiple of the whole suite's runtime, because the split is quadratic. The
+  mutation that removes the guard entirely already takes 98 s on the
+  65627-character fixture under a UTF-8 locale.
 
 ### 11. What the hex redaction does and does not cover
 
@@ -514,7 +622,17 @@ before any message is built.
 
 ## Equivalent mutants (survive by design, not by omission)
 
-Do not "fix" these by adding a test — there is nothing to observe.
+Do not "fix" these by adding a test — on the interpreters this project supports
+(Python 3.11+) there is nothing to observe.
+
+That qualifier is not decoration, and it applies to the first entry below: on
+Python 3.9 the edit *is* observable, and the tests that catch it are already
+written. Measured on 3.9.6, dropping `asyncio.TimeoutError` from the check turns
+`test_own_time_limit_actually_caps_a_hanging_device` and
+`test_a_hanging_refresh_is_capped_as_well` red — `FAILED (failures=2)` — while the
+same edit leaves 3.14 green. So what the entry records is an equivalence that
+holds from the project's floor upwards, not one that holds on every interpreter
+the module happens to import under.
 
 - **Removing `asyncio.TimeoutError` from the `isinstance` check** in
   `classify_verify_failure`. On Python 3.11+ (the project's floor)
@@ -654,3 +772,28 @@ Recorded so the same wrong statements do not get re-derived from the history:
   name suggested (the variable name check rejects `# MIDEA_IECO_LANG` before the
   comment guard ever matters). The case the comment guard actually protects — a
   commented-out managed *job* line — now has its own fixture.
+- **"Do not fix these by adding a test — there is nothing to observe"** (the
+  heading of the equivalent-mutants section) was true of the interpreters this
+  project supports and too broad for the first entry underneath it. On Python 3.9.6
+  that mutation turns two existing tests red. Corrected at the heading, with the
+  measurement; the entry itself is unchanged and still belongs there.
+- **Both READMEs framed the three crontab notices as reachable from a plain
+  re-run.** Two of them are; the "read the crontab twice and got different
+  results" notice sits behind the cron question, which the re-run branch never
+  reaches — it prints its two notices and exits. The second bullet in both READMEs
+  now says so.
+- **`tests/README.md` claimed "Nothing leaves the sandbox" as a standing
+  property.** The file's own next sentence, and gap 7, describe it as a checkpoint
+  someone has to re-run — the suite makes no permanent assertion about it. The
+  sentence now carries that qualifier.
+- **"55 calls in the same run"** (`tests/README.md` *and* `CHANGELOG.md`) was
+  attributed to the two end-to-end sandboxes. Measured with instrumented stubs: 55
+  is the whole-run figure, of which 48 fall inside those sandboxes (44 onboarding,
+  4 `--update`) and 7 come from the `pip`-snippet tests. Both numbers now appear in
+  both places, with what each covers — the earlier "51 pip calls" correction listed
+  both files for the same reason, and this one initially did not.
+- **The language notice's blindness to the wrappers was described as a bin-wrapper
+  matter.** It is structural: the check matches the two script names literally, so
+  `midea_ieco_ensure.sh` and the refresh wrapper are equally invisible, on both tool
+  sides. Measured and written up in gap 6, where it belongs with the rest of that
+  gap rather than as a footnote.

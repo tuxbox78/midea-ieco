@@ -6,6 +6,41 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Documentation
+- **Five statements in the documentation claimed more than what was measured.**
+  Each was checked against the code or a run before being rewritten, and each
+  correction is recorded in `tests/KNOWN_GAPS.md` so the wrong version does not get
+  re-derived from the history:
+  - the equivalent-mutants heading in `KNOWN_GAPS.md` said there was "nothing to
+    observe". True from the project's floor (Python 3.11) upwards; on 3.9.6 the
+    first entry's mutation turns two *existing* tests red, so the heading now names
+    the interpreter range it holds for;
+  - both READMEs presented the three crontab notices as reachable from a plain
+    re-run. Only two are — the "read it twice, got different results" notice sits
+    behind the cron question, and the re-run branch prints its two notices and
+    exits before reaching it;
+  - `tests/README.md` stated "nothing leaves the sandbox" as a standing property,
+    where the suite treats it as a checkpoint to re-run (gap 7 says so explicitly);
+  - `tests/README.md` attributed 55 `pip` calls to the two end-to-end sandboxes.
+    Measured with instrumented stubs: 48 of them are (44 onboarding, 4 `--update`),
+    and 55 is the whole-run figure including the three snippet tests;
+  - the language notice's blindness to the wrapper commands was written up as a
+    bin-wrapper matter. It is structural — the check matches the two script names
+    literally, so `midea_ieco_ensure.sh` and the refresh wrapper are equally
+    invisible, on both tool sides.
+- **Three gaps gained what a reader needed in order to act on them.** The
+  inactive-job notice has three further blind spots that fire on the *default*
+  install directory rather than on exotica — a `cd` inside a quoted sub-command,
+  `cd` with an option, and a marked environment-assignment line — all of which
+  silence a half of the notice; the duplicate-job gap now records that no notice
+  catches an unmarked pre-existing line at either call site, and that the same root
+  cause produces 262 of 2200 fuzz cases where the notice advises adding a line for a
+  job that is already running; and the length guard's entry notes that `${#line}`
+  counts characters under UTF-8 but bytes under `LC_ALL=C` (measured on the same
+  65736-byte line, tokenized under one and skipped under the other), that its
+  formula describes the longest of the three managed lines, and that assertions
+  cover it only up to 8146 characters.
+
 ### Fixed
 - **Error messages could put a device token into the log file.** The cron lines
   redirect with `2>&1`, and the logs are created with the user's normal umask —
@@ -490,8 +525,9 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the venv, and `setup_venv_and_deps` then sources `venv/bin/activate`, which puts
   `venv/bin` in front of `PATH` — from there on the *venv's own* `pip` installs the
   packages and a `pip` stub on `PATH` never fires. (In the sandboxes the fake
-  `activate` leaves `PATH` alone, which is why the `pip` stub does run there: 55
-  calls in the same instrumented run.)
+  `activate` leaves `PATH` alone, which is why the `pip` stub does run there: 48
+  calls in the same instrumented run — 55 counting the `pip`-snippet tests outside
+  those sandboxes.)
 - **The wrapper test left a `sleep` holding the suite's stdout**, so anything
   capturing the output — a pipe, a command substitution, a CI step log — waited ten
   seconds: 1.0 s redirected to a file against 10.9 s captured. Fixed on both sides,
