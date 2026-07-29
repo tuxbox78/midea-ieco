@@ -42,17 +42,36 @@ import midea_refresh_tokens as mrt  # noqa: E402
 # (locale-losen) CI rot. Die deutschen Gegenproben ueberschreiben das gezielt
 # per eigenem patch.dict in ihrem setUp.
 _LANG_PATCHER = None
+_REAL_STATE_PATH = None
+_REAL_STATE_SNAPSHOT = None
 
 
 def setUpModule():
-    global _LANG_PATCHER
+    global _LANG_PATCHER, _REAL_STATE_PATH, _REAL_STATE_SNAPSHOT
     _LANG_PATCHER = mock.patch.dict(os.environ, {"MIDEA_IECO_LANG": "en"})
     _LANG_PATCHER.start()
+    # Der ECHTE, am Modulverzeichnis haengende Zustandspfad - NICHT das
+    # moeglicherweise gepinnte mrt.STATE_PATH. Zustand vor dem Lauf festhalten,
+    # damit tearDownModule jeden Test entlarvt, der ihn beruehrt (der Leak, den
+    # diese Runde geschlossen hat, entstand genau so).
+    _REAL_STATE_PATH = Path(mrt.__file__).resolve().parent / "refresh_state.json"
+    _REAL_STATE_SNAPSHOT = (_REAL_STATE_PATH.stat().st_mtime_ns
+                            if _REAL_STATE_PATH.exists() else None)
 
 
 def tearDownModule():
     if _LANG_PATCHER is not None:
         _LANG_PATCHER.stop()
+    # Wenn hier etwas anschlaegt, hat ein Test in den echten Pfad geschrieben,
+    # statt in seinen gepinnten - ein Fehler im Test-Setup, kein Produktfehler,
+    # aber einer, der im Feld einen faelligen Refresh unterdruecken wuerde.
+    now = (_REAL_STATE_PATH.stat().st_mtime_ns
+           if _REAL_STATE_PATH.exists() else None)
+    if now != _REAL_STATE_SNAPSHOT:
+        raise AssertionError(
+            f"Ein Test hat den ECHTEN {_REAL_STATE_PATH.name} veraendert "
+            f"(vorher {_REAL_STATE_SNAPSHOT}, nachher {now}) - STATE_PATH ist "
+            f"irgendwo nicht auf ein Temp-Verzeichnis gepinnt.")
 
 
 def _longest_literal(template: str) -> str:
@@ -67,15 +86,30 @@ def _longest_literal(template: str) -> str:
 
 
 class _ConfigPathMixin(unittest.TestCase):
-    """Legt ein temporaeres Verzeichnis an und pinnt mrt.CONFIG_PATH darauf."""
+    """Legt ein temporaeres Verzeichnis an und pinnt mrt.CONFIG_PATH UND
+    mrt.STATE_PATH darauf.
+
+    STATE_PATH gehoert hierher, nicht nur in die zustandsnahen Tests: seit ein
+    '--all'-Lauf refresh_state.json fortschreibt, stempelt JEDER Test, der
+    main() mit --all aufruft, in den gepinnten Pfad - ohne diese Zeile in den
+    ECHTEN, am Modulverzeichnis haengenden Pfad. Bei einer git-basierten
+    Installation ist das Modulverzeichnis das Repo; ein 'bash tests/run_all.sh'
+    dort truege dann einen vollstaendigen Erfolg fuer JETZT ein und
+    unterdrueckte den naechsten faelligen Nachhol-Lauf - genau die stille
+    Nichtausfuehrung, gegen die der Nachholer gebaut ist. tearDownModule wacht
+    zusaetzlich ueber den echten Pfad."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.path = Path(self.tmp.name) / "devices.json"
-        orig = mrt.CONFIG_PATH
-        mrt.CONFIG_PATH = self.path
-        self.addCleanup(lambda: setattr(mrt, "CONFIG_PATH", orig))
+        base = Path(self.tmp.name)
+        self.path = base / "devices.json"
+        self.state_path = base / "refresh_state.json"
+        for attr, value in (("CONFIG_PATH", self.path),
+                            ("STATE_PATH", self.state_path)):
+            orig = getattr(mrt, attr)
+            setattr(mrt, attr, value)
+            self.addCleanup(lambda a=attr, o=orig: setattr(mrt, a, o))
 
 
 class LoadConfigTests(_ConfigPathMixin):
@@ -2763,21 +2797,16 @@ class VerifyTimeoutHeadroomTests(unittest.TestCase):
                            authenticate_worst_case + refresh_worst_case)
 
 
-class _StateAndConfigMixin(unittest.TestCase):
-    """Pinnt devices.json UND refresh_state.json in dasselbe Temp-Verzeichnis -
-    so, wie beide im Installationsverzeichnis auch nebeneinander liegen."""
+class _StateAndConfigMixin(_ConfigPathMixin):
+    """Wie _ConfigPathMixin (das seit dieser Runde beide Pfade pinnt), plus der
+    write_state-Helfer und der self.state_path-Zugriff, den die zustandsnahen
+    Tests brauchen. Eigene Pin-Logik hatte diese Klasse frueher doppelt; sie
+    liegt jetzt an EINER Stelle in der Basis."""
 
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        base = Path(self.tmp.name)
-        self.path = base / "devices.json"
-        self.state_path = base / "refresh_state.json"
-        for attr, value in (("CONFIG_PATH", self.path),
-                            ("STATE_PATH", self.state_path)):
-            orig = getattr(mrt, attr)
-            setattr(mrt, attr, value)
-            self.addCleanup(lambda a=attr, o=orig: setattr(mrt, a, o))
+        super().setUp()
+        # Denselben, bereits in der Basis gepinnten Pfad nach aussen reichen.
+        self.state_path = mrt.STATE_PATH
 
     def write_state(self, data):
         self.state_path.write_text(json.dumps(data), encoding="utf-8")
@@ -3175,6 +3204,34 @@ class StatePathAnchorTests(unittest.TestCase):
         # auf - und irgendwann in einem Commit.
         ignored = (REPO_DIR / ".gitignore").read_text(encoding="utf-8")
         self.assertIn("refresh_state.json", ignored)
+
+
+class MixinIsolationTests(_ConfigPathMixin):
+    """Sichert den Pin selbst ab: entfernt jemand die STATE_PATH-Zeile aus
+    _ConfigPathMixin, faellt mrt.STATE_PATH auf den Repo-Pfad zurueck und diese
+    Zusicherung wird rot - noch bevor tearDownModule den entstandenen Leak
+    meldet. Ohne diesen Test waere der Mixin-Pin selbst ungeprueft (genau die
+    Luecke, durch die der Leak ueberhaupt entstand)."""
+
+    def test_the_mixin_pins_the_state_path_into_the_temp_dir(self):
+        self.assertEqual(mrt.STATE_PATH, Path(self.tmp.name) / "refresh_state.json")
+        # Und der Repo-Pfad ist waehrend des Tests gerade NICHT aktiv.
+        self.assertNotEqual(mrt.STATE_PATH,
+                            Path(mrt.__file__).resolve().parent / "refresh_state.json")
+
+    def test_a_main_all_run_writes_only_into_the_temp_dir(self):
+        # Der Beweis am tatsaechlichen Schreibpfad: ein --all-Lauf legt die
+        # Zustandsdatei im Temp-Verzeichnis an, nicht daneben im Repo.
+        self.path.write_text(
+            '{"devices":[{"name":"A","ip":"1.2.3.4"}]}', encoding="utf-8")
+        with mock.patch.dict(sys.modules, {"msmart": mock.MagicMock()}), \
+                mock.patch.object(mrt, "update_device", lambda dev: True), \
+                mock.patch.object(mrt.time, "sleep", lambda s: None), \
+                mock.patch.object(mrt.sys, "argv", ["x", "--all"]), \
+                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                mrt.main()
+        self.assertTrue((Path(self.tmp.name) / "refresh_state.json").exists())
 
 
 if __name__ == "__main__":
