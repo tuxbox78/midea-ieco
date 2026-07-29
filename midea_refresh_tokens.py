@@ -628,11 +628,20 @@ def refresh_is_due(now: float, state: dict) -> bool:
         man nicht trauen kann, darf kein Refresh geopfert werden.
       * last_attempt unbrauchbar -> erlaubt; sonst blockierte ein kaputter
         Zustand den Nachholer dauerhaft.
-      * last_attempt in der Zukunft -> blockiert, als waere eben ein Versuch
-        gelaufen. Waere auch das "erlaubt", verloere der Sturmwaechter bei einer
-        rueckwaerts laufenden Uhr genau dann seine Wirkung, wenn er gebraucht
-        wird. Festfressen kann sich das nicht: der regulaere Wochenlauf schreibt
-        last_attempt ohnehin neu, sobald die Uhr wieder stimmt.
+      * last_attempt bis zu REFRESH_RETRY_AFTER_SECONDS in der Zukunft ->
+        blockiert, als waere eben ein Versuch gelaufen. So bleibt der
+        Sturmwaechter wirksam, wenn die Uhr NACH einem echten Lauf ein Stueck
+        zurueckspringt (NTP-Korrektur).
+      * last_attempt WEITER als REFRESH_RETRY_AFTER_SECONDS in der Zukunft ->
+        erlaubt. Ein so weit vorausliegender Stempel ist nicht "eben gelaufen",
+        sondern unplausibel (Rechner ohne RTC, dessen Uhr beim Booten weit hinter
+        einem frueher mit korrekter Zeit geschriebenen Stempel liegt). Ihn
+        blockieren zu lassen hiesse, den Nachholer auf genau dem Rechnertyp
+        dauerhaft stillzulegen, fuer den er gebaut ist - die fruehere Fassung tat
+        das. Der Schaden ist so auf hoechstens einen Wiederhol-Abstand Blockade
+        nach einem Rueckwaertssprung gedeckelt und heilt sich selbst.
+
+    Das Blockfenster fuer last_attempt ist damit symmetrisch: [-RETRY, +RETRY).
 
     Entschieden wird ausschliesslich ueber die ``*_epoch``-Zahlen; die
     ``*_utc``-Zeichenketten daneben sind reine Lesehilfe."""
@@ -640,7 +649,8 @@ def refresh_is_due(now: float, state: dict) -> bool:
     if success_age is not None and 0 <= success_age < REFRESH_DUE_AFTER_SECONDS:
         return False
     attempt_age = _state_age_seconds(state, "last_attempt_epoch", now)
-    if attempt_age is not None and attempt_age < REFRESH_RETRY_AFTER_SECONDS:
+    if (attempt_age is not None
+            and -REFRESH_RETRY_AFTER_SECONDS <= attempt_age < REFRESH_RETRY_AFTER_SECONDS):
         return False
     return True
 

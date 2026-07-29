@@ -2957,13 +2957,29 @@ class RefreshIsDueTests(unittest.TestCase):
         # Refresh geopfert werden.
         self.assertTrue(self.due(last_success_epoch=self.NOW + 30 * 86400))
 
-    def test_an_attempt_in_the_future_blocks(self):
-        # Gegenlaeufig zum Erfolgsfeld, und mit Absicht: waere auch das
-        # "erlaubt", verloere der Sturmwaechter bei rueckwaerts laufender Uhr
-        # genau dann seine Wirkung, wenn er gebraucht wird. Der Wochenlauf
-        # schreibt last_attempt neu, sobald die Uhr wieder stimmt.
+    def test_a_slightly_future_attempt_blocks(self):
+        # Ein knapp vorausliegender Versuch (Uhr nach einem echten Lauf ein Stueck
+        # zurueckgesprungen, NTP-Korrektur): der Sturmwaechter greift weiter.
         self.assertFalse(self.due(last_success_epoch=self.NOW - 30 * 86400,
                                   last_attempt_epoch=self.NOW + 3600))
+
+    def test_a_far_future_attempt_does_not_block(self):
+        # Weiter als ein Wiederhol-Abstand voraus ist nicht "eben gelaufen",
+        # sondern unplausibel (Rechner ohne RTC, Uhr beim Booten weit hinter
+        # einem frueher korrekt geschriebenen Stempel). Blockierte das dauerhaft,
+        # laege der Nachholer auf genau dem Zielrechner still - die fruehere
+        # Fassung tat das. Jetzt laeuft er.
+        self.assertTrue(self.due(last_success_epoch=self.NOW - 30 * 86400,
+                                 last_attempt_epoch=self.NOW + self.RETRY + 1))
+
+    def test_the_future_block_window_boundary(self):
+        # Genau -RETRY blockiert noch (Fenster ist [-RETRY, +RETRY)), eine
+        # Sekunde weiter voraus nicht mehr.
+        old = self.NOW - 30 * 86400
+        self.assertFalse(self.due(last_success_epoch=old,
+                                   last_attempt_epoch=self.NOW + self.RETRY))
+        self.assertTrue(self.due(last_success_epoch=old,
+                                 last_attempt_epoch=self.NOW + self.RETRY + 1))
 
     def test_unusable_values_never_suppress_a_refresh(self):
         for bad in (True, "gestern", None, [], float("nan")):
