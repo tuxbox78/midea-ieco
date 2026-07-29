@@ -794,11 +794,17 @@ cron_scan_tools() {   # $1 = Crontab; Gate (Marker vorhanden?) liegt beim Aufruf
         # shell_quote_for_cron blaeht jedes ' auf '\'' (Faktor 4) und jedes %
         # auf \% (Faktor 2), und der gequotete Pfad steht ZWEIMAL in der Zeile
         # (cd-Ziel und Log-Pfad). Mit L = Pfadlaenge, q = Apostrophe und
-        # p = Prozentzeichen misst die Zeile 136 + 2*L + 6*q + 2*p Zeichen.
+        # p = Prozentzeichen misst die LAENGSTE der vier verwalteten Zeilen
+        # 153 + 2*L + 6*q + 2*p Zeichen. Das ist seit dieser Runde die
+        # '@reboot'-Nachhol-Zeile; zuvor war es die iECO-Zeile mit dem
+        # Festanteil 136, und der Unterschied von 17 Zeichen sind ihre
+        # Kulanzfrist und das Flag '--only-if-due'.
         # Den Ausschlag gibt der Apostroph (8 Zeichen je Zeichen gegen 4);
         # bei L an der Linux-Grenze PATH_MAX (4096) und lauter Apostrophen
-        # sind das 32904 (gemessen 32880 fuer 4093 Apostrophe). Die Schranke
-        # liegt daher bei 65536, dem naechsten Zweierwert darueber.
+        # sind das 32921 (gemessen 32897 fuer 4093 Apostrophe, gegenueber
+        # 32880 fuer die iECO-Zeile am selben Pfad). Die Schranke liegt daher
+        # weiterhin bei 65536, dem naechsten Zweierwert darueber - der Abstand
+        # betraegt gemessen 32639 Zeichen.
         #
         # Sie gilt PRO ZEILE: viele knapp unterschwellige Zeilen summieren
         # sich weiterhin. Der ehrliche Preis der Schranke: eine handgeschriebene
@@ -1458,12 +1464,12 @@ cd "$INSTALL_DIR"
 setup_venv_and_deps
 
 # =============================================================================
-# 5a. Die drei verwalteten Cron-Zeilen bauen
+# 5a. Die vier verwalteten Cron-Zeilen bauen
 # =============================================================================
 # Bewusst HIER und nicht erst im Cron-Abschnitt (12): der konfig-sichere Re-Run
 # unten verlaesst das Skript vorher per 'exit 0', soll aber denselben Hinweis auf
 # Cron-Zeilen ohne Sprachvariable geben koennen - und dafuer dieselben Zeilen
-# zeigen. Nur EINE Quelle fuer diese drei Zeilen.
+# zeigen. Nur EINE Quelle fuer diese vier Zeilen.
 #
 # Pfad cron-sicher quoten (Leerzeichen/Sonderzeichen/%); dieselbe gequotete Form
 # speist Anzeige, Hinweis und den crontab-Eintrag.
@@ -1476,6 +1482,24 @@ IDQ="$(shell_quote_for_cron "$INSTALL_DIR")"
 # also weder Leerzeichen noch Sonderzeichen enthalten kann.
 CRON_LINE_IECO="*/20 * * * * cd $IDQ && MIDEA_IECO_LANG=$LANG_CHOICE venv/bin/python3 midea_ieco_ensure.py all --only-if-on >> $IDQ/ieco.log 2>&1 $CRON_MARKER"
 CRON_LINE_REFRESH="0 3 * * 0 cd $IDQ && MIDEA_IECO_LANG=$LANG_CHOICE venv/bin/python3 midea_refresh_tokens.py --all >> $IDQ/refresh.log 2>&1 $CRON_MARKER"
+# Nachhol-Zeile. Die Wochenzeile darueber hilft nur, wenn der Rechner zu genau
+# dieser Zeit laeuft; ein Host, der sonntags um 03:00 aus ist, ueberspringt sie
+# STILL - und abgelaufene Tokens sind der haeufigste Weg, auf dem dieses
+# Werkzeug im Feld ausfaellt. '--only-if-due' macht die Zeile bei jedem Start
+# unbedenklich: das Werkzeug entscheidet anhand von refresh_state.json selbst
+# und beruehrt sonst kein Geraet (Schwellwerte und Begruendung stehen in
+# midea_refresh_tokens.py).
+#
+# '@reboot' bedeutet "der cron-Daemon wurde gestartet", nicht "das System wurde
+# gebootet" - schon ein Paket-Update des cron-Dienstes loest es aus. Genau
+# deshalb liegt die Entscheidung im Werkzeug und nicht in dieser Zeile.
+#
+# Die Wartezeit ist eine KULANZFRIST, kein Warten auf das Netz: cron startet
+# frueh, LAN/DHCP muessen dann noch nicht stehen. Scheitert der Lauf trotzdem,
+# bleibt der Wochenlauf der Auffang - deshalb ein fester kleiner Wert statt
+# einer Erreichbarkeitsschleife, die in einer Cron-Zeile niemand mehr liest.
+CRON_REBOOT_DELAY_SECONDS=120
+CRON_LINE_REBOOT="@reboot sleep $CRON_REBOOT_DELAY_SECONDS && cd $IDQ && MIDEA_IECO_LANG=$LANG_CHOICE venv/bin/python3 midea_refresh_tokens.py --all --only-if-due >> $IDQ/refresh.log 2>&1 $CRON_MARKER"
 # truncate akzeptiert mehrere Dateioperanden (GNU wie BSD/macOS) - ein Lauf
 # leert beide Logs, statt refresh.log unbegrenzt wachsen zu lassen.
 CRON_LINE_LOGROTATE="0 0 1 * * truncate -s 0 $IDQ/ieco.log $IDQ/refresh.log $CRON_MARKER"
@@ -1728,13 +1752,14 @@ deactivate 2>/dev/null || true
 # =============================================================================
 # 12. Cron-Job-Vorschlag (idempotent - keine Duplikate bei erneutem Lauf)
 # =============================================================================
-# Die drei Zeilen selbst stehen in Abschnitt 5a - sie werden auch vom
+# Die vier Zeilen selbst stehen in Abschnitt 5a - sie werden auch vom
 # Re-Run-Zweig gebraucht, der hier gar nicht mehr ankommt.
 echo ""
 echo -e "${YELLOW}--- $(t hdr_cron) ---${NC}"
 echo ""
 echo "$CRON_LINE_IECO"
 echo "$CRON_LINE_REFRESH"
+echo "$CRON_LINE_REBOOT"
 echo "$CRON_LINE_LOGROTATE"
 echo ""
 
@@ -1749,7 +1774,7 @@ if command -v crontab &>/dev/null; then
         # faelschlich LEEREN Bestand an und ERSETZTE damit die Crontab des
         # Nutzers, mit Erfolgsmeldung. Unterscheiden muss man die Faelle dafuer
         # gar nicht; es genuegt, zweimal zu lesen und bei Abweichung nichts zu
-        # tun. Die drei Zeilen stehen oben bereits zum Uebernehmen.
+        # tun. Die vier Zeilen stehen oben bereits zum Uebernehmen.
         EXISTING_CRON_CHECK=$(crontab -l 2>/dev/null || true)
         if [[ "$EXISTING_CRON" != "$EXISTING_CRON_CHECK" ]]; then
             warn "$(t cron_read_unstable)"
@@ -1767,6 +1792,7 @@ if command -v crontab &>/dev/null; then
             { echo "$EXISTING_CRON"
               echo "$CRON_LINE_IECO"
               echo "$CRON_LINE_REFRESH"
+              echo "$CRON_LINE_REBOOT"
               echo "$CRON_LINE_LOGROTATE"
             } | crontab -
             ok "$(t cron_added "$(whoami)")"

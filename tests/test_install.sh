@@ -1004,7 +1004,10 @@ ONB_INPUT=("" "1" "Wohnzimmer" "192.168.0.5" "12345" "n" "j")
 cron_line_has() {   # $1 = grep-Muster fuer die Zeilenauswahl, $2.. = geforderte Teile
     local select="$1"; shift
     local line part
-    line="$(grep -F "$select" "$CRON_FILE" | head -1)"
+    # '-e': ein Auswahlmuster darf mit '-' beginnen (z.B. ein Flag als
+    # Unterscheidungsmerkmal). Ohne das liest grep es als eigene Option und
+    # scheitert - der Test faende dann nie eine Zeile und waere immer rot.
+    line="$(grep -F -e "$select" "$CRON_FILE" | head -1)"
     [ -n "$line" ] || return 1
     for part in "$@"; do
         case "$line" in *"$part"*) : ;; *) return 1 ;; esac
@@ -1044,11 +1047,41 @@ rc=0; cron_line_has 'midea_refresh_tokens.py' \
         "$CANONICAL_CRON_MARKER" || rc=1
 assert "$rc" "Token-Refresh eingetragen: sonntags 3 Uhr, --all, Log-Umleitung, Marker"
 
+# --- die Nachhol-Zeile ------------------------------------------------------
+# Sie ruft dasselbe Werkzeug auf wie die Wochenzeile, unterscheidet sich aber in
+# Zeitangabe und Flag. Ausgewaehlt wird ueber '@reboot', weil das in der Crontab
+# nur einmal vorkommt (die naechste Zusicherung sichert genau das zu).
+rc=0; cron_line_has '@reboot' \
+        'sleep 120' \
+        'midea_refresh_tokens.py --all --only-if-due' \
+        'venv/bin/python3' \
+        'MIDEA_IECO_LANG=' \
+        '/refresh.log 2>&1' \
+        "$CANONICAL_CRON_MARKER" || rc=1
+assert "$rc" "Nachholer eingetragen: @reboot, Kulanzfrist, --only-if-due, Marker"
+
 # --- die Logrotate-Zeile ----------------------------------------------------
 rc=0; cron_line_has 'truncate' \
         '0 0 1 * *' 'truncate -s 0' '/ieco.log' '/refresh.log' \
         "$CANONICAL_CRON_MARKER" || rc=1
 assert "$rc" "Logrotate eingetragen: monatlich, truncate (nicht rm), beide Logs"
+
+# --- WIE VIELE Zeilen es sind ----------------------------------------------
+# Bis hierher pruefte die Suite nur, dass jede erwartete Zeile VORKOMMT. Eine
+# vergessene, eine doppelt geschriebene oder eine ueberzaehlige Zeile fiel damit
+# niemandem auf - gemessen beim Hinzufuegen der vierten Zeile: die Suite blieb
+# gruen, ohne dass eine einzige Zusicherung sie gesehen haette.
+managed=$(grep -c -F "$CANONICAL_CRON_MARKER" "$CRON_FILE" || true)
+rc=0; [ "$managed" -eq 4 ] || rc=1
+assert "$rc" "genau VIER verwaltete Zeilen geschrieben (gezaehlt: $managed)"
+
+# Und je genau eine der beiden Refresh-Zeiten. Das sichert zugleich die Auswahl
+# in cron_line_has ab: sie nimmt die ERSTE passende Zeile, was nur eindeutig
+# bleibt, solange die Zeitangaben es sind.
+n_weekly=$(grep -c -F '0 3 * * 0' "$CRON_FILE" || true)
+n_reboot=$(grep -c -F '@reboot' "$CRON_FILE" || true)
+rc=0; { [ "$n_weekly" -eq 1 ] && [ "$n_reboot" -eq 1 ]; } || rc=1
+assert "$rc" "genau ein Wochenlauf und genau ein Nachholer (w=$n_weekly, r=$n_reboot)"
 
 # 'rm' waere in einer Cron-Zeile ein anderer Vorgang als 'truncate': eine
 # geloeschte Datei nimmt der noch laufende Cron-Job nicht wieder auf.
