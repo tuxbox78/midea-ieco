@@ -65,6 +65,14 @@ Contents:
   per-line cron language check, the notice about a managed cron job that is no
   longer active — including the quote-aware tokenizer behind it — and the i18n
   catalog check in both directions).
+  Since the `@reboot` catch-up line exists, both cron scanners are also pinned
+  against confusing it with the weekly refresh, in *opposite* directions: the
+  language notice must offer the catch-up line rather than the weekly one for
+  correction, and the inactive-job notice must still report a deleted weekly line
+  even when a catch-up line is present. It further asserts *how many* managed lines
+  reach `crontab -` — four, and exactly one weekly and one `@reboot` among them.
+  That count is the assertion that was missing before: the fourth line was added
+  and the whole suite stayed green without a single assertion seeing it.
   It also runs the **real installer end-to-end** in a fully stubbed sandbox —
   `--update`, and onboarding with and without discovered devices, with an empty
   crontab and with foreign jobs already in it — and asserts what actually reaches

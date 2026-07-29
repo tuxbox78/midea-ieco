@@ -265,7 +265,7 @@ Beide Wächter werden gebraucht. `@reboot` bedeutet „der cron-Daemon wurde ges
 
 Jeder `--all`-Lauf hält diese Datei aktuell, auch der wöchentliche und der, den der Installer bei der Einrichtung ausführt — auf einer laufenden Installation findet der Nachholer daher nichts zu tun und bleibt still.
 
-> **Wird nicht automatisch eingetragen.** Der Installer schreibt diese Zeile noch nicht; wer sie möchte, ergänzt sie von Hand. `--only-if-due` setzt `--all` voraus — zusammen mit `--name` endet es mit einem Nutzungsfehler, denn der gespeicherte Zustand ist eine Aussage über alle Geräte, nicht über ein einzelnes.
+> **Bei einer Neuinstallation trägt der Installer diese Zeile mit ein** — er bietet alle vier Zeilen gemeinsam an. Eine Installation, die den Marker `# midea-ieco-managed` bereits trägt, bleibt grundsätzlich unangetastet; eine *bestehende* Einrichtung bekommt die Zeile also nicht automatisch, sondern ergänzt sie von Hand aus dem Block oben. `--only-if-due` setzt `--all` voraus — zusammen mit `--name` endet es mit einem Nutzungsfehler, denn der gespeicherte Zustand ist eine Aussage über alle Geräte, nicht über ein einzelnes.
 
 ### Was der Installer zu einer bestehenden Crontab sagt
 
@@ -277,7 +277,7 @@ etwas** — sie zeigen nur Zeilen zum Übernehmen an.
 Das ist eine Aussage über die Hinweise, nicht über den Installer insgesamt. Trägt
 deine Crontab den Marker `# midea-ieco-managed`, wird gar nichts hineingeschrieben.
 Trägt sie ihn **nicht** und du beantwortest die Cron-Frage mit *ja*, hängt der
-Installer seine drei Zeilen an das an, was schon darin steht. Er hängt an, statt zu
+Installer seine vier Zeilen an das an, was schon darin steht. Er hängt an, statt zu
 ersetzen, und er schreibt nichts, wenn zweimaliges Lesen der Crontab
 Unterschiedliches ergab — aber er schreibt. Für eine Crontab, an der dir liegt,
 lohnt vorher ein `crontab -l > crontab.backup`.
@@ -294,14 +294,16 @@ lohnt vorher ein `crontab -l > crontab.backup`.
   Wrapper-Skript, eine Shell-Variable, eine Kommandosubstitution). Beide lassen sie
   einen Job melden, der in Wahrheit läuft — prüfe deshalb vor dem Übernehmen
   `crontab -l`: eine zweite Zeile bedeutet zwei Verbindungen alle 20 Minuten auf
-  eine Anlage, die nur eine verträgt.
+  eine Anlage, die nur eine verträgt. Die `@reboot`-Nachhol-Zeile zählt bewusst
+  **nicht** zu den erwarteten Jobs: sie ist ein Zusatz und kein Ersatz, und sie
+  einzufordern hieße, jeder älteren Installation einen fehlenden Job zu melden.
 - **„Das Lesen der aktuellen Crontab lieferte zweimal hintereinander
   Unterschiedliches"** — erscheint nur, wenn du die Cron-Frage mit *ja*
   beantwortest, und die stellt der oben beschriebene schlichte erneute Aufruf nie:
   er endet vorher. Zu sehen bekommst du diesen Hinweis bei der Ersteinrichtung
   oder mit `--reconfigure`. `crontab -l` meldet „es gibt keine Crontab" und „ich
   konnte sie nicht lesen" auf genau dieselbe Weise; hielte man den zweiten Fall
-  für den ersten, würde deine Crontab durch unsere drei Zeilen ersetzt. Der
+  für den ersten, würde deine Crontab durch unsere vier Zeilen ersetzt. Der
   Installer liest sie deshalb zweimal und schreibt bei abweichendem Ergebnis
   nichts, sondern bittet dich, die Zeilen von Hand zu ergänzen.
 - **„Deine bestehenden Cron-Jobs setzen `MIDEA_IECO_LANG` nicht"** — die Jobs stammen

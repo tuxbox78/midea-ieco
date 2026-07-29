@@ -264,7 +264,7 @@ Both guards are needed. `@reboot` means "the cron daemon started", not "the syst
 
 Every `--all` run keeps that file up to date, including the weekly one and the one the installer performs during setup — so on a working installation the catch-up finds nothing to do and stays quiet.
 
-> **Not written automatically.** The installer does not add this line yet; add it by hand if you want it. `--only-if-due` requires `--all` — combined with `--name` it exits with a usage error, because the recorded state is a statement about all devices, not about a single one.
+> **On a new installation the installer writes this line for you** — it offers all four lines together. An installation that already carries the `# midea-ieco-managed` marker is left untouched on principle, so an *existing* setup does not get the line automatically; add it by hand from the block above. `--only-if-due` requires `--all` — combined with `--name` it exits with a usage error, because the recorded state is a statement about all devices, not about a single one.
 
 ### What the installer says about an existing crontab
 
@@ -276,7 +276,7 @@ lines for you to copy.
 That is a statement about the notices, not about the installer as a whole. If your
 crontab already carries the `# midea-ieco-managed` marker, nothing is written to it
 at all. If it does **not** carry the marker and you answer *yes* to the cron
-question, the installer appends its three lines to whatever your crontab already
+question, the installer appends its four lines to whatever your crontab already
 contains. It appends rather than replaces, and it refuses to write when reading the
 crontab twice gave different results — but it does write. A crontab you care about
 is worth a `crontab -l > crontab.backup` beforehand.
@@ -292,13 +292,15 @@ is worth a `crontab -l > crontab.backup` beforehand.
   know (a personal wrapper, a shell variable, a command substitution). Both make it
   report a job that is in fact running, so check `crontab -l` before pasting —
   adding a second line means two connections every 20 minutes to a unit that
-  tolerates one.
+  tolerates one. The `@reboot` catch-up line is deliberately **not** counted among
+  the expected jobs: it is an addition rather than a replacement, and demanding it
+  would report a missing job to every installation that predates it.
 - **"reading the current crontab returned different results twice in a row"** — this
   appears only if you answer *yes* to the cron question, which the plain re-run
   described above never gets to ask: it stops before that point. You will see this
   one during first-time setup, or with `--reconfigure`. `crontab -l` reports "there
   is no crontab" and "I could not read it" in exactly the same way, and mistaking the
-  second for the first would mean replacing your crontab with our three lines. The
+  second for the first would mean replacing your crontab with our four lines. The
   installer therefore reads it twice and, if the two results disagree, writes nothing
   and asks you to add the lines by hand.
 - **"your existing cron jobs do not set `MIDEA_IECO_LANG`"** — the jobs predate the

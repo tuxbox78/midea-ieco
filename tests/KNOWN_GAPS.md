@@ -455,16 +455,18 @@ that line then counts as missing, which is advice to add a second one.
 
 The threshold sits far above anything this installer can produce.
 `shell_quote_for_cron` expands each `'` to `'\''` and each `%` to `\%`, and the
-quoted path appears twice per line, so a line measures `136 + 2*L + 6*q + 2*p`
+quoted path appears twice per line, so a line measures `153 + 2*L + 6*q + 2*p`
 characters (L = path length, q = apostrophes, p = percent signs). At the Linux
-`PATH_MAX` of 4096 with nothing but apostrophes that is 32904 — measured 32880 for
+`PATH_MAX` of 4096 with nothing but apostrophes that is 32921 — measured 32897 for
 4093 of them. A hand-written line long enough to be skipped is possible; one this
 installer wrote is not.
 
-That formula describes the **iECO** line, which is the longest of the three; the
-refresh line starts from 128 and the logrotate line from 71. Using the longest is
-what makes it an upper bound, but the constant is not a property of "a managed
-line" in general.
+That formula describes the **`@reboot` catch-up** line, which is the longest of the
+four since it was added; the iECO line starts from 136 (measured 32880 at the same
+path, which is the figure earlier versions of this file quoted), the weekly refresh
+line from 128 and the logrotate line from 71. Using the longest is what makes it an
+upper bound, but the constant is not a property of "a managed line" in general —
+and it moves whenever a managed line is added or reworded, as it just did.
 
 Two further things are true of the guard and are easier to write down than to
 rediscover:
@@ -666,6 +668,15 @@ listed it as equivalent, and that no longer holds.
 
 ## Deliberately not covered
 
+- **The `@reboot` catch-up line is not an expected job, and its absence is never
+  reported.** `cron_scan_tools` skips any managed line carrying `--only-if-due` as a
+  whole token, so it counts towards neither of the two jobs the inactive-job notice
+  demands. That is a decision, not an oversight: every installation made before this
+  line existed lacks it, and treating it as expected would greet the entire installed
+  base with "at least one job is not active" on the next re-run — for a job they never
+  had. *Cost:* someone who deletes the catch-up line is not told. *Why that is the
+  right way round:* losing it costs a missed weekly refresh being caught up late; the
+  weekly line itself still runs, and its absence **is** reported.
 - **Two refresh runs that start in the same instant can still both reach the
   devices.** The catch-up guard (`--only-if-due`) writes `last_attempt` *before* the
   device loop precisely so that a second run started afterwards backs off — but two
@@ -783,6 +794,14 @@ listed it as equivalent, and that no longer holds.
 ## Corrections to earlier versions of this file
 
 Recorded so the same wrong statements do not get re-derived from the history:
+
+- **Gap 10's length formula named the iECO line as the longest managed line.** True
+  while there were three of them. The `@reboot` catch-up line is 17 characters longer
+  at the same path — its grace period and the `--only-if-due` flag — so the constant
+  moved from 136 to 153 and the worst case from a measured 32880 to 32897. The same
+  claim sat in `install.sh`'s guard comment and was corrected there too. The guard's
+  threshold and its conclusion are untouched: 65536, with 32639 characters of
+  headroom, measured rather than computed.
 
 - **Gap 8 described a whitespace split.** It did, accurately, until the tokenizer
   replaced it. The rewrite above is not a correction of a wrong statement but of a

@@ -49,8 +49,35 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `--all` and exits 1 with `--name`, because the recorded state is a statement
   about the whole fleet.
 
-  Not written by the installer yet — both READMEs document the line for manual
-  addition; wiring it into `install.sh` is a separate step.
+- **`install.sh` offers the catch-up line as a fourth managed cron line.** A new
+  installation gets it together with the other three; an installation that already
+  carries the `# midea-ieco-managed` marker is left untouched as before, so an
+  existing setup adds the line by hand from the block the installer prints.
+
+  Adding a line that calls `midea_refresh_tokens.py` a second time required both
+  crontab scanners to learn the difference, and in opposite directions:
+
+  * the **language notice** would have shown the *weekly* line as the correction
+    for a catch-up line that lacks `MIDEA_IECO_LANG` — and following that advice
+    would replace the catch-up with a second weekly run. It now distinguishes the
+    two by the `--only-if-due` flag (matched with surrounding whitespace, so a path
+    that happens to contain the string cannot reclassify the weekly line);
+  * the **inactive-job notice** would have counted the catch-up line as the weekly
+    refresh and then stayed silent about a weekly line that had been deleted —
+    exactly the silent non-execution that notice exists to report. `cron_scan_tools`
+    now collects its findings per line and discards them for a line carrying
+    `--only-if-due` as a whole token.
+
+  The catch-up line is deliberately **not** treated as an expected job: demanding it
+  would report a missing job to every installation that predates it
+  (`tests/KNOWN_GAPS.md`).
+
+  Verified: 11 new assertions in `tests/test_install.sh` (267 → 278) and seven
+  mutations of this logic — including "write the line twice" and "write it not at
+  all" — confirmed to turn the suite red. One of those assertions closes a gap that
+  had nothing to do with this change: nothing pinned *how many* managed lines the
+  installer writes, so the fourth line initially slipped in without a single
+  assertion noticing.
 
 ### Fixed
 - **A lost capability roundtrip was reported as "this unit cannot do iECO".**
