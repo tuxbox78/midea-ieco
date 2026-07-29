@@ -2943,6 +2943,89 @@ class RefreshIsDueTests(unittest.TestCase):
                         mrt.REFRESH_DUE_AFTER_SECONDS)
 
 
+class RefreshStateWriteTests(_StateAndConfigMixin):
+    """Fortschreiben des Zustands: Rechte, Atomaritaet - und vor allem, dass
+    ein Vermerk den anderen nicht loescht."""
+
+    NOW = 1_800_000_000.0
+
+    def test_an_attempt_creates_the_file_with_0600(self):
+        mrt.record_refresh_attempt({}, self.NOW)
+        self.assertTrue(self.state_path.exists())
+        self.assertEqual(self.state_path.stat().st_mode & 0o777, 0o600)
+
+    def test_no_temp_file_is_left_behind(self):
+        mrt.record_refresh_attempt({}, self.NOW)
+        leftovers = [p.name for p in self.state_path.parent.iterdir()
+                     if p.name.endswith(".tmp")]
+        self.assertEqual(leftovers, [])
+
+    def test_both_fields_are_written_and_readable(self):
+        mrt.record_refresh_attempt({}, self.NOW)
+        data = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(data["last_attempt_epoch"], int(self.NOW))
+        self.assertTrue(data["last_attempt_utc"].endswith("Z"))
+        # Die Epoche ist die Entscheidungsgroesse und muss eine Zahl bleiben.
+        self.assertIsInstance(data["last_attempt_epoch"], int)
+
+    def test_an_attempt_preserves_an_existing_success(self):
+        # Der teuerste Fehler dieser Mechanik: baute record_refresh_attempt ein
+        # NEUES Dict, verschwaende jeder Lauf den Erfolgsvermerk - der Nachholer
+        # hielte sich dauerhaft fuer faellig und liefe alle 24 h gegen die
+        # Geraete, ohne dass irgendetwas sichtbar kaputt waere.
+        state = {"last_success_epoch": 111, "last_success_utc": "2026-01-01T00:00:00Z"}
+        mrt.record_refresh_attempt(state, self.NOW)
+        data = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(data["last_success_epoch"], 111)
+        self.assertEqual(data["last_success_utc"], "2026-01-01T00:00:00Z")
+        self.assertEqual(data["last_attempt_epoch"], int(self.NOW))
+
+    def test_a_success_preserves_the_attempt_of_the_same_run(self):
+        state = {}
+        mrt.record_refresh_attempt(state, self.NOW)
+        mrt.record_refresh_success(state, self.NOW + 5)
+        data = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(data["last_attempt_epoch"], int(self.NOW))
+        self.assertEqual(data["last_success_epoch"], int(self.NOW) + 5)
+        # Reihenfolge: der Versuch liegt nie NACH dem Erfolg desselben Laufs.
+        self.assertLessEqual(data["last_attempt_epoch"], data["last_success_epoch"])
+
+    def test_an_absurd_clock_still_writes_a_usable_epoch(self):
+        # datetime.fromtimestamp wirft bei voellig unsinniger Systemzeit. Die
+        # ENTSCHEIDUNG haengt an der Epoche - sie muss trotzdem entstehen, und
+        # der Lauf darf daran nicht scheitern.
+        state = {}
+        mrt.record_refresh_attempt(state, 1e30)
+        data = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(data["last_attempt_epoch"], int(1e30))
+        self.assertEqual(data["last_attempt_utc"], "")
+        # ... und die leere Zeichenkette wird als "nie" gelesen, nicht als Datum.
+        self.assertEqual(mrt._state_stamp_text(data, "last_attempt_utc"),
+                         mrt.t("state_never"))
+
+    def test_a_write_failure_is_reported_but_never_raised(self):
+        # Bewusst per Patch statt per chmod: laeuft die Suite als root (in
+        # Containern der Normalfall), ignoriert das Dateisystem die Modusbits
+        # und der Test prueft nichts mehr.
+        def boom(path, data):
+            raise OSError(28, "No space left on device")
+
+        with mock.patch.object(mrt, "_atomic_write_json", boom), \
+                redirect_stderr(io.StringIO()) as err:
+            mrt.record_refresh_success({}, self.NOW)   # darf NICHT werfen
+        self.assertIn(_longest_literal(mrt._MESSAGES["state_write_failed"][0]),
+                      err.getvalue())
+
+    def test_a_programming_error_is_not_swallowed(self):
+        # Gegenprobe zum Test darueber: gefangen wird NUR OSError. Ein nicht
+        # serialisierbarer Wert waere ein Fehler in diesem Modul und soll laut
+        # scheitern, statt sich als Warnung zu tarnen.
+        with mock.patch.object(mrt, "_atomic_write_json",
+                               mock.Mock(side_effect=TypeError("not serializable"))):
+            with self.assertRaises(TypeError):
+                mrt.record_refresh_success({}, self.NOW)
+
+
 class StatePathAnchorTests(unittest.TestCase):
     """refresh_state.json haengt am MODULVERZEICHNIS, nicht am cwd - dieselbe
     Begruendung wie bei devices.json: Cron und Wrapper starten mit beliebigem

@@ -53,6 +53,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Verbindungsabbau: msmart-ng hat dafuer keine oeffentliche API - die Begruendung
@@ -353,6 +354,15 @@ _MESSAGES: dict[str, tuple[str, str]] = {
         "the token refresh as due.",
         "WARNUNG: refresh_state.json enthaelt kein JSON-Objekt - der "
         "Token-Refresh gilt daher als faellig."),
+    "state_write_failed": (
+        "WARNING: refresh_state.json could not be written (%s: %s). The refresh "
+        "itself is unaffected; only the catch-up run loses its record of it.",
+        "WARNUNG: refresh_state.json konnte nicht geschrieben werden (%s: %s). "
+        "Der Refresh selbst ist davon unberuehrt; nur dem Nachhol-Lauf fehlt "
+        "spaeter der Vermerk darueber."),
+    "state_never": (
+        "never",
+        "nie"),
     # --- Fehler des discover-Unterprozesses -------------------------------
     # Diese Texte werden als RuntimeError geworfen UND ueber "dev_fetch_failed"
     # an den Nutzer ausgegeben - sie muessen daher genauso uebersetzt sein wie
@@ -604,6 +614,82 @@ def refresh_is_due(now: float, state: dict) -> bool:
     if attempt_age is not None and attempt_age < REFRESH_RETRY_AFTER_SECONDS:
         return False
     return True
+
+
+def _stamp(state: dict, prefix: str, now: float) -> None:
+    """Setzt ``<prefix>_epoch`` und ``<prefix>_utc`` auf ``now``.
+
+    Zwei Felder mit Absicht: entschieden wird ueber die Epoche (eine Zahl, ohne
+    Zeitzonen- und Parser-Randfaelle), die UTC-Zeichenkette steht rein zum
+    Mitlesen daneben - im Log und bei einer Fehlersuche.
+
+    Die Zeichenkette wird defensiv gebildet: bei einer voellig unsinnigen
+    Systemzeit wirft datetime.fromtimestamp (OverflowError/OSError/ValueError).
+    Dann bleibt das Feld leer und wird als "nie" angezeigt - die ENTSCHEIDUNG
+    haengt an der Epoche und bleibt davon unberuehrt. Ein Refresh darf nicht an
+    der Formatierung seines eigenen Protokolls scheitern."""
+    state[f"{prefix}_epoch"] = int(now)
+    try:
+        state[f"{prefix}_utc"] = datetime.fromtimestamp(
+            now, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (OverflowError, OSError, ValueError):
+        state[f"{prefix}_utc"] = ""
+
+
+def _write_refresh_state(state: dict) -> None:
+    """Schreibt den Zustand atomar und mit Rechten 0600 (_atomic_write_json).
+
+    Ein Schreibfehler wird GEMELDET, aber nicht weitergereicht: diese Datei ist
+    Buchhaltung. Ein gelungener Token-Refresh darf nicht daran scheitern, dass
+    sein Vermerk nicht abgelegt werden konnte - der Exit-Code des Laufs bleibt
+    exakt der, den er ohne dieses Feature haette. Gefangen wird NUR OSError;
+    alles andere (etwa ein nicht serialisierbarer Wert) waere ein Fehler in
+    diesem Modul und soll in den Tests laut scheitern statt zu verschwinden."""
+    try:
+        _atomic_write_json(STATE_PATH, state)
+    except OSError as exc:
+        print(t("state_write_failed", type(exc).__name__, exc), file=sys.stderr)
+
+
+def record_refresh_attempt(state: dict, now: float) -> None:
+    """Haelt fest, dass JETZT ein vollstaendiger Lauf BEGINNT.
+
+    Bewusst VOR der Geraeteschleife aufgerufen, nicht danach: ein Lauf, der
+    unterwegs scheitert (kein Netz kurz nach dem Booten, ein dauerhaft
+    unerreichbares Geraet), hinterliesse sonst nichts - und der Sturmwaechter
+    haette bei jedem Neustart wieder freie Bahn. Genau dieser Fall ist der
+    Grund, dass es neben last_success ueberhaupt ein last_attempt gibt.
+
+    ``state`` wird ERGAENZT, nie ersetzt: ein hier neu gebautes Dict wuerde ein
+    vorhandenes last_success ueberschreiben - der Nachhol-Lauf hielte sich dann
+    dauerhaft fuer faellig und liefe alle REFRESH_RETRY_AFTER_SECONDS."""
+    _stamp(state, "last_attempt", now)
+    _write_refresh_state(state)
+
+
+def record_refresh_success(state: dict, now: float) -> None:
+    """Haelt fest, dass gerade ein vollstaendiger Lauf GELUNGEN ist.
+
+    "Vollstaendig" heisst: alle Zielgeraete erfolgreich UND devices.json
+    geschrieben. Ein Teilerfolg schreibt hier bewusst nichts - er belegt nicht,
+    dass die Flotte frische Tokens hat, und duerfte den naechsten Nachholer
+    daher nicht unterdruecken.
+
+    Arbeitet auf demselben Dict wie record_refresh_attempt, ohne die Datei
+    erneut zu lesen, damit ein Lauf sich nicht selbst ueberholt. Folge fuer zwei
+    gleichzeitig laufende Prozesse: der spaetere Schreiber gewinnt. Das ist
+    hinnehmbar - beide haben dann tatsaechlich gerade aufgefrischt."""
+    _stamp(state, "last_success", now)
+    _write_refresh_state(state)
+
+
+def _state_stamp_text(state: dict, key: str) -> str:
+    """Lesbare Fassung eines Zeitstempels fuer die Ausgabe, "nie" wenn keine
+    brauchbare vorliegt. Rein informativ - entschieden wird ueber die Epoche."""
+    value = state.get(key)
+    if isinstance(value, str) and value.strip():
+        return value
+    return t("state_never")
 
 
 def _run_discover(host: str) -> subprocess.CompletedProcess:
