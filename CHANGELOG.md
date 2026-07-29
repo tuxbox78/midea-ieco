@@ -41,13 +41,14 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Details of the state file: timestamps only, no secrets, yet written `chmod 600`
   through the same atomic path as `devices.json`; a failure to write it is reported
   and never changes the exit code of the refresh itself; anything missing,
-  unreadable or implausible in it counts as "due", so a broken state can never
-  silently *suppress* a refresh. A timestamp in the future — a machine without an
-  RTC, whose clock is only right after NTP — is resolved in opposite directions on
-  purpose: the success field then counts as unusable (refresh) and the attempt
-  field as "just now" (wait), both in favour of the units. `--only-if-due` requires
-  `--all` and exits 1 with `--name`, because the recorded state is a statement
-  about the whole fleet.
+  unreadable or implausible in it counts as "due". A timestamp in the future — a
+  machine without an RTC, whose clock is only right after NTP — is resolved in
+  opposite directions per field: the success field counts as unusable (refresh),
+  and the attempt field blocks only within a symmetric window (up to one retry
+  interval ahead, a clock nudged back after a real run) but not beyond it (an
+  implausibly far-future stamp, which must not silence the catch-up on the very
+  host it is for). `--only-if-due` requires `--all` and exits 1 with `--name`,
+  because the recorded state is a statement about the whole fleet.
 
 - **`install.sh` offers the catch-up line as a fourth managed cron line.** A new
   installation gets it together with the other three; an installation that already
@@ -59,14 +60,19 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   * the **language notice** would have shown the *weekly* line as the correction
     for a catch-up line that lacks `MIDEA_IECO_LANG` — and following that advice
-    would replace the catch-up with a second weekly run. It now distinguishes the
-    two by the `--only-if-due` flag (matched with surrounding whitespace, so a path
-    that happens to contain the string cannot reclassify the weekly line);
+    would replace the catch-up with a second weekly run;
   * the **inactive-job notice** would have counted the catch-up line as the weekly
     refresh and then stayed silent about a weekly line that had been deleted —
-    exactly the silent non-execution that notice exists to report. `cron_scan_tools`
-    now collects its findings per line and discards them for a line carrying
-    `--only-if-due` as a whole token.
+    exactly the silent non-execution that notice exists to report.
+
+  Both now defer to one shared detector, `_cron_line_is_catchup`, which tokenizes
+  the line (quote- and redirect-aware, skipping the cd operand) and matches a
+  command token that is exactly `--only-if-due`. Matching a token rather than a
+  substring is what makes it correct in both directions: a flag written as
+  `--only-if-due>>log` or `"--only-if-due"` is still recognised, while a path such
+  as `/opt/x --only-if-due y` or a token whose basename is `--only-if-due` is not.
+  The inactive-job notice suppresses only the refresh half of a catch-up line, so a
+  line that also runs iECO keeps counting for it.
 
   The catch-up line is deliberately **not** treated as an expected job: demanding it
   would report a missing job to every installation that predates it
@@ -80,6 +86,28 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   assertion noticing.
 
 ### Fixed
+- **A fresh-eyes review of the still-unreleased catch-up hardened it before
+  release.** Four things it turned up, all fixed here:
+  - the **test suite wrote a real `refresh_state.json` into the module directory**.
+    Since an `--all` run stamps that file, every test calling `main()` with `--all`
+    went through a mixin that pinned `CONFIG_PATH` but not `STATE_PATH`. On a
+    git-based install the module directory is the repo, so `bash tests/run_all.sh`
+    there recorded a full refresh for "now" and would have suppressed the next due
+    catch-up — the very silent non-execution the feature prevents. The mixin now
+    pins both, and a module-level guard fails the run if any test touches the real
+    file;
+  - **an oversized integer stamp crashed the decision.** `math.isfinite` converts
+    to float first, and `json.load` reads arbitrarily long integer literals, so a
+    400-digit stamp raised `OverflowError` on the `--only-if-due` path — at every
+    start. Such a value is now treated as unusable (i.e. "due"), the safe direction;
+  - **both crontab scanners could misjudge the catch-up line** (see the unified
+    detector under *Added*), one of them in the direction that advises adding a
+    second running line;
+  - **a far-future attempt stamp blocked the catch-up indefinitely.** On a machine
+    without an RTC, whose clock reads a past date at boot, a stamp written earlier
+    with the correct time sits in the future and silenced the catch-up on every
+    boot. The block is now bounded to a symmetric window, so an implausibly
+    far-future stamp lets the run proceed instead.
 - **A lost capability roundtrip was reported as "this unit cannot do iECO".**
   `get_capabilities()` does not raise when the unit stays quiet — it logs
   `Failed to query capabilities` and returns (`msmart/device/AC/device.py:602-611`).
@@ -195,7 +223,7 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   job that is already running; and the length guard's entry notes that `${#line}`
   counts characters under UTF-8 but bytes under `LC_ALL=C` (measured on the same
   65736-byte line, tokenized under one and skipped under the other), that its
-  formula describes the longest of the three managed lines, and that assertions
+  formula describes the longest of the four managed lines, and that assertions
   cover it only up to 8146 characters.
 
 ### Fixed

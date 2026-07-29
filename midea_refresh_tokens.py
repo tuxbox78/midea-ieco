@@ -1195,9 +1195,10 @@ def main() -> None:
     refresh_state = read_refresh_state() if args.all else {}
 
     # Der Ausstieg liegt VOR der msmart-Pruefung und vor load_config(): ein
-    # nicht faelliger Lauf soll ueberhaupt nichts tun - kein Import, kein
-    # Dateizugriff, kein Netzkontakt. Exit 0, damit cron ihn nicht als Fehler
-    # meldet; er ist ja das erwartete Ergebnis.
+    # nicht faelliger Lauf soll so wenig wie moeglich tun - kein msmart-Import,
+    # kein Lesen von devices.json, kein Netzkontakt. refresh_state.json wurde
+    # oben bereits gelesen; ohne das gaebe es nichts zu entscheiden. Exit 0,
+    # damit cron ihn nicht als Fehler meldet; er ist ja das erwartete Ergebnis.
     if args.only_if_due and not refresh_is_due(time.time(), refresh_state):
         print(t("due_skipped",
                 _state_stamp_text(refresh_state, "last_success_utc"),

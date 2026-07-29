@@ -588,7 +588,7 @@ Die App bietet keine bedingte Logik wie „iECO nur aktivieren, wenn die Anlage 
 | `midea_conn.py` | Gibt die LAN-Verbindung eines Geräts frei. `msmart-ng` bietet dafür keine öffentliche API — der einzige Griff in dessen Interna ist hier gekapselt |
 | `devices.example.json` | Vorlage für `devices.json` — kopieren, dann eigene Geräte eintragen |
 | `devices.json` | Lokale Gerätekonfiguration (Name, IP, Port, ID, Token, Key). Lokal erzeugt, **git-ignoriert** |
-| `refresh_state.json` | Wann ein vollständiger Token-Refresh zuletzt begonnen hat und zuletzt gelungen ist. Von jedem `--all`-Lauf geschrieben, von `--only-if-due` gelesen. Nur Zeitstempel, keine Geheimnisse — trotzdem `chmod 600` wie der Nachbar. Lokal erzeugt, **git-ignoriert** |
+| `refresh_state.json` | Wann ein vollständiger Token-Refresh zuletzt begonnen hat und zuletzt gelungen ist. Von jedem `--all`-Lauf geschrieben, der die Geräteschleife erreicht (ein Lauf, der vorher abbricht — keine Geräte, unlesbare Konfiguration — lässt sie unangetastet), bei jedem `--all`-Lauf gelesen und von `--only-if-due` ausgewertet. Nur Zeitstempel, keine Geheimnisse — trotzdem `chmod 600` wie der Nachbar. Lokal erzeugt, **git-ignoriert** |
 
 ## Erkenntnisse aus der Entwicklung
 

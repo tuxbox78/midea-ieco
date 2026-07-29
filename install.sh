@@ -862,8 +862,11 @@ cron_scan_tools() {   # $1 = Crontab; Gate (Marker vorhanden?) liegt beim Aufruf
         # p = Prozentzeichen misst die LAENGSTE der vier verwalteten Zeilen
         # 153 + 2*L + 6*q + 2*p Zeichen. Das ist seit dieser Runde die
         # '@reboot'-Nachhol-Zeile; zuvor war es die iECO-Zeile mit dem
-        # Festanteil 136, und der Unterschied von 17 Zeichen sind ihre
-        # Kulanzfrist und das Flag '--only-if-due'.
+        # Festanteil 136. Die 17 Zeichen Unterschied zu ihr setzen sich zusammen
+        # aus '@reboot sleep 120 &&' statt '*/20 * * * *' (+8), dem laengeren
+        # Skriptnamen samt Flag (+6) und 'refresh.log' statt 'ieco.log' (+3).
+        # (Kulanzfrist und Flag allein waeren +25 - das ist der Abstand zur
+        # WOCHENzeile mit Festanteil 128, nicht zur iECO-Zeile.)
         # Den Ausschlag gibt der Apostroph (8 Zeichen je Zeichen gegen 4);
         # bei L an der Linux-Grenze PATH_MAX (4096) und lauter Apostrophen
         # sind das 32921 (gemessen 32897 fuer 4093 Apostrophe, gegenueber

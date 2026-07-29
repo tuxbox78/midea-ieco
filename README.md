@@ -589,7 +589,7 @@ The app does not provide conditional logic such as "enable iECO only if the unit
 | `midea_conn.py` | Releases a device's LAN connection. `msmart-ng` offers no public way to do this, so the one place that reaches into its internals is isolated here |
 | `devices.example.json` | Template for `devices.json` — copy it, then fill in your devices |
 | `devices.json` | Your local device config (name, IP, port, ID, token, key). Generated locally, **git-ignored** |
-| `refresh_state.json` | When a full token refresh was last started and last succeeded. Written by every `--all` run, read by `--only-if-due`. Timestamps only, no secrets — but `chmod 600` like its neighbour. Generated locally, **git-ignored** |
+| `refresh_state.json` | When a full token refresh was last started and last succeeded. Written by every `--all` run that reaches the device loop (a run that aborts first — no devices, unreadable config — leaves it untouched), read on every `--all` run and acted on by `--only-if-due`. Timestamps only, no secrets — but `chmod 600` like its neighbour. Generated locally, **git-ignored** |
 
 ## Development lessons learned
 

@@ -484,7 +484,7 @@ rediscover:
   tokenized, and a second one pins that a line past the threshold counts as
   missing. Between 8146 and 65535 the number can be moved without any assertion
   noticing — measured by setting it to 20000, which leaves the suite green. That
-  gap is deliberate: a fixture at the worst case above (32904) would cost a
+  gap is deliberate: a fixture at the worst case above (32921) would cost a
   multiple of the whole suite's runtime, because the split is quadratic. The
   mutation that removes the guard entirely already takes 98 s on the
   65627-character fixture under a UTF-8 locale.
@@ -681,8 +681,10 @@ listed it as equivalent, and that no longer holds.
   devices.** The catch-up guard (`--only-if-due`) writes `last_attempt` *before* the
   device loop precisely so that a second run started afterwards backs off — but two
   processes that get past the check before either has written it are not excluded.
-  Realistically this needs the `@reboot` line and the weekly line to fire at the
-  same second on a machine that boots at 03:00 on a Sunday. *Cost:* two local
+  Realistically this needs the `@reboot` line and the weekly line to overlap: with
+  the `sleep 120` grace period the catch-up decides around 03:02, so the window is a
+  machine whose cron daemon starts roughly two minutes before the slot (≈02:58 on a
+  Sunday), the weekly run then still inside its own device loop. *Cost:* two local
   connections to a unit that tolerates one, i.e. a temporarily quiet unit — the
   same class the delays elsewhere in the tool guard against, not data loss. *Why not
   closed:* the obvious fix is an `O_EXCL` lock file, and that trades this rare case
@@ -691,6 +693,25 @@ listed it as equivalent, and that no longer holds.
   whose failure mode is permanent silent non-execution is the wrong trade for a tool
   whose entire purpose is preventing silent non-execution. Written down instead of
   left to be rediscovered.
+- **A backward clock still costs one skipped catch-up per boot until it corrects.**
+  The future-attempt block is bounded (a stamp more than one retry interval ahead no
+  longer silences the catch-up forever — that was fixed), but a stamp *up to* a
+  retry interval ahead still blocks. On a machine whose clock reads a recent-past
+  date at boot and only corrects via NTP a few seconds later, a boot where the check
+  runs before NTP lands can skip that boot's catch-up. *Cost:* the catch-up is
+  missed on that boot, caught on the next one where the clock is right in time — not
+  permanent, and the weekly line remains the backstop on any host that is up for it.
+  *Why not closed:* distinguishing "clock briefly behind" from "genuine recent
+  attempt" needs a trusted time source the tool does not have at `@reboot`; the
+  bounded window is the honest compromise.
+- **`--only-if-due` with neither `--all` nor `--name` exits 2, not 1.** The explicit
+  check gives exit 1 for `--only-if-due --name X`; but dropping `--all` entirely
+  leaves argparse's own required-group error, which exits 2 — the code this tool uses
+  for "a device failed". A crontab typo that omits `--all` therefore reaches a
+  monitor as a device fault rather than a usage error. *Why not closed:* catching it
+  would mean giving up argparse's `required=True` group and validating the two flags
+  by hand, a larger change to the argument parsing than a mis-mapped exit code on a
+  hand-edit warrants. Recorded rather than fixed.
 
 - **A capability answer that arrives but cannot be decoded is still blamed on the
   unit.** `_send_commands_get_responses` sets `_online = len(responses) > 0` on the
@@ -797,7 +818,9 @@ Recorded so the same wrong statements do not get re-derived from the history:
 
 - **Gap 10's length formula named the iECO line as the longest managed line.** True
   while there were three of them. The `@reboot` catch-up line is 17 characters longer
-  at the same path — its grace period and the `--only-if-due` flag — so the constant
+  at the same path — `@reboot sleep 120 &&` for `*/20 * * * *` (+8), the longer script
+  name and flag (+6), and `refresh.log` for `ieco.log` (+3); grace period and flag
+  alone are the +25 gap to the *weekly* line, not to the iECO line — so the constant
   moved from 136 to 153 and the worst case from a measured 32880 to 32897. The same
   claim sat in `install.sh`'s guard comment and was corrected there too. The guard's
   threshold and its conclusion are untouched: 65536, with 32639 characters of
@@ -830,7 +853,7 @@ Recorded so the same wrong statements do not get re-derived from the history:
   now covered by patterns for both languages.
 - **"The installer never rewrites an existing crontab"** (both READMEs). True of
   the three notices, which only print; false of the installer, whose write branch
-  appends three lines when the marker is absent. See gap 9.
+  appends four lines when the marker is absent. See gap 9.
 - **"51 pip calls"** (`tests/README.md`, `CHANGELOG.md`). Measured today: 55. The
   `onbwackel` sandbox added in `33aef36` contributes four.
 

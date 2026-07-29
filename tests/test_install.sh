@@ -2087,7 +2087,7 @@ assert_missing "*/20 * * * * cd /opt</x/midea-ieco all $CRON_MARKER
 # 1 s mehr als die kuerzere Vorform (beides gemessen; der Split kostet
 # quadratisch mit der Zeilenlaenge, unter LC_ALL=C rund ein Viertel davon).
 # Sie sichert die Schranke damit im Bereich bis 8146; darueber bis 65535 bleibt
-# sie ungeprueft - eine Zusicherung am Worst Case (32904 Zeichen, siehe
+# sie ungeprueft - eine Zusicherung am Worst Case (32921 Zeichen, siehe
 # KNOWN_GAPS Luecke 10) kostete ein Vielfaches und waere den Lauf nicht wert.
 sc_long="$(printf 'a%.0s' $(seq 1 4000))"
 sc_lq="'/opt/$sc_long'"
