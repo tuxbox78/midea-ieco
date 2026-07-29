@@ -6,6 +6,90 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **A lost capability roundtrip was reported as "this unit cannot do iECO".**
+  `get_capabilities()` does not raise when the unit stays quiet — it logs
+  `Failed to query capabilities` and returns (`msmart/device/AC/device.py:602-611`).
+  Because `Capability.DEFAULT` carries no `IECO`, a fresh `AC` object then reports
+  `supports_ieco == False`, which is indistinguishable from a genuine "no". The
+  `refresh()` that follows reconnects and re-authenticates transparently
+  (`msmart/lan.py:589-599`) and resets `online` to `True`, so nothing was left to
+  show the exchange had failed: msmart-ng heals the connection exactly one step
+  *after* the verdict was formed. A running, healthy unit in COOL was therefore
+  told it cannot do iECO, with exit 2 in the 20-minute cron.
+
+  `ensure_ieco` now captures `device.online` **between** `get_capabilities()` and
+  `refresh()` and only blames the unit when that query was answered; otherwise it
+  reports that the query produced no usable answer and calls the iECO support
+  unknown. The wording is deliberately not "the unit did not answer": the query can
+  span two blocks, and if only the second is lost the unit *did* answer — the result
+  is unusable either way, and the message may only claim what holds in both cases.
+  The status line is suppressed in exactly that branch — it used to print
+  `ieco=False` one line above the wrong error, a value the unit had never sent — but
+  is kept everywhere else, including for a unit that genuinely reports no iECO:
+  there `power`, `mode` and `eco` are measured values worth having. Exit codes are
+  unchanged: a run that could not do its job still ends with exit 2.
+
+  The obvious fix — checking `online` right after `get_capabilities()` — was
+  measured and rejected: it turns a healthy run into a failure whenever only the
+  optional *additional* capabilities request is lost, although the needed answer had
+  already arrived in the first block.
+
+- **The same cause made the verification claim iECO had not been applied.** The
+  verification reconnect queried capabilities a second time; if *that* exchange was
+  lost, `refresh()` never polled the IECO property and the run reported
+  `iECO is still disabled` — about a setting the unit had just accepted. The
+  `online` guard could not see it, because the subsequent `refresh()` had answered.
+
+  The verification no longer asks a second time. It carries the capability the unit
+  already reported in this run into the fresh object via msmart-ng's own
+  `override_capabilities({"additional_capabilities": ["IECO"]}, merge=True)`, which
+  triggers `_update_supported_properties()` and arms the same property poll. The
+  failure mode disappears structurally instead of being detected, and a healthy run
+  drops from 15 to 11 roundtrips — measured end-to-end against the real msmart-ng
+  2026.7.0 — which matters on a unit that tolerates exactly one local connection.
+  `prime_ieco_property()` verifies its own *effect* rather than its call, and a
+  dedicated guard reports an unclear verification instead of falling back into the
+  old false claim. The carry-over is legitimate only downstream of the guard that
+  established support in the same run; the initial read still asks the unit.
+
+  What remains uncovered is recorded in `tests/KNOWN_GAPS.md`: a verification that
+  answers the state query but loses only the property read.
+
+  With the verification switched over, `connect_and_refresh`'s `with_capabilities`
+  parameter lost its last caller and was removed rather than left behind — an
+  unreachable branch that a test keeps green is the exact pattern this project has
+  already paid for twice. The msmart fact it asserted (capabilities must precede
+  `refresh()`) is still pinned, by `test_already_on_and_ieco_short_circuits`, at the
+  one place that behaviour now lives: the initial read in `ensure_ieco`. Verified by
+  mutating the order there and watching that test turn red.
+
+### Tests
+- The device fakes modelled a capability failure as an **exception**, which
+  msmart-ng never raises on packet loss — richer than reality, the same inversion as
+  the invented `close()`. `FakeDevice` gained `caps_lost` (no throw, `online` false,
+  capability unset) and, just as important, now reproduces the *healing* half:
+  `refresh()` recomputes `online` from its own batch, exactly as
+  `_send_commands_get_responses` does. Without that second half the fake was
+  **poorer** than reality in the one dimension the fix argues about, and
+  `caps_answered` could be moved one line down — reintroducing the false statement
+  against the real library — with all tests still green. Measured, then closed.
+- `_RecordingAC` started life with `supports_ieco = True`, where a fresh
+  `AirConditioner` reports `False`. Harmless until this change made that attribute
+  the evidence `prime_ieco_property` reads; a mutation that skipped the carry-over
+  for every real device passed unnoticed. Now `False`, as reality has it.
+- Sixteen mutations are measured before and after, split into *value* and
+  **position** mutations — the earlier round only varied values, which is why the
+  placement of `caps_answered`, the per-attempt carry-over, an escalation at the call
+  site and a locally copied `PINNED_MSMART_VERSION` all survived it. Each now has a
+  test that fails on it. `tests/test_conn.py` additionally pins four capability
+  contracts against the **real** library in the `install-smoke` job, including the
+  premise of the whole bug: that `Capability.DEFAULT` does not contain `IECO`.
+- Two residuals of the same class that this change does *not* close — a capability
+  answer that arrives but cannot be decoded, and the mirror of the batch gap that
+  fabricates the status line of a *successful* verification — are written up in
+  `tests/KNOWN_GAPS.md` rather than left to be rediscovered.
+
 ### Documentation
 - **Five statements in the documentation claimed more than what was measured.**
   Each was checked against the code or a run before being rewritten, and each

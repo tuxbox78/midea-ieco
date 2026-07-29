@@ -666,6 +666,45 @@ listed it as equivalent, and that no longer holds.
 
 ## Deliberately not covered
 
+- **A capability answer that arrives but cannot be decoded is still blamed on the
+  unit.** `_send_commands_get_responses` sets `_online = len(responses) > 0` on the
+  **raw** byte list, *before* `Response.construct` validates and discards anything
+  malformed. A reply that fails the payload CRC, or that is a valid frame of the
+  wrong response type, therefore leaves `online == True` while no capability was
+  learned — and `ensure_ieco`'s `caps_answered` guard, which reads exactly that
+  `online`, lets it through to `Device reports no iECO capability`. Measured against
+  the real msmart-ng 2026.7.0; **identical before and after** the carry-over change,
+  so it is a residual of the same class, not a regression. Closing it would mean
+  reaching past `online` into msmart's discarded response objects, for which there is
+  no public API. The packet-loss case it neighbours — no answer at all — *is* covered
+  and is by far the more common one; a garbled reply implies a unit that answered on
+  a healthy connection with an unparseable payload.
+- **A verification round that answers the state query but loses only the property
+  read** still produces `iECO is still disabled`, which is a statement the unit did
+  not make. It survives both guards by construction: `msmart-ng` sets `_online` once
+  per *command batch* (`_send_commands_get_responses`), and `refresh()` sends
+  `GetStateCommand` and `GetPropertiesCommand` in one batch — so one answer out of
+  two leaves `online == True` while `device.ieco` keeps the fresh object's default
+  `False`. The library discards the response object, so there is no public way to
+  ask "was the IECO property reported?". Measured against the real msmart-ng
+  2026.7.0 with a scripted transport; the neighbouring cases are covered (a fully
+  silent verification hits `dev_verify_no_answer`, a lost capability exchange hits
+  the carry-over). Closing it would need either another reach into msmart internals
+  or an extra roundtrip on a unit that tolerates exactly one connection — both were
+  judged disproportionate to a failure that needs a *partial* loss inside a single
+  batch. The suite cannot express it either: the device fakes answer per call, not
+  per batch.
+- **The mirror of that gap corrupts a *successful* report.** If the verification's
+  state query is lost while the property read is answered, `online` is still `True`,
+  `device.ieco` is read correctly — so the verdict `OK: iECO is active` is right —
+  but `_update_state` never ran for a `StateResponse`, so the line above it prints
+  the fresh object's defaults: `power=False, mode=AUTO (1), eco=False`. Three
+  fabricated values inside a success message. Same cause and same measurement as the
+  entry above, identical before and after the change. Recorded rather than fixed for
+  the same reason; noted here because the neighbouring wording says the capability
+  failure mode "disappears structurally", which must not be read as covering the
+  status line too.
+
 - **`hint_all_cap`** was removed rather than tested: our verification cap sits above
   msmart-ng's own worst case, so an all-timeout run is not expected to occur.
   Both figures have since been re-derived from the pinned source: `authenticate`
