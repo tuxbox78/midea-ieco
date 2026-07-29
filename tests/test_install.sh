@@ -1619,6 +1619,24 @@ $CL_LOGROT" "" "beide Jobs aktiv: kein Hinweis"
 assert_missing "$CL_LOGROT" "ZEILE_IECO
 ZEILE_REFRESH" "nur die Logrotate-Zeile: beide Werkzeug-Zeilen fehlen"
 
+# --- der Nachholer ist kein Ersatz fuer den Wochenlauf ----------------------
+# Er ruft dasselbe Werkzeug auf. Zaehlte er mit, schwiege dieser Hinweis auch
+# dann, wenn die Wochenzeile geloescht wurde - also genau in dem Fall, fuer den
+# er existiert. Die Fehlrichtung waere hier die stille.
+assert_missing "$CL_NEW_IECO
+$CL_OLD_REBOOT
+$CL_LOGROT" "ZEILE_REFRESH" "nur der Nachholer, kein Wochenlauf: Wochenlauf gilt als fehlend"
+
+assert_missing "$CL_OLD_REBOOT" "ZEILE_IECO
+ZEILE_REFRESH" "der Nachholer allein ersetzt keinen der beiden erwarteten Jobs"
+
+# Umgekehrt darf seine ANWESENHEIT keinen Hinweis ausloesen: er ist ein Zusatz,
+# den eine Bestandsinstallation nicht hat und den niemand einfordert.
+assert_missing "$CL_NEW_IECO
+$CL_NEW_REFRESH
+$CL_OLD_REBOOT
+$CL_LOGROT" "" "Wochenlauf UND Nachholer vorhanden: kein Hinweis"
+
 assert_missing "# $CL_OLD_IECO
 $CL_NEW_REFRESH
 $CL_LOGROT" "ZEILE_IECO" "iECO auskommentiert: genau diese Zeile wird genannt"
