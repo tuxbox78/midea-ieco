@@ -1072,6 +1072,20 @@ class RenderedMessageOrderTests(unittest.TestCase):
         self.assertIn(mie.t("dev_caps_failed", "Wohnzimmer", "TimeoutError",
                             "KAPUTT"), out)
 
+    # --- Schwaerzung: dieses Werkzeug ist der haeufigere der beiden Wege ------
+    # Der Token-Abruf laeuft woechentlich, DIESES Werkzeug alle 20 Minuten - und
+    # es ruft authenticate(token, key) unmittelbar vor den Meldungen hier. Ein
+    # Token im Text einer Bibliotheksausnahme landete damit 72-mal am Tag im
+    # ieco.log, das mit der normalen umask (meist 0644) entsteht, waehrend
+    # dieselben Werte in devices.json mit 0600 geschuetzt sind. Die Schwaerzung
+    # sitzt in midea_i18n.make_translator und deckt deshalb JEDE Katalogzeile
+    # ab; geprueft wird sie hier am tatsaechlich gedruckten Text.
+    def test_a_token_in_a_library_error_never_reaches_the_log(self):
+        token = "a1b2c3d4" * 16   # 128 Hex, Laenge eines echten Tokens
+        out = self._run([RuntimeError(f"auth failed for token {token}")])
+        self.assertNotIn(token, out)
+        self.assertIn("[hex:128]", out)
+
     def test_connection_attempt_line_counts_attempt_of_total(self):
         # connect_and_refresh laeuft hier ECHT (nur das AC-Objekt ist ein Fake).
         _RecordingAC.instances = []

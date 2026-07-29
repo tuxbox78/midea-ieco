@@ -32,7 +32,8 @@ from typing import TYPE_CHECKING
 # Sprachwahl: gemeinsame Mechanik fuer beide Werkzeuge (Reihenfolge und
 # englischer Default sind dort dokumentiert). resolve_lang wird mitimportiert,
 # damit es weiterhin ueber dieses Modul erreichbar bleibt.
-from midea_i18n import make_translator, resolve_lang  # noqa: F401
+from midea_i18n import (install_excepthook_redaction, install_log_redaction,
+                        make_translator, resolve_lang)  # noqa: F401
 
 if TYPE_CHECKING:
     # Nur fuer Typpruefer: der echte Import passiert lazy in
@@ -40,7 +41,9 @@ if TYPE_CHECKING:
     # Uebersicht `list` - auch ohne installiertes msmart importierbar bleibt.
     from msmart.device.AC.device import AirConditioner as AC
 
-logging.basicConfig(level=logging.WARNING)
+# Frueher stand hier logging.basicConfig(level=logging.WARNING). Die Ablosung
+# steht jetzt in main(): der Root-Logger gehoert dem Prozess, und ein blosser
+# Import soll ihn nicht umkonfigurieren (siehe install_log_redaction).
 
 CONFIG_PATH = Path(__file__).parent / "devices.json"
 CONNECT_RETRIES = 3
@@ -655,6 +658,15 @@ def _device_config_problem(d: dict) -> str | None:
 
 
 async def main() -> None:
+    # Beide Waechter erst hier, nicht beim Import: Root-Logger und
+    # sys.excepthook gelten prozessweit, und ein blosser Import dieses Moduls
+    # soll das Verhalten des Aufrufers nicht aendern. Sie decken die zwei Wege
+    # ab, die der Meldungskatalog nicht sieht: was eine Fremdbibliothek ueber
+    # logging schreibt (msmart-ng gibt auf WARNING rohe Empfangspuffer aus),
+    # und eine zweite Ausnahme in einem except-Block, die die ganze Kette samt
+    # der urspruenglichen Bibliotheksmeldung druckt.
+    install_log_redaction(logging.WARNING)
+    install_excepthook_redaction()
     parser = argparse.ArgumentParser(
         prog=CMD_MAIN,
         description=t("cli_description"),

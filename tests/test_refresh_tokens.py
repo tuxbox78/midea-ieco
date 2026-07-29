@@ -10,6 +10,7 @@ import ast
 import asyncio
 import io
 import json
+import logging
 import os
 import re
 import shutil
@@ -27,6 +28,7 @@ sys.path.insert(0, str(REPO_DIR))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import _stub_msmart  # noqa: E402,F401  (Fake-msmart VOR midea_ieco_ensure registrieren)
+import midea_i18n  # noqa: E402  (die Schwaerzung sitzt dort, nicht in den Werkzeugen)
 import midea_ieco_ensure as mie  # noqa: E402  (nur fuer die Katalog-Aritaetspruefung)
 import midea_refresh_tokens as mrt  # noqa: E402
 
@@ -642,6 +644,338 @@ class ResolveLangTests(unittest.TestCase):
         for value in ("da_DK.UTF-8", "default", "dev_DEV", "des_ES"):
             with self.subTest(value=value):
                 self.assertEqual(self._resolve(LANG=value), "en")
+
+
+class RedactHexTests(unittest.TestCase):
+    """Die Mechanik der Schwaerzung. Die Wege, ueber die ein Token ueberhaupt
+    in eine Meldung geraet, pruefen DiscoverRobustnessTests und
+    RedactedOutputPathTests; hier steht nur, was redact_hex selbst leistet.
+
+    Warum das ueberhaupt zaehlt: die Logs entstehen mit der normalen umask
+    (meist 0644), devices.json dagegen mit 0600. Ein Token in einer
+    Fehlermeldung stuende also schwaecher geschuetzt als dasselbe Token in der
+    Konfiguration."""
+
+    TOKEN = "a1b2c3d4" * 16   # 128 Hex, Laenge eines echten Tokens
+    KEY = "f0e1d2c3" * 8      # 64 Hex, Laenge eines echten Keys
+
+    def test_a_token_sized_hex_run_is_replaced_by_its_length(self):
+        self.assertEqual(midea_i18n.redact_hex(self.TOKEN), "[hex:128]")
+
+    def test_every_run_is_replaced_not_only_the_first(self):
+        # Eine tokenlist traegt key UND token, und der Ernstfall ist genau der
+        # Eintrag mit beiden. Eine Schwaerzung mit count=1 liesse den zweiten
+        # Wert stehen - im Volltext.
+        text = f'"key": "{self.KEY}", "token": "{self.TOKEN}"'
+        redacted = midea_i18n.redact_hex(text)
+        self.assertEqual(redacted, '"key": "[hex:64]", "token": "[hex:128]"')
+
+    def test_the_threshold_catches_a_value_cut_by_the_800_char_tail(self):
+        # Der Tail schneidet mitten in einen Wert. Ein Rest von 32 Zeichen muss
+        # noch fallen - sonst schuetzt die Schwaerzung genau die abgeschnittenen
+        # Faelle nicht, die im Log am haeufigsten vorkommen.
+        self.assertEqual(midea_i18n.redact_hex(self.TOKEN[:32]), "[hex:32]")
+
+    def test_uppercase_hex_is_redacted_too(self):
+        # bytes.hex() liefert Kleinbuchstaben, die Cloud-Antwort ebenfalls -
+        # aber die Extraktion des Projekts selbst liest [0-9a-fA-F]+, rechnet
+        # also ausdruecklich mit Grossschreibung. Ohne diese Zusicherung
+        # ueberlebt eine "Vereinfachung" der Zeichenklasse auf [0-9a-f] die
+        # ganze Suite (gemessen).
+        self.assertEqual(midea_i18n.redact_hex(self.TOKEN.upper()), "[hex:128]")
+
+    def test_short_hex_stays_readable(self):
+        # Gegenrichtung: eine Schwelle, die zu tief liegt, macht Meldungen
+        # unlesbar. Geraete-IDs sind dezimal und rund 15 Stellen lang.
+        text = "errno 0xdeadbeef bei Geraet 123456789012345"
+        self.assertEqual(midea_i18n.redact_hex(text), text)
+
+    def test_redacting_twice_changes_nothing(self):
+        # Der Text laeuft auf dem Weg ins Log durch mehrere t()-Aufrufe
+        # (Ausnahmetext -> dev_fetch_failed). Waere die Ausgabe nicht
+        # idempotent, verschoebe jeder weitere Durchgang das Ergebnis.
+        once = midea_i18n.redact_hex(f'"token": "{self.TOKEN}"')
+        self.assertEqual(midea_i18n.redact_hex(once), once)
+
+    def test_an_argument_without_hex_keeps_its_type(self):
+        # t() setzt heute nur %s ein, aber ein spaeter eingefuehrtes %d darf
+        # nicht daran scheitern, dass die Schwaerzung aus jeder Zahl einen
+        # String macht.
+        self.assertIs(midea_i18n._redact_arg(5), 5)
+        self.assertEqual("%d" % (midea_i18n._redact_arg(5),), "5")
+
+
+class RedactingLogHandlerTests(unittest.TestCase):
+    """Der zweite Kanal in dieselbe Datei: was eine Fremdbibliothek ueber das
+    logging-Modul schreibt, sieht der Meldungskatalog nicht.
+
+    Das ist nicht theoretisch. In msmart-ng 2026.7.0 geben vier Records auf
+    WARNING - der Stufe, die beide Werkzeuge einstellen - einen rohen
+    Empfangspuffer der Geraeteverbindung aus ('Peer %s: Buffer too short.
+    Buffer: %s' mit buf.hex()). Per Cron laufen sie mit 2>&1 in eine Datei, die
+    mit der normalen umask entsteht."""
+
+    TOKEN = "a1b2c3d4" * 16
+
+    def _handler_mit_puffer(self):
+        """Ein Handler, der in einen StringIO schreibt - wie der echte, nur
+        einsammelbar."""
+        strom = io.StringIO()
+        handler = midea_i18n.RedactingStreamHandler(strom)
+        handler.setFormatter(logging.Formatter(logging.BASIC_FORMAT))
+        return handler, strom
+
+    def _record(self, msg, *args):
+        return logging.LogRecord("msmart.lan", logging.WARNING, __file__, 1,
+                                 msg, args, None)
+
+    def test_a_raw_buffer_in_a_library_record_is_redacted(self):
+        handler, strom = self._handler_mit_puffer()
+        handler.emit(self._record("Peer %s: Buffer too short. Buffer: %s",
+                                  "1.2.3.4", self.TOKEN))
+        ausgabe = strom.getvalue()
+        self.assertNotIn(self.TOKEN, ausgabe)
+        self.assertIn("[hex:128]", ausgabe)
+
+    def test_the_diagnosis_around_the_buffer_survives(self):
+        # Gegenrichtung: Stufe, Loggername und Fehlertext muessen lesbar
+        # bleiben, sonst tauscht man ein Datenschutz- gegen ein Diagnoseproblem.
+        handler, strom = self._handler_mit_puffer()
+        handler.emit(self._record("Peer %s: Buffer too short. Buffer: %s",
+                                  "1.2.3.4", self.TOKEN))
+        ausgabe = strom.getvalue()
+        for erwartet in ("WARNING", "msmart.lan", "1.2.3.4", "Buffer too short"):
+            self.assertIn(erwartet, ausgabe)
+
+    def test_a_traceback_carried_by_the_record_is_redacted_too(self):
+        # format() rendert exc_info mit - dadurch faellt auch der Weg, auf dem
+        # asyncio eine nicht abgeholte Task-Ausnahme meldet.
+        handler, strom = self._handler_mit_puffer()
+        try:
+            raise RuntimeError(f"handshake failed: {self.TOKEN}")
+        except RuntimeError:
+            record = self._record("connection lost")
+            record.exc_info = sys.exc_info()
+            handler.emit(record)
+        ausgabe = strom.getvalue()
+        self.assertNotIn(self.TOKEN, ausgabe)
+        self.assertIn("Traceback", ausgabe)
+
+    def test_a_malformed_library_log_call_neither_leaks_nor_aborts(self):
+        # Ein Log-Aufruf mit zu wenigen Argumenten laesst das Formatieren
+        # scheitern; die Standard-Fehlerbehandlung von logging schreibt dann
+        # record.msg und record.args ROH auf stderr. Zweite Zusicherung: der
+        # Lauf darf daran nicht sterben - ein Bibliotheksfehler im Log ist kein
+        # Grund, den Cron-Job zu beenden.
+        handler, _ = self._handler_mit_puffer()
+        err = io.StringIO()
+        with redirect_stderr(err):
+            handler.emit(self._record("token=%s key=%s", self.TOKEN))
+        ausgabe = err.getvalue()
+        self.assertNotIn(self.TOKEN, ausgabe)
+        self.assertIn("[hex:128]", ausgabe)
+        self.assertIn("Logging error", ausgabe)
+        # Die Herkunft muss erhalten bleiben: ohne den 'Call stack' weiss
+        # niemand, WELCHE Stelle der Bibliothek den kaputten Aufruf macht -
+        # und genau das braucht ein Fehlerbericht gegen sie. Eine selbst
+        # formulierte Kurzfassung hatte das verloren.
+        self.assertIn("Call stack", ausgabe)
+
+    def test_the_error_path_stays_silent_when_it_cannot_report(self):
+        # Die Fehlerbehandlung laeuft selbst schon im Fehlerfall. Wirft sie,
+        # reisst sie den Lauf mit - deshalb ein Record, dessen repr() scheitert.
+        class BoeseMeldung:
+            def __repr__(self):
+                raise ValueError("repr kaputt")
+
+            def __str__(self):
+                return "x"
+
+        handler, _ = self._handler_mit_puffer()
+        err = io.StringIO()
+        with redirect_stderr(err):
+            handler.handleError(self._record(BoeseMeldung(), "arg"))
+        # Zweite Haelfte der Zusicherung, ohne die der Name mehr verspricht als
+        # der Test prueft: sie darf dann auch nichts halb Gerendertes ausgeben.
+        self.assertEqual(err.getvalue(), "")
+
+    def _root_zustand_wiederherstellen(self):
+        """Nimmt zurueck, was DIESER Test am Root-Logger anrichtet.
+
+        install_log_redaction() haengt einen Handler an und setzt die Stufe -
+        beides prozessweit. Ohne Aufraeumen liefe jeder spaetere Test in einem
+        vorkonfigurierten Zustand, und ein StreamHandler bindet sys.stderr zum
+        Zeitpunkt seiner Erzeugung: entstuende er einmal innerhalb eines
+        redirect_stderr-Blocks, hielte er danach einen toten Puffer fest.
+        Entfernt werden nur die Handler, die es vorher nicht gab - ein bereits
+        vorhandener bleibt, sonst raeumte dieser Test fremden Zustand weg."""
+        root = logging.getLogger()
+        vorhandene = root.handlers[:]
+        alte_stufe = root.level
+
+        def aufraeumen():
+            for handler in root.handlers[:]:
+                if handler not in vorhandene:
+                    root.removeHandler(handler)
+            root.setLevel(alte_stufe)
+
+        self.addCleanup(aufraeumen)
+        return root, vorhandene
+
+    def test_installing_twice_leaves_a_single_handler(self):
+        # Beide Werkzeuge rufen die Installation in main() auf. Ein zweiter
+        # Aufruf darf keinen zweiten Handler anhaengen, sonst steht jede Zeile
+        # doppelt im Log.
+        root, _ = self._root_zustand_wiederherstellen()
+        vorher = [h for h in root.handlers
+                  if isinstance(h, midea_i18n.RedactingStreamHandler)]
+        midea_i18n.install_log_redaction()
+        midea_i18n.install_log_redaction()
+        nachher = [h for h in root.handlers
+                   if isinstance(h, midea_i18n.RedactingStreamHandler)]
+        self.assertEqual(len(nachher), max(len(vorher), 1))
+
+    def test_a_second_install_does_not_reset_a_chosen_level(self):
+        # Die Stufe wird nur beim ERSTEN Aufruf gesetzt. Stuende setLevel vor
+        # der Idempotenz-Sperre, holte ein zweiter Aufruf eine zwischenzeitlich
+        # gewaehlte Stufe wieder auf WARNING zurueck - eine stille Aenderung am
+        # Zustand des Aufrufers.
+        root, _ = self._root_zustand_wiederherstellen()
+        midea_i18n.install_log_redaction()   # sorgt fuer einen Handler
+        root.setLevel(logging.DEBUG)         # der Aufrufer entscheidet sich um
+        midea_i18n.install_log_redaction()
+        self.assertEqual(root.level, logging.DEBUG)
+
+
+class ExcepthookRedactionTests(unittest.TestCase):
+    """Der dritte Kanal: ein Traceback geht an logging UND am Katalog vorbei."""
+
+    TOKEN = "a1b2c3d4" * 16
+
+    def _lauf(self, code):
+        return subprocess.run([sys.executable, "-c", code], capture_output=True,
+                              text=True, cwd=str(REPO_DIR))
+
+    def test_a_chained_exception_does_not_expose_the_original_text(self):
+        # Der teure Fall: scheitert eine ZWEITE Ausnahme innerhalb eines
+        # except-Blocks, druckt Python die ganze Kette - samt der
+        # Bibliotheksmeldung, die der Katalog gerade geschwaerzt hatte.
+        ergebnis = self._lauf(f"""
+import midea_i18n
+midea_i18n.install_excepthook_redaction()
+try:
+    raise RuntimeError("device rejected token: {self.TOKEN}")
+except RuntimeError:
+    raise ValueError("secondary failure while reporting")
+""")
+        self.assertEqual(ergebnis.returncode, 1)
+        self.assertNotIn(self.TOKEN, ergebnis.stderr)
+        # Die Kette selbst muss lesbar bleiben - sonst ist der Traceback wertlos.
+        self.assertIn("[hex:128]", ergebnis.stderr)
+        self.assertIn("ValueError", ergebnis.stderr)
+
+    def test_a_failing_redaction_still_prints_the_traceback(self):
+        # Ein Traceback darf nie ganz verloren gehen, auch nicht, wenn die
+        # Schwaerzung selbst scheitert.
+        ergebnis = self._lauf("""
+import midea_i18n, sys
+midea_i18n.redact_hex = lambda t: (_ for _ in ()).throw(MemoryError("kaputt"))
+midea_i18n.install_excepthook_redaction()
+raise ValueError("EINDEUTIGER FEHLERTEXT")
+""")
+        self.assertEqual(ergebnis.returncode, 1)
+        self.assertIn("EINDEUTIGER FEHLERTEXT", ergebnis.stderr)
+
+
+class OutputGuardWiringTests(unittest.TestCase):
+    """Dass es die Schwaerzung GIBT, sagt nichts darueber, ob die Werkzeuge sie
+    einschalten. Beide Waechter sitzen in main(), werden hier also durch einen
+    ECHTEN Lauf des Werkzeugs geprueft - ein blosser Import setzt sie
+    absichtlich nicht mehr.
+
+    Jedes Werkzeug bekommt seinen eigenen Prozess: in dieser Testdatei sind
+    beide importiert, ein gemeinsamer Blick auf den Root-Logger bliebe also
+    gruen, wenn nur EINES der beiden seine Waechter noch setzt.
+
+    Die Ausgabe wird in eine DATEI umgeleitet, stderr auf stdout - genau die
+    Form der Cron-Zeilen ('>> ieco.log 2>&1'). Getrennte Pipes wuerden eine
+    Vermischung verdecken, die im echten Log stattfindet."""
+
+    TOKEN = "a1b2c3d4" * 16
+
+    # Der Aufhaenger: parse_args() steht in beiden main() NACH den beiden
+    # Waechtern. Wird es ersetzt, laeuft alles Vorherige echt - und der Ersatz
+    # loest beide Wege zugleich aus: einen Bibliotheks-Record ueber logging
+    # und eine ungefangene Ausnahme mit Token im Text.
+    AUFHAENGER = (
+        "import argparse, logging\n"
+        "def _boom(self, *a, **k):\n"
+        "    logging.getLogger('msmart.lan').warning(\n"
+        "        'Peer %s: Buffer too short. Buffer: %s', '1.2.3.4', TOKEN)\n"
+        "    raise RuntimeError('device rejected token: ' + TOKEN)\n"
+        "argparse.ArgumentParser.parse_args = _boom\n"
+    )
+
+    def _echter_lauf(self, code):
+        """Faehrt code als eigenen Prozess, Ausgabe wie bei Cron in eine Datei."""
+        arbeit = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(arbeit, ignore_errors=True))
+        logdatei = Path(arbeit) / "ieco.log"
+        with open(logdatei, "w", encoding="utf-8") as fh:
+            ergebnis = subprocess.run(
+                [sys.executable, "-c", f"TOKEN = '{self.TOKEN}'\n" + code],
+                stdout=fh, stderr=subprocess.STDOUT, text=True,
+                cwd=str(REPO_DIR))
+        return ergebnis.returncode, logdatei.read_text(encoding="utf-8")
+
+    def _pruefe(self, modul, starter):
+        rc, log = self._echter_lauf(
+            "import sys; sys.path.insert(0, 'tests')\n"
+            "import _stub_msmart\n"
+            f"import {modul}\n"
+            + self.AUFHAENGER + starter)
+        # Die Ausnahme ist ungefangen, der Lauf endet also mit 1.
+        self.assertEqual(rc, 1, log)
+        # 1. Weder der rohe Puffer noch der Ausnahmetext duerfen im Log stehen.
+        self.assertNotIn(self.TOKEN, log)
+        # 2. Beide Waechter muessen gesprochen haben: der Log-Handler fuer den
+        #    Bibliotheks-Record, der excepthook fuer den Traceback.
+        self.assertIn("Buffer: [hex:128]", log)
+        self.assertIn("device rejected token: [hex:128]", log)
+        # 3. Und die Logzeile muss aussehen wie bisher unter basicConfig - ohne
+        #    gesetzten Formatter faellt ein Handler auf "%(message)s" zurueck,
+        #    und Stufe wie Loggername verschwinden aus dem Log.
+        self.assertIn("WARNING", log)
+        self.assertIn("msmart.lan", log)
+        self.assertIn("1.2.3.4", log)
+
+    def test_the_ensure_tool_arms_both_guards(self):
+        self._pruefe("midea_ieco_ensure",
+                     "import asyncio; asyncio.run(midea_ieco_ensure.main())\n")
+
+    def test_the_refresh_tool_arms_both_guards(self):
+        # Dieses Werkzeug hatte gar keine Logging-Konfiguration: ohne eigenen
+        # Handler bedient logging.lastResort die Records - ebenfalls nach
+        # stderr, nur ungefiltert.
+        self._pruefe("midea_refresh_tokens", "midea_refresh_tokens.main()\n")
+
+    def test_importing_a_tool_leaves_foreign_logging_alone(self):
+        # Gegenrichtung, und der Grund fuer die Verlagerung nach main(): ein
+        # blosser Import darf die Logging-Einstellung des Aufrufers nicht
+        # anfassen. Zuvor klemmte er dessen Stufe von DEBUG auf WARNING und
+        # verdoppelte jede Zeile.
+        rc, log = self._echter_lauf(
+            "import logging, sys\n"
+            "logging.basicConfig(level=logging.DEBUG)\n"
+            "stufe, anzahl = logging.getLogger().level, len(logging.getLogger().handlers)\n"
+            "sys.path.insert(0, 'tests')\n"
+            "import _stub_msmart, midea_ieco_ensure, midea_refresh_tokens\n"
+            "wurzel = logging.getLogger()\n"
+            "print('STUFE', stufe, wurzel.level, 'HANDLER', anzahl, len(wurzel.handlers))\n"
+            "logging.getLogger('app').warning('APPZEILE')\n")
+        self.assertEqual(rc, 0, log)
+        self.assertIn("STUFE 10 10 HANDLER 1 1", log)
+        self.assertEqual(log.count("APPZEILE"), 1, log)
 
 
 class CatalogTests(unittest.TestCase):
@@ -1549,6 +1883,80 @@ class DiscoverRobustnessTests(_LangMixin):
             out='applianceCodes: 111 ... applianceCodes: 222 ... '
                 '"tokenlist": [{"key": "aa", "token": "bb"}]'))
         self.assertEqual(appliance_id, "111")
+
+
+class RedactedOutputPathTests(_LangMixin):
+    """Was WIRKLICH im refresh.log landet, wenn der Token-Abruf scheitert.
+
+    Der Tail der rohen --debug-Ausgabe geht in die Fehlermeldung, und diese
+    Ausgabe traegt bauartbedingt die tokenlist der Cloud - genau die Werte, die
+    sonst nur in der 0600-geschuetzten devices.json stehen. Geprueft wird der
+    fertige Meldungstext, also das, was print() erhalten wuerde - nicht der
+    Rueckgabewert einer Zwischenfunktion: der Weg fuehrt ueber mehrere
+    Stationen, und erst am Ende steht fest, was der Nutzer in seiner Logdatei
+    findet. Dass ein echter Lauf ueberhaupt in eine Logdatei schreibt und dabei
+    die beiden Waechter scharf hat, sichern OutputGuardWiringTests zu - fuer
+    DIESE Meldung bleibt es beim Text, weil ihr Weg einen gescheiterten
+    Cloud-Abruf voraussetzt."""
+
+    TOKEN = "a1b2c3d4" * 16
+    KEY = "f0e1d2c3" * 8
+
+    def _cloud_answer(self, token_field="token"):
+        return ('DEBUG:midealocal.cloud:response: b\'{"result": {"tokenlist": '
+                f'[{{"udpId": "x", "key": "{self.KEY}", '
+                f'"{token_field}": "{self.TOKEN}"}}]}}\'')
+
+    def _printed_failure(self, result):
+        """Der echte Weg: _parse_discover_output wirft, update_device faengt
+        und druckt ueber den Katalog."""
+        with self.assertRaises(RuntimeError) as cm:
+            mrt._parse_discover_output(result)
+        return mrt.t("dev_fetch_failed", "Wohnzimmer", cm.exception)
+
+    def test_a_failed_discover_does_not_print_token_or_key(self):
+        # Erster Weg: discover endet mit Fehlercode, hatte die tokenlist aber
+        # schon ausgegeben.
+        printed = self._printed_failure(
+            SimpleNamespace(returncode=1, stdout=self._cloud_answer(), stderr=""))
+        self.assertNotIn(self.TOKEN, printed)
+        self.assertNotIn(self.KEY, printed)
+        self.assertIn("[hex:128]", printed)
+
+    def test_an_unrecognised_tokenlist_does_not_print_token_or_key(self):
+        # Zweiter und teuerster Weg: die Extraktion hat NICHTS gefunden, weil
+        # das Feld anders heisst - und schreibt deshalb den rohen Text ins Log.
+        # Eine Schwaerzung, die an derselben tokenlist-Regex haengt, versagte
+        # genau hier. Deshalb faellt der Wert ueber seine Hex-Form, nicht ueber
+        # den Feldnamen.
+        printed = self._printed_failure(SimpleNamespace(
+            returncode=0, stdout=self._cloud_answer(token_field="tokenValue"),
+            stderr=""))
+        self.assertNotIn(self.TOKEN, printed)
+        self.assertNotIn(self.KEY, printed)
+
+    def test_a_library_message_naming_the_token_is_redacted(self):
+        # Dritter Weg: verify_credentials laeuft unmittelbar nach
+        # authenticate(token, key); der unveraenderte Meldungstext der
+        # Fremdbibliothek geht in die Kandidaten-Zeile. Ob msmart-ng je ein
+        # Token in eine Meldung schreibt, ist von hier aus nicht pruefbar -
+        # der Weg wird deshalb strukturell dichtgemacht statt angenommen.
+        _, text = mrt.classify_verify_failure(
+            RuntimeError(f"handshake failed for token {self.TOKEN}"))
+        printed = mrt.t("dev_candidate_failed", "Wohnzimmer", 1, 3, text, "")
+        self.assertNotIn(self.TOKEN, printed)
+        self.assertIn("[hex:128]", printed)
+
+    def test_the_diagnosis_around_the_redacted_value_survives(self):
+        # Gegenrichtung: die Schwaerzung darf die Meldung nicht unbrauchbar
+        # machen. Geraetename, Fehlercode und der Hinweis auf die tokenlist
+        # muessen lesbar bleiben - sonst tauscht man ein Datenschutzproblem
+        # gegen ein Diagnoseproblem.
+        printed = self._printed_failure(
+            SimpleNamespace(returncode=7, stdout=self._cloud_answer(), stderr=""))
+        self.assertIn("Wohnzimmer", printed)
+        self.assertIn("7", printed)
+        self.assertIn("tokenlist", printed)
 
 
 class AtomicWriteDetailTests(_ConfigPathMixin):

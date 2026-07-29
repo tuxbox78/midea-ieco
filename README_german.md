@@ -319,7 +319,16 @@ Ein Gerät, das in einem Modus läuft, der iECO nicht trägt, wird benannt und i
 [Buero] --only-if-on aktiv: keine Aktion, kein Fehler.
 ```
 
-Jede Zeile mit **FEHLER** kennzeichnet ein Problem bei genau diesem Gerät; `Gesamtergebnis: FEHLER` bedeutet, dass mindestens ein Gerät nicht in Ordnung war. Da die Cron-Zeilen `2>&1` nutzen, landen auch Warnungen der zugrunde liegenden `msmart-ng`-Bibliothek in derselben Datei. Die Logs enthalten Gerätenamen, IP-Adressen und den Ein-/iECO-Zustand — **niemals** deine Geräte-Token oder Keys (die stehen ausschließlich in der `chmod 600`-`devices.json`).
+Jede Zeile mit **FEHLER** kennzeichnet ein Problem bei genau diesem Gerät; `Gesamtergebnis: FEHLER` bedeutet, dass mindestens ein Gerät nicht in Ordnung war. Da die Cron-Zeilen `2>&1` nutzen, landen auch Warnungen der zugrunde liegenden `msmart-ng`-Bibliothek in derselben Datei. Die Logs enthalten Gerätenamen, IP-Adressen und den Ein-/iECO-Zustand; deine Geräte-Token und Keys stehen in der `chmod 600`-`devices.json`, und die Werkzeuge geben sie nicht aus. In jeder Meldung, die durch den Meldungskatalog eines der beiden Werkzeuge läuft, werden in jedem eingesetzten Wert Folgen von 32 oder mehr Hex-Zeichen durch eine Markierung wie `[hex:128]` ersetzt. Das ist keine Formsache: Die rohe Cloud-Antwort, die nach einem gescheiterten Token-Abruf zitiert wird, enthält die Token-Liste der Cloud, und `msmart-ng` wirft Fehler mit rohen Paket-Abzügen darin (`Packet is too short: <hex>`).
+
+Der Katalog ist nicht der einzige Weg in diese Datei, deshalb schließen zwei weitere Wächter zwei weitere Kanäle: Was eine Bibliothek über Pythons `logging` schreibt, läuft durch einen schwärzenden Log-Handler, und ein Traceback aus einer ungefangenen oder verketteten Ausnahme durch einen schwärzenden `excepthook`. Das ist praktisch relevant — gegen das gepinnte `msmart-ng` 2026.7.0 geprüft: Kein `warning`/`error`-Eintrag nennt Token oder Key, aber vier von ihnen geben einen rohen Empfangspuffer der Geräteverbindung aus — auf `WARNING`, also aktiv bei der Stufe, die die Werkzeuge einstellen. Auf `INFO` protokolliert die Bibliothek den lokalen Schlüssel des Geräts im Klartext.
+
+Zwei Grenzen sind wichtig, denn nichts davon ist eine Zusage über die ganze Datei:
+
+- Die Schwärzung erkennt nur *zusammenhängendes* Hex. Derselbe Wert mit Leerzeichen, in Gruppen oder als Python-Byte-String dargestellt wird nicht erkannt. Das Muster zu erweitern ginge nicht, ohne auch Geräte-IDs und Prüfsummen zu verbergen — deshalb ist es dokumentiert statt halb repariert.
+- Die Logdateien entstehen mit deiner normalen umask, sind also meist für alle lesbar — anders als `devices.json`.
+
+`tests/KNOWN_GAPS.md` (Lücke 11) listet die bisher gefundenen Kanäle auf, welcher Wächter sie jeweils abdeckt und was offen bleibt — auch Wege, die kein Wächter sieht, etwa `warnings.warn()` und Zugangsdaten, die nie hexadezimal waren.
 
 > **In welcher Sprache deine Logs stehen.** Beide Werkzeuge sind zweisprachig und
 > nutzen **Englisch** als Voreinstellung; Deutsch erscheint nur, wenn

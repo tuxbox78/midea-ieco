@@ -367,6 +367,151 @@ characters (L = path length, q = apostrophes, p = percent signs). At the Linux
 4093 of them. A hand-written line long enough to be skipped is possible; one this
 installer wrote is not.
 
+### 11. What the hex redaction does and does not cover
+
+Every argument that reaches a message catalogue runs through `redact_hex`
+(`midea_i18n.make_translator`), so any run of 32 or more hex characters is
+replaced by `[hex:<length>]` before it can reach `ieco.log` or `refresh.log`.
+The guard sits in the translator rather than at each individual call site
+precisely so that a newly added catalogue message is covered without anyone
+having to remember it.
+
+The catalogue is one of three channels that carry a guard — the other two are
+Python's `logging` and the traceback path, both added after an independent
+review found them open. That review, and a second one after it, also turned up
+channels that have **no** guard; they are in the table too, because a list that
+only shows what is covered reads as a promise. What follows is the state as
+measured. The two rows that carry the wiring — does a real run actually arm the
+log handler and the excepthook — are asserted by running each tool as its own
+process with `2>&1` into a file, the way cron does it; every other row was
+reproduced by hand the same way, and the redaction itself is covered by
+in-process tests:
+
+| channel | still reaches the log unfiltered | guard |
+|---|---|---|
+| `logging` — records a library writes (`msmart-ng` dumps raw receive buffers at `WARNING`) | no | `RedactingStreamHandler.format()` |
+| `logging` — `lastResort`, because `midea_refresh_tokens.py` configured nothing at all | no | it now installs the same handler |
+| `logging` — a library logger that sets `propagate = False` without a handler of its own | **yes** | its records reach neither the root's handlers nor ours, so `lastResort` prints them raw; `msmart-ng` sets no `propagate` |
+| a library (or `argparse`) writing straight to `sys.stdout`/`sys.stderr`, past `logging` entirely | **yes** | no guard sees those; this project's own such line is the overview row below |
+| `logging.Handler.handleError` on a malformed library log call | no | `handleError` override; the run also survives it |
+| asyncio's default handler (`Task exception was never retrieved`) | no | same handler — `format()` renders `exc_info`, so the traceback goes through it |
+| a chained traceback: a secondary exception inside an `except` block | no | `install_excepthook_redaction()` |
+| a traceback from an exception nobody catches | no | same excepthook |
+| `print()` past the catalogue (the overview line) | **yes** | but it prints name/ip/port only, never a secret |
+| the same value in another **encoding** | **yes** | nothing matches it — see below |
+| a credential that is not hexadecimal at all (a JWT, a dashed session id) | **yes** | this is a format filter, not a secret filter |
+| `warnings.warn()` | **yes** | goes to stderr past every guard; no tool or library here uses it today |
+| code that calls `logging.basicConfig(force=True)` or clears the root handlers | **yes** | removes the guard again; `msmart-ng` does neither |
+| `sys.unraisablehook` (an exception inside `__del__`) | **yes** | not routed; neither tool nor `msmart-ng` defines `__del__`, but asyncio's own transports do |
+| records written by a handler someone else installed | **yes** | foreign handlers are deliberately left alone |
+
+Two design points are worth keeping, because the obvious implementations are
+wrong and both were measured on the real classes. A `logging.Filter` on the
+**root logger** never sees a child logger's records: those reach the root's
+*handlers* without passing the root's *filters* (it does fire for records logged
+on the root itself, which is not where a library writes). And a filter that
+calls `record.getMessage()` raises on a malformed library log call —
+`Handler.filter()` sits outside `emit()`'s `try`, so that version turns a
+harmless library bug into a cron run that exits 1. Overriding `format()` avoids
+both: it runs inside `emit()`, leaves `msg` and `args` untouched — which is what
+other handlers read — and renders `exc_info` along the way, which is what makes
+the asyncio row above work. (It does set `record.message` and `record.exc_text`,
+but every formatter does that; the point is that nothing another handler
+consumes is rewritten.)
+
+**How much this costs today, measured against the pinned library rather than
+assumed.** Every `warning`/`error`/`critical`/`exception` call in `msmart-ng`
+2026.7.0 was extracted with an AST walk — a `grep` is not enough here, because
+the interesting ones span several lines and show only `_LOGGER.warning(` on the
+first. There are 65: 35 `warning`, 30 `error`, and none of the other two. No
+record names a token or key. But four of them, all at `WARNING` and
+therefore **active at the level these tools configure**, dump a raw receive
+buffer from the device connection: `lan.py`'s "No start of packet found",
+"Ignoring data before packet", "Buffer too short" and "Partial packet received",
+each ending in `buf.hex()`. Whether key material is recoverable from such a
+buffer is not settled here — it is device-connection payload in a world-readable
+file, which is reason enough. Those four lines are exactly what the handler was
+added for, and they now come out as `Buffer: [hex:128]`. At `INFO` the same
+module logs the device's local key outright, and at `DEBUG` full frame dumps and
+the cloud's reply; raising the level to troubleshoot therefore produces far more
+material, all of it through the same handler.
+
+Two things that are *not* problems, checked rather than assumed: `msmart-ng`
+calls `basicConfig` only in its own CLI, and importing the path these tools use
+(`msmart.device.AC.device`) provably does not load it — after the import
+`sys.modules` has no `msmart.cli` and the root logger has no handler. And
+`midea-local` does log tokens at `DEBUG`, but it is only ever run as a
+subprocess with `capture_output=True`; its output cannot reach the log on its
+own.
+
+The redaction is also **encoding-specific**: it matches contiguous hex. The same
+64 bytes rendered as `repr(bytes)`, as a spaced hexdump, or in groups is not
+recognised, and from any of those forms the value is trivially recoverable. This
+matters because a protocol library renders frames that way — the one form that
+*is* covered, `bytes.hex()`, is what `msmart-ng` uses in the two `ProtocolError`
+texts that quote a packet (`lan.py`, "Packet is too short" / "Unsupported
+packet"), which is the case this filter was built for.
+
+*What is left, and what it costs.* The encoding gap above is the real one: it
+cannot be closed by a wider pattern, because "the same bytes with spaces in
+between" has no lexical signature that a device id or a checksum does not also
+have. Closing it properly means matching the **values** the tools actually hold
+— which would give `midea_i18n` state it deliberately does not have, and would
+still miss a candidate that has just arrived from the cloud. It is therefore
+written down rather than half-fixed. The logs are created with the user's normal
+umask (usually world-readable), which is what makes any leak worth avoiding;
+`devices.json` is `chmod 600` by comparison.
+
+Also still open, and deliberately: a handler installed by someone else keeps its
+own output — `install_log_redaction` adds a handler and never removes foreign
+ones. `threading.excepthook` and `sys.unraisablehook` are not set; neither tool
+defines `__del__` or starts a thread of its own, and an exception inside
+asyncio's executor lands in a future and is reported through the asyncio logger,
+which the handler does cover.
+
+Both guards are armed in `main()`, not at import. That was a correction: armed
+at import, `install_log_redaction` clamped an embedding application's root level
+from `DEBUG` to `WARNING` and doubled every line of its output — measured, and
+worse than the `logging.basicConfig()` it replaced, which does nothing at all
+when handlers already exist. Two consequences are worth stating precisely.
+Importing either module gives you the **catalogue** redaction (that one lives in
+`t()` and needs no setup) but neither the logging nor the traceback guard, since
+it gives you no logging configuration either — only a real run arms those. And
+calling `main()` from your own code still costs you the root level and gives you
+a second handler: the guards are installed for the run, not negotiated with a
+host application.
+
+One consequence for the test suite, measured rather than assumed. Several tests
+call `main()` in-process, so a full run leaves a `RedactingStreamHandler` on the
+root logger and a marked `sys.excepthook` behind. The two tests that install the
+handler *directly* now undo it; the ones that go through `main()` do not, and
+that is left alone deliberately — they are pre-existing tests and the residue
+harms nothing today.
+
+What makes it worth writing down is *why* it currently holds. A `StreamHandler`
+binds `sys.stderr` when it is **created**, and six of those tests — five in
+`ExitCodeTests`, one in `ConfigMessageOrderTests` — run `main()` inside a
+`redirect_stderr` block. Measured on the current suite, the handler that ends up
+on the root logger is created exactly once, by a test that redirects only
+*stdout*, so it holds the real stderr. That is a property of `unittest`'s
+alphabetical class order, not a guarantee: rename a class and the handler could
+end up holding a dead buffer, which would silently swallow library records in
+later tests. Nothing in production is affected — every cron run is a fresh
+process where `main()` binds the real stderr.
+
+Two deliberate boundaries. A hex run **shorter** than 32 characters stays
+visible: a token cut by the 800-character tail keeps its remainder if fewer than
+32 characters are left, which drops more than 96 of a token's 128 and makes the
+rest useless. And the threshold cuts both ways — a *device name* or an
+appliance id of 32 hex characters is redacted too, which removes it from every
+line that renders it through the catalogue (the overview line prints the name
+with an f-string and keeps showing it). Real ids are decimal and about 15
+digits, so this is a theoretical loss, but it is the price of a filter that does
+not need to know which argument is a secret. A `udpId`, at 64 hex characters, is
+the one realistic case: several tokenlist entries become indistinguishable in an
+error message. The extraction itself is unaffected — it runs on the raw text
+before any message is built.
+
 ## Equivalent mutants (survive by design, not by omission)
 
 Do not "fix" these by adding a test — there is nothing to observe.

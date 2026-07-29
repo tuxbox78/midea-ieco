@@ -330,7 +330,16 @@ A unit running in a mode that cannot carry iECO is reported plainly and left alo
 > *Gesamtergebnis: OK.* = the whole run succeeded. A line containing **FEHLER**
 > (German) or **ERROR** (English) is a failure for that unit.
 
-Because the cron lines use `2>&1`, warnings from the underlying `msmart-ng` library land in the same file. Logs contain device names, IP addresses, and power/iECO state — **never** your device tokens or keys (those live only in the `chmod 600` `devices.json`).
+Because the cron lines use `2>&1`, warnings from the underlying `msmart-ng` library land in the same file. Logs contain device names, IP addresses, and power/iECO state; your device tokens and keys live in the `chmod 600` `devices.json`, and the tools do not print them. In every message that goes through either tool's message catalogue, each inserted value has its runs of 32 or more hex characters replaced by a marker such as `[hex:128]`. That is not a formality: the raw cloud reply quoted after a failed token refresh contains the cloud's token list, and `msmart-ng` raises errors that embed raw packet dumps (`Packet is too short: <hex>`).
+
+The catalogue is not the only way into that file, so two further guards close two more channels: library output written through Python's `logging` goes through a redacting log handler, and a traceback from an unhandled or chained exception goes through a redacting `excepthook`. That matters in practice — checked against the pinned `msmart-ng` 2026.7.0, no `warning`/`error` record names a token or key, but four of them dump a raw receive buffer from the device connection — at `WARNING`, so active at the level the tools configure. At `INFO` the library logs the device's local key outright.
+
+Two limits are worth knowing, because none of this is a guarantee about the whole file:
+
+- The redaction matches *contiguous* hex. The same value split by spaces, grouped, or rendered as a Python byte string is not recognised. Widening the pattern is not possible without also hiding device ids and checksums, so this is documented rather than half-fixed.
+- The log files are created with your normal umask — usually world-readable, unlike `devices.json`.
+
+`tests/KNOWN_GAPS.md` (gap 11) lists the channels found so far, which guard covers each, and what is left — including routes no guard sees, such as `warnings.warn()` and a credential that was never hexadecimal.
 
 ### Reading and monitoring them
 

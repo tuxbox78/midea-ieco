@@ -44,6 +44,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import os
 import re
 import shutil
@@ -56,7 +57,14 @@ from pathlib import Path
 # Sprachwahl: gemeinsame Mechanik fuer beide Werkzeuge (Reihenfolge und
 # englischer Default sind dort dokumentiert). resolve_lang wird mitimportiert,
 # damit es weiterhin ueber dieses Modul erreichbar bleibt.
-from midea_i18n import make_translator, resolve_lang  # noqa: F401
+from midea_i18n import (install_excepthook_redaction, install_log_redaction,
+                        make_translator, resolve_lang)  # noqa: F401
+
+# Dieses Werkzeug hat bisher gar kein Logging eingerichtet - dann bedient
+# logging.lastResort die Records einer Fremdbibliothek, ebenfalls nach stderr
+# und ebenfalls ab WARNING, nur ungefiltert. Der eigene Handler wird in main()
+# gesetzt, nicht hier: ein blosser Import soll den Root-Logger des Aufrufers
+# nicht umkonfigurieren (siehe install_log_redaction).
 
 CONFIG_PATH = Path(__file__).parent / "devices.json"
 SUBPROCESS_TIMEOUT = 60
@@ -828,6 +836,13 @@ def main() -> None:
     Erfolg, 2 = mindestens ein Geraet fehlgeschlagen, 1 = Nutzungs-/Konfig-Fehler
     (msmart fehlt, leere Geraeteliste bei --all, neues Geraet ohne --host,
     Schreibfehler)."""
+    # Beide Waechter erst hier, nicht beim Import: Root-Logger und
+    # sys.excepthook gelten prozessweit. Sie decken die zwei Wege ab, die der
+    # Meldungskatalog nicht sieht - was eine Fremdbibliothek ueber logging
+    # schreibt, und eine zweite Ausnahme in einem except-Block, die die ganze
+    # Kette samt der urspruenglichen Bibliotheksmeldung druckt.
+    install_log_redaction(logging.WARNING)
+    install_excepthook_redaction()
     parser = argparse.ArgumentParser(
         description=t("cli_description")
     )

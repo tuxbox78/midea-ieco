@@ -7,6 +7,85 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
+- **Error messages could put a device token into the log file.** The cron lines
+  redirect with `2>&1`, and the logs are created with the user's normal umask —
+  usually world-readable, while `devices.json` is `chmod 600`. Two quoted texts
+  can carry credentials: the raw `--debug` output of the discover call, which by
+  design contains the cloud's `tokenlist`, and the unaltered message of a library
+  error raised right after `authenticate(token, key)`. Every argument that reaches
+  a message catalogue now passes through `redact_hex`, which replaces any run of
+  32 or more hex characters with `[hex:<length>]`.
+
+  Three decisions worth naming. The filter sits in `make_translator`, not at the
+  call sites that print foreign text: a list of places to remember is the kind
+  of guard the next new message forgets — and this change began by nearly
+  missing an entire tool, since `midea_ieco_ensure.py` prints library errors
+  every 20 minutes while the token refresh runs weekly. It is deliberately **not**
+  tied to the `tokenlist` regex, because the more expensive of the two paths is
+  the one where that regex found nothing (a format drift) and therefore wrote the
+  raw text out; a redaction sharing the same assumption would fail in exactly that
+  case — measured against a renamed field. And the **length** stays visible:
+  `[hex:128]` in a "no tokenlist entry found" message says precisely the useful
+  thing, namely that the cloud did return something token-shaped and only the
+  extraction missed it.
+
+  No catalogue call site changed — the arity of every `t()` call is identical to
+  the previous commit (102 calls across 98 message keys, compared per key), so
+  the 60-pair argument-order survey stays valid. What the tools did gain is the
+  wiring described below.
+
+  The catalogue turned out to be one of three ways into that file that carry a
+  guard. An independent review of the first version of this change found the
+  other two, and both are now closed as well.
+
+  **The `logging` channel.** Whatever a library writes through Python's
+  `logging` goes to stderr without touching the catalogue, and both tools left
+  that path open — one via `basicConfig`, the other by configuring nothing at
+  all, which hands the records to `logging.lastResort`. Both now install a
+  `RedactingStreamHandler` instead. This is not theoretical: every
+  `warning`/`error`/`critical`/`exception` call in the pinned `msmart-ng`
+  2026.7.0 was extracted with an AST walk (a `grep` is not enough — the
+  interesting ones are multi-line and show only `_LOGGER.warning(` on their
+  first line). There are 65, all of them `warning` (35) or `error` (30) — so all
+  of them are active at `WARNING`, the level these tools configure. None names a
+  token or key, but four dump a raw receive buffer from the device connection.
+  At `INFO` the same module logs the device's local key outright.
+
+  The handler overrides `format()`, and the two obvious alternatives were
+  measured and rejected: a `logging.Filter` on the **root logger** never sees a
+  child logger's records — they reach the root's handlers without passing its
+  filters, and a child logger is exactly where a library writes. A filter
+  calling `record.getMessage()` raises on a malformed library log call, and
+  `Handler.filter()` sits outside `emit()`'s `try`, so that version turns a
+  library bug into a cron run that exits 1. `format()` runs inside `emit()`,
+  leaves the shared record's `msg` and `args` alone — what other handlers read —
+  and renders `exc_info`, which is what also covers asyncio's "Task exception
+  was never retrieved". `handleError` is overridden too, because the stock one
+  prints `record.args` raw.
+
+  **The traceback channel.** A second exception raised inside an `except` block
+  makes Python print the whole chain, including the original library text the
+  catalogue had just redacted. Both tools now install a redacting `excepthook`.
+  If the redaction itself fails, the previous hook runs: a traceback must never
+  disappear entirely.
+
+  Both guards are armed in `main()`, not at import time. That distinction was
+  measured, not assumed: installing the log handler at import cost an embedding
+  application its own configuration — root level clamped from `DEBUG` to
+  `WARNING` and every line doubled — where the `logging.basicConfig()` it
+  replaced had deliberately done nothing at all once handlers existed.
+
+  **What is still open**, stated plainly. The redaction matches *contiguous*
+  hex: the same value spaced, grouped or rendered as `repr(bytes)` is not
+  recognised, and widening the pattern would hide device ids and checksums too.
+  It is a format filter, not a secret filter — a credential that was never
+  hexadecimal (a JWT, a dashed session id) passes untouched. `warnings.warn()`
+  writes to stderr without passing any guard, and code that calls
+  `logging.basicConfig(force=True)` or clears the root handlers removes the log
+  guard again. `KNOWN_GAPS` gap 11 has the full channel table, which guard
+  covers what, and what is left. Verified by running both tools as separate
+  processes writing into a file with `2>&1` — the way cron does it — which is
+  also how the two wiring tests assert it.
 - **A cron job wrapped in parentheses counted as missing.** The inactive-job
   notice tokenizes the command field the way `/bin/sh` reads it, but its list of
   separators left out `(` and `)`. Anyone who groups the call to redirect it as a
