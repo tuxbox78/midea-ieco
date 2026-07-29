@@ -638,10 +638,19 @@ def refresh_is_due(now: float, state: dict) -> bool:
         einem frueher mit korrekter Zeit geschriebenen Stempel liegt). Ihn
         blockieren zu lassen hiesse, den Nachholer auf genau dem Rechnertyp
         dauerhaft stillzulegen, fuer den er gebaut ist - die fruehere Fassung tat
-        das. Der Schaden ist so auf hoechstens einen Wiederhol-Abstand Blockade
-        nach einem Rueckwaertssprung gedeckelt und heilt sich selbst.
+        das.
 
     Das Blockfenster fuer last_attempt ist damit symmetrisch: [-RETRY, +RETRY).
+    Der bewusste Tausch dahinter: die fruehere Fassung schwieg bei einem
+    weit-zukuenftigen Stempel FUER IMMER (die schlimmste Richtung); diese laeuft
+    stattdessen. Der Preis steht in die andere Richtung und ist NICHT immer
+    selbstheilend: setzt sich die Uhr auf einen festen falschen Wert, blockiert
+    der nun geschriebene last_attempt die folgenden Starts wie vorgesehen; SPRINGT
+    die Uhr dagegen bei jedem Boot erneut um mehr als einen Wiederhol-Abstand,
+    laeuft der Nachholer bei jedem Boot (statt ewig zu schweigen). Beides ist dem
+    Dauerschweigen vorzuziehen, aber die Every-Boot-Verbindung ist ein realer Rand
+    und steht in KNOWN_GAPS - ohne vertrauenswuerdige Zeitquelle beim '@reboot'
+    ist er nicht sauber von einem echten kuerzlichen Versuch zu trennen.
 
     Entschieden wird ausschliesslich ueber die ``*_epoch``-Zahlen; die
     ``*_utc``-Zeichenketten daneben sind reine Lesehilfe."""

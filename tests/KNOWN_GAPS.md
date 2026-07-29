@@ -693,26 +693,30 @@ listed it as equivalent, and that no longer holds.
   whose failure mode is permanent silent non-execution is the wrong trade for a tool
   whose entire purpose is preventing silent non-execution. Written down instead of
   left to be rediscovered.
-- **A backward clock still costs one skipped catch-up per boot until it corrects.**
-  The future-attempt block is bounded (a stamp more than one retry interval ahead no
-  longer silences the catch-up forever — that was fixed), but a stamp *up to* a
-  retry interval ahead still blocks. On a machine whose clock reads a recent-past
-  date at boot and only corrects via NTP a few seconds later, a boot where the check
-  runs before NTP lands can skip that boot's catch-up. *Cost:* the catch-up is
-  missed on that boot, caught on the next one where the clock is right in time — not
-  permanent, and the weekly line remains the backstop on any host that is up for it.
-  *Why not closed:* distinguishing "clock briefly behind" from "genuine recent
-  attempt" needs a trusted time source the tool does not have at `@reboot`; the
-  bounded window is the honest compromise.
-- **`--only-if-due` with neither `--all` nor `--name` exits 2, not 1.** The explicit
-  check gives exit 1 for `--only-if-due --name X`; but dropping `--all` entirely
-  leaves argparse's own required-group error, which exits 2 — the code this tool uses
-  for "a device failed". A crontab typo that omits `--all` therefore reaches a
-  monitor as a device fault rather than a usage error. *Why not closed:* catching it
-  would mean giving up argparse's `required=True` group and validating the two flags
-  by hand, a larger change to the argument parsing than a mis-mapped exit code on a
-  hand-edit warrants. Recorded rather than fixed.
+- **A broken boot clock can cost a skipped catch-up, and — the other way — an extra
+  connection.** The future-attempt block is bounded: a stamp up to one retry interval
+  ahead still blocks (a genuine recent attempt with the clock nudged back), a stamp
+  further ahead no longer blocks (which is what stopped the old block-forever). Both
+  edges have a cost on a machine whose clock is wrong at `@reboot`:
+  - *skip direction:* a stamp a little ahead (NTP about to nudge the clock back)
+    blocks that boot's catch-up; missed on that boot, caught on the next where the
+    clock is right in time. Not permanent, weekly line still the backstop.
+  - *connect direction:* a stamp far ahead now lets the run proceed — one connection
+    where the old rule stayed silent (measured: a single boot with the clock a few
+    retry intervals back, old 0 connections, bounded window 1). If the clock then
+    settles on a fixed wrong value, the freshly written `last_attempt` blocks the
+    following starts as intended, so it self-limits. It does **not** self-limit under
+    a clock that runs monotonically *backward* — each boot earlier than the last by
+    more than a retry interval — where the catch-up connects on every boot instead of
+    staying silent (measured over ten such boots: old 1 connection, bounded window
+    10). That is the dense connection sequence these units answer with radio silence;
+    it needs a clock that keeps moving backward, which is pathological but not
+    impossible.
 
+  Both are preferred to the permanent silence the old rule produced (the worst
+  direction for this project), which is why the window ships as is. *Why not closed:*
+  telling "clock briefly wrong" from "genuine recent attempt" needs a trusted time
+  source the tool does not have at `@reboot`.
 - **A catch-up line whose `--only-if-due` sits inside a quoted composite is judged
   correctly only because the detector subsplits.** `_cron_line_is_catchup` mirrors
   `cron_scan_tools` — tokenize, skip the cd operand and redirection targets, then
@@ -725,6 +729,15 @@ listed it as equivalent, and that no longer holds.
   installer writes, and no realistic hand-written one, has that shape; it is the same
   class `cron_scan_tools` already carries for tool names, recorded here so the two
   are known to share it.
+- **`--only-if-due` with neither `--all` nor `--name` exits 2, not 1.** The explicit
+  check gives exit 1 for `--only-if-due --name X`; but dropping `--all` entirely
+  leaves argparse's own required-group error, which exits 2 — the code this tool uses
+  for "a device failed". A crontab typo that omits `--all` therefore reaches a
+  monitor as a device fault rather than a usage error. *Why not closed:* catching it
+  would mean giving up argparse's `required=True` group and validating the two flags
+  by hand, a larger change to the argument parsing than a mis-mapped exit code on a
+  hand-edit warrants. Recorded rather than fixed.
+
 - **A capability answer that arrives but cannot be decoded is still blamed on the
   unit.** `_send_commands_get_responses` sets `_online = len(responses) > 0` on the
   **raw** byte list, *before* `Response.construct` validates and discards anything
