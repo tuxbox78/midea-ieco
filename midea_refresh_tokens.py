@@ -344,6 +344,19 @@ _MESSAGES: dict[str, tuple[str, str]] = {
         "devices.json updated: %s",
         "devices.json aktualisiert: %s"),
     # --- Nachhol-Lauf (--only-if-due) --------------------------------------
+    "due_needs_all": (
+        "ERROR: --only-if-due only works together with --all. The stored state "
+        "records when ALL devices were last refreshed, so the question 'is it "
+        "due?' has no meaning for a single device.",
+        "FEHLER: --only-if-due funktioniert nur zusammen mit --all. Der "
+        "gespeicherte Zustand haelt fest, wann ALLE Geraete zuletzt aufgefrischt "
+        "wurden - fuer ein einzelnes Geraet hat die Frage 'ist es faellig?' "
+        "keinen Bezug."),
+    "due_skipped": (
+        "Token refresh is not due yet - nothing done (last full refresh: %s, "
+        "last attempt: %s).",
+        "Token-Refresh ist noch nicht faellig - nichts getan (letzter "
+        "vollstaendiger Lauf: %s, letzter Versuch: %s)."),
     "due_state_unreadable": (
         "WARNING: refresh_state.json could not be read (%s: %s) - treating the "
         "token refresh as due.",
@@ -415,6 +428,11 @@ _MESSAGES: dict[str, tuple[str, str]] = {
     "cli_help_host": (
         "IP address (only together with --name, for NEW devices)",
         "IP-Adresse (nur zusammen mit --name fuer NEUE Geraete)"),
+    "cli_help_only_if_due": (
+        "Only refresh if the last full refresh is overdue (for the @reboot "
+        "catch-up job; requires --all)",
+        "Nur auffrischen, wenn der letzte vollstaendige Lauf ueberfaellig ist "
+        "(fuer den @reboot-Nachholer; erfordert --all)"),
 }
 
 
@@ -1113,7 +1131,12 @@ def main() -> None:
     (update_device) und schreibt devices.json atomar zurueck. Exit-Code: 0 =
     Erfolg, 2 = mindestens ein Geraet fehlgeschlagen, 1 = Nutzungs-/Konfig-Fehler
     (msmart fehlt, leere Geraeteliste bei --all, neues Geraet ohne --host,
-    Schreibfehler)."""
+    --only-if-due ohne --all, Schreibfehler).
+
+    Ein --all-Lauf fuehrt zusaetzlich refresh_state.json fort: den Versuch vor
+    der Geraeteschleife, den Erfolg ganz am Ende. Mit --only-if-due wird dieser
+    Zustand vorher ausgewertet und der Lauf ggf. mit Exit 0 uebersprungen (siehe
+    refresh_is_due)."""
     # Beide Waechter erst hier, nicht beim Import: Root-Logger und
     # sys.excepthook gelten prozessweit. Sie decken die zwei Wege ab, die der
     # Meldungskatalog nicht sieht - was eine Fremdbibliothek ueber logging
@@ -1128,7 +1151,37 @@ def main() -> None:
     group.add_argument("--all", action="store_true", help=t("cli_help_all"))
     group.add_argument("--name", help=t("cli_help_name"))
     parser.add_argument("--host", help=t("cli_help_host"))
+    parser.add_argument("--only-if-due", action="store_true",
+                        help=t("cli_help_only_if_due"))
     args = parser.parse_args()
+
+    # --only-if-due ist eine Aussage ueber die GESAMTE Flotte: der Zustand haelt
+    # fest, wann zuletzt ALLE Geraete aufgefrischt wurden. Mit --name haette die
+    # Frage "ist es faellig?" keinen Bezug - lieber klar ablehnen als eine
+    # unklare Bedeutung anbieten.
+    #
+    # Exit 1 (Nutzungsfehler) statt parser.error(), das mit 2 endet: 2 ist in
+    # diesem Werkzeug fuer "mindestens ein Geraet fehlgeschlagen" vergeben, und
+    # ein Monitoring, das darauf achtet, soll einen Tippfehler in der Crontab
+    # nicht als Geraeteausfall melden.
+    if args.only_if_due and not args.all:
+        print(t("due_needs_all"), file=sys.stderr)
+        sys.exit(1)
+
+    # Zustand nur bei --all lesen und spaeter fortschreiben: ein Lauf auf ein
+    # einzelnes Geraet sagt nichts ueber die Flotte und darf den Vermerk daher
+    # weder auswerten noch veraendern.
+    refresh_state = read_refresh_state() if args.all else {}
+
+    # Der Ausstieg liegt VOR der msmart-Pruefung und vor load_config(): ein
+    # nicht faelliger Lauf soll ueberhaupt nichts tun - kein Import, kein
+    # Dateizugriff, kein Netzkontakt. Exit 0, damit cron ihn nicht als Fehler
+    # meldet; er ist ja das erwartete Ergebnis.
+    if args.only_if_due and not refresh_is_due(time.time(), refresh_state):
+        print(t("due_skipped",
+                _state_stamp_text(refresh_state, "last_success_utc"),
+                _state_stamp_text(refresh_state, "last_attempt_utc")))
+        sys.exit(0)
 
     # Fruehzeitige, klare Meldung statt eines rohen Tracebacks mitten im Lauf,
     # falls msmart-ng im aktiven Interpreter fehlt (verify_credentials importiert
@@ -1168,6 +1221,14 @@ def main() -> None:
             new_entry = {"name": args.name, "ip": args.host, "port": 6444, "id": "", "token": "", "key": ""}
             targets = [new_entry]
 
+    # Ab hier wird tatsaechlich gegen die Geraete gearbeitet - den Versuch JETZT
+    # vermerken, nicht erst am Ende (Begruendung in record_refresh_attempt).
+    # Erst hier und nicht frueher: ein --all auf eine leere devices.json bricht
+    # oben mit Exit 1 ab, ohne ein Geraet beruehrt zu haben, und waere als
+    # "Versuch" gezaehlt eine Sperre ohne Anlass.
+    if args.all:
+        record_refresh_attempt(refresh_state, time.time())
+
     ok = True
     successful_new_entry = False
     for idx, dev in enumerate(targets):
@@ -1198,6 +1259,14 @@ def main() -> None:
             print(t("main_write_failed", type(exc).__name__, exc), file=sys.stderr)
             sys.exit(1)
         print(t("main_updated", CONFIG_PATH))
+
+    # Erst hier: "vollstaendig gelungen" heisst ALLE Zielgeraete erfolgreich UND
+    # devices.json geschrieben. Ein Schreibfehler verlaesst main() oben bereits
+    # mit Exit 1, ein Teilerfolg ist durch 'ok' ausgeschlossen. Eigener
+    # Zeitstempel statt des Entscheidungs-"jetzt" von oben: das Feld
+    # protokolliert, WANN der Lauf gelungen ist.
+    if args.all and ok:
+        record_refresh_success(refresh_state, time.time())
 
     sys.exit(0 if ok else 2)
 

@@ -3026,6 +3026,133 @@ class RefreshStateWriteTests(_StateAndConfigMixin):
                 mrt.record_refresh_success({}, self.NOW)
 
 
+class OnlyIfDueMainTests(_StateAndConfigMixin):
+    """--only-if-due im Zusammenspiel mit main(): Exit-Codes, Netzabstinenz und
+    die Frage, welcher Lauf welchen Vermerk hinterlaesst."""
+
+    DEVICES = '{"devices": [{"name": "A", "ip": "1.2.3.4"}]}'
+
+    def _run(self, argv, *, devices=None, update_ok=True):
+        self.path.write_text(devices if devices is not None else self.DEVICES,
+                             encoding="utf-8")
+        seen = []
+        with mock.patch.dict(sys.modules, {"msmart": mock.MagicMock()}), \
+                mock.patch.object(mrt, "update_device",
+                                  lambda dev: seen.append(dev.get("name")) or update_ok), \
+                mock.patch.object(mrt.time, "sleep", lambda s: None), \
+                mock.patch.object(mrt.sys, "argv", ["x", *argv]), \
+                redirect_stdout(io.StringIO()) as out, \
+                redirect_stderr(io.StringIO()) as err:
+            with self.assertRaises(SystemExit) as cm:
+                mrt.main()
+        return cm.exception.code, seen, out.getvalue(), err.getvalue()
+
+    def test_a_fresh_state_skips_with_exit_0_and_touches_nothing(self):
+        self.write_state({"last_success_epoch": int(mrt.time.time()) - 3600})
+        before_state = self.state_path.read_bytes()
+        code, seen, out, _ = self._run(["--all", "--only-if-due"])
+        self.assertEqual(code, 0)          # sonst meldete cron einen Fehler
+        self.assertEqual(seen, [])         # kein Geraet beruehrt
+        self.assertIn(_longest_literal(mrt._MESSAGES["due_skipped"][0]), out)
+        self.assertEqual(self.state_path.read_bytes(), before_state)
+        self.assertEqual(self.path.read_text(encoding="utf-8"), self.DEVICES)
+
+    def test_the_skip_happens_before_the_config_is_even_read(self):
+        # Ein nicht faelliger Lauf soll NICHTS tun. load_config() ist die erste
+        # Stelle nach dem Ausstieg, die ueberhaupt etwas anfasst.
+        self.write_state({"last_success_epoch": int(mrt.time.time()) - 3600})
+        with mock.patch.object(mrt, "load_config",
+                               mock.Mock(side_effect=AssertionError("zu frueh gelesen"))):
+            code, seen, _, _ = self._run(["--all", "--only-if-due"])
+        self.assertEqual(code, 0)
+        self.assertEqual(seen, [])
+
+    def test_an_overdue_state_runs_the_refresh(self):
+        self.write_state({"last_success_epoch": int(mrt.time.time()) - 30 * 86400})
+        code, seen, _, _ = self._run(["--all", "--only-if-due"])
+        self.assertEqual(code, 0)
+        self.assertEqual(seen, ["A"])
+
+    def test_without_any_state_the_catch_up_runs(self):
+        code, seen, _, _ = self._run(["--all", "--only-if-due"])
+        self.assertEqual(code, 0)
+        self.assertEqual(seen, ["A"])
+
+    def test_only_if_due_without_all_is_a_usage_error(self):
+        code, seen, _, err = self._run(["--name", "A", "--only-if-due"])
+        # 1, nicht 2: 2 heisst in diesem Werkzeug "mindestens ein Geraet
+        # fehlgeschlagen" - ein Tippfehler in der Crontab ist kein Geraetefehler.
+        self.assertEqual(code, 1)
+        self.assertEqual(seen, [])
+        self.assertIn(_longest_literal(mrt._MESSAGES["due_needs_all"][0]), err)
+        self.assertFalse(self.state_path.exists())
+
+    def test_a_successful_all_run_records_both_stamps(self):
+        code, _, _, _ = self._run(["--all"])
+        self.assertEqual(code, 0)
+        data = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertIn("last_attempt_epoch", data)
+        self.assertIn("last_success_epoch", data)
+
+    def test_a_partial_failure_records_the_attempt_but_not_the_success(self):
+        # Sonst hielte eine Flotte mit einem dauerhaft stummen Geraet sich fuer
+        # frisch aufgefrischt.
+        self.write_state({"last_success_epoch": 111, "last_success_utc": "alt"})
+        code, _, _, _ = self._run(["--all"], update_ok=False)
+        self.assertEqual(code, 2)
+        data = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(data["last_success_epoch"], 111)     # unveraendert
+        self.assertEqual(data["last_success_utc"], "alt")
+        self.assertGreater(data["last_attempt_epoch"], 111)   # neu vermerkt
+
+    def test_a_single_device_run_leaves_the_state_untouched(self):
+        # Ein --name-Lauf sagt nichts ueber die Flotte - weder lesend noch
+        # schreibend darf er den Vermerk beruehren.
+        self.write_state({"last_success_epoch": 111})
+        before = self.state_path.read_bytes()
+        code, seen, _, _ = self._run(["--name", "A"])
+        self.assertEqual(code, 0)
+        self.assertEqual(seen, ["A"])
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+    def test_an_empty_device_list_records_no_attempt(self):
+        # Der Lauf bricht ab, ohne ein Geraet beruehrt zu haben. Als "Versuch"
+        # gezaehlt waere das eine 24-Stunden-Sperre ohne Anlass.
+        code, seen, _, _ = self._run(["--all"], devices='{"devices": []}')
+        self.assertEqual(code, 1)
+        self.assertEqual(seen, [])
+        self.assertFalse(self.state_path.exists())
+
+    def test_the_attempt_is_recorded_before_the_devices_are_touched(self):
+        # Ein Lauf, der mitten in der Schleife abstuerzt (eine unerwartete
+        # Ausnahme aus msmart-ng etwa), muss trotzdem als Versuch gelten - sonst
+        # haette der Sturmwaechter beim naechsten Neustart wieder freie Bahn.
+        # Genau deshalb steht der Vermerk VOR der Schleife, nicht dahinter;
+        # diese Zusicherung ist das, was die Reihenfolge festnagelt.
+        self.path.write_text(self.DEVICES, encoding="utf-8")
+        with mock.patch.dict(sys.modules, {"msmart": mock.MagicMock()}), \
+                mock.patch.object(mrt, "update_device",
+                                  mock.Mock(side_effect=RuntimeError("Absturz"))), \
+                mock.patch.object(mrt.sys, "argv", ["x", "--all"]), \
+                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            with self.assertRaises(RuntimeError):
+                mrt.main()
+        data = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertIn("last_attempt_epoch", data)
+        self.assertNotIn("last_success_epoch", data)
+
+    def test_an_unreadable_state_does_not_stop_a_regular_run(self):
+        self.state_path.write_text("{ kaputt", encoding="utf-8")
+        code, seen, _, err = self._run(["--all"])
+        self.assertEqual(code, 0)
+        self.assertEqual(seen, ["A"])
+        self.assertIn(_longest_literal(mrt._MESSAGES["due_state_unreadable"][0]),
+                      err)
+        # ... und der Zustand heilt sich: der Lauf schreibt ihn neu.
+        data = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertIn("last_success_epoch", data)
+
+
 class StatePathAnchorTests(unittest.TestCase):
     """refresh_state.json haengt am MODULVERZEICHNIS, nicht am cwd - dieselbe
     Begruendung wie bei devices.json: Cron und Wrapper starten mit beliebigem
