@@ -2763,5 +2763,209 @@ class VerifyTimeoutHeadroomTests(unittest.TestCase):
                            authenticate_worst_case + refresh_worst_case)
 
 
+class _StateAndConfigMixin(unittest.TestCase):
+    """Pinnt devices.json UND refresh_state.json in dasselbe Temp-Verzeichnis -
+    so, wie beide im Installationsverzeichnis auch nebeneinander liegen."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = Path(self.tmp.name)
+        self.path = base / "devices.json"
+        self.state_path = base / "refresh_state.json"
+        for attr, value in (("CONFIG_PATH", self.path),
+                            ("STATE_PATH", self.state_path)):
+            orig = getattr(mrt, attr)
+            setattr(mrt, attr, value)
+            self.addCleanup(lambda a=attr, o=orig: setattr(mrt, a, o))
+
+    def write_state(self, data):
+        self.state_path.write_text(json.dumps(data), encoding="utf-8")
+
+
+class ReadRefreshStateTests(_StateAndConfigMixin):
+    """Der Zustand ist Buchhaltung, kein Konfigurationsdokument: er darf den
+    Lauf NIE abbrechen, und jeder Zweifelsfall muss zu einem leeren Zustand
+    fuehren - der gilt als 'noch nie gelaufen' und laesst den Nachholer
+    arbeiten. Die Gegenrichtung (Zweifel -> 'ist frisch') waere die stille."""
+
+    def test_missing_file_is_silent_and_empty(self):
+        with redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(mrt.read_refresh_state(), {})
+        # Vor dem ersten vollstaendigen Lauf ist das der Normalfall - eine
+        # Warnung dafuer waere Rauschen in jedem frischen refresh.log.
+        self.assertEqual(err.getvalue(), "")
+
+    def test_valid_object_is_returned_unchanged(self):
+        self.write_state({"last_success_epoch": 42, "extra": "kept"})
+        self.assertEqual(mrt.read_refresh_state(),
+                         {"last_success_epoch": 42, "extra": "kept"})
+
+    def test_broken_json_is_reported_and_empty(self):
+        self.state_path.write_text("{ not json", encoding="utf-8")
+        with redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(mrt.read_refresh_state(), {})
+        self.assertIn(_longest_literal(mrt._MESSAGES["due_state_unreadable"][0]),
+                      err.getvalue())
+
+    def test_invalid_utf8_is_reported_and_empty(self):
+        # UnicodeDecodeError ist ein ValueError, aber kein JSONDecodeError -
+        # dieselbe Falle, die load_config() bereits abdeckt.
+        self.state_path.write_bytes(b'{"last_success_utc": "K\xfcche"}')
+        with redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(mrt.read_refresh_state(), {})
+        self.assertIn(_longest_literal(mrt._MESSAGES["due_state_unreadable"][0]),
+                      err.getvalue())
+
+    def test_a_json_value_that_is_not_an_object_is_reported_and_empty(self):
+        for payload in ("[]", '"text"', "42", "null"):
+            with self.subTest(payload=payload):
+                self.state_path.write_text(payload, encoding="utf-8")
+                with redirect_stderr(io.StringIO()) as err:
+                    self.assertEqual(mrt.read_refresh_state(), {})
+                self.assertIn(
+                    _longest_literal(mrt._MESSAGES["due_state_bad_shape"][0]),
+                    err.getvalue())
+
+
+class StateAgeTests(unittest.TestCase):
+    """_state_age_seconds trennt brauchbare von unbrauchbaren Zeitstempeln.
+    Rein rechnerisch, ohne Uhr und ohne Dateisystem."""
+
+    def test_usable_values_yield_the_age(self):
+        self.assertEqual(mrt._state_age_seconds({"k": 100}, "k", 160.0), 60.0)
+        self.assertEqual(mrt._state_age_seconds({"k": 100.5}, "k", 160.5), 60.0)
+
+    def test_a_future_stamp_yields_a_negative_age(self):
+        # Bewusst NICHT hier aufgeloest - die beiden Aufrufer brauchen darauf
+        # gegenlaeufige Antworten (siehe refresh_is_due).
+        self.assertEqual(mrt._state_age_seconds({"k": 200}, "k", 100.0), -100.0)
+
+    def test_missing_key_is_unusable(self):
+        self.assertIsNone(mrt._state_age_seconds({}, "k", 1.0))
+
+    def test_a_bool_is_not_an_epoch(self):
+        # isinstance(True, int) ist in Python WAHR: ohne die ausdrueckliche
+        # bool-Pruefung ginge ein von Hand eingetragenes 'true' als Epoche 1
+        # durch - ein Zeitstempel von 1970, also "uralt und damit faellig".
+        for value in (True, False):
+            with self.subTest(value=value):
+                self.assertIsNone(mrt._state_age_seconds({"k": value}, "k", 1.0))
+
+    def test_non_numeric_values_are_unusable(self):
+        for value in ("2026-07-29", None, [], {}, "42"):
+            with self.subTest(value=value):
+                self.assertIsNone(mrt._state_age_seconds({"k": value}, "k", 1.0))
+
+    def test_non_finite_values_are_unusable(self):
+        # json.load() liest NaN und Infinity klaglos ein; ohne diese Pruefung
+        # ergaebe 'now - inf' ein -inf und damit eine sinnlose Entscheidung.
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=value):
+                self.assertIsNone(mrt._state_age_seconds({"k": value}, "k", 1.0))
+
+    def test_json_really_accepts_the_non_finite_literals(self):
+        # Gegenprobe zur Begruendung oben: waere das nicht so, waere die
+        # isfinite-Pruefung eine Zusicherung ohne Anlass.
+        self.assertNotEqual(json.loads('{"k": NaN}')["k"],
+                            json.loads('{"k": NaN}')["k"])   # NaN != NaN
+        self.assertEqual(json.loads('{"k": Infinity}')["k"], float("inf"))
+
+
+class RefreshIsDueTests(unittest.TestCase):
+    """Die vollstaendige Entscheidungstabelle. NOW ist frei waehlbar, damit
+    jeder Grenzfall ohne Wartezeit und ohne Wanduhr pruefbar ist."""
+
+    NOW = 1_800_000_000.0
+    DUE = mrt.REFRESH_DUE_AFTER_SECONDS
+    RETRY = mrt.REFRESH_RETRY_AFTER_SECONDS
+
+    def due(self, **state):
+        return mrt.refresh_is_due(self.NOW, state)
+
+    def test_an_empty_state_is_due(self):
+        self.assertTrue(self.due())
+
+    def test_a_fresh_success_blocks(self):
+        self.assertFalse(self.due(last_success_epoch=self.NOW - 3600))
+
+    def test_an_old_success_with_an_old_attempt_is_due(self):
+        self.assertTrue(self.due(last_success_epoch=self.NOW - 30 * 86400,
+                                 last_attempt_epoch=self.NOW - 30 * 86400))
+
+    def test_an_old_success_with_a_fresh_attempt_blocks(self):
+        # Der Sturmwaechter: ohne ihn liefe ein oft neu startender Rechner bei
+        # JEDEM Start erneut gegen die Geraete, solange kein Lauf gelingt.
+        self.assertFalse(self.due(last_success_epoch=self.NOW - 30 * 86400,
+                                  last_attempt_epoch=self.NOW - 3600))
+
+    def test_the_due_boundary_counts_as_due(self):
+        self.assertTrue(self.due(last_success_epoch=self.NOW - self.DUE))
+        self.assertFalse(self.due(last_success_epoch=self.NOW - self.DUE + 1))
+
+    def test_the_retry_boundary_counts_as_allowed(self):
+        old = self.NOW - 30 * 86400
+        self.assertTrue(self.due(last_success_epoch=old,
+                                 last_attempt_epoch=self.NOW - self.RETRY))
+        self.assertFalse(self.due(last_success_epoch=old,
+                                  last_attempt_epoch=self.NOW - self.RETRY + 1))
+
+    def test_a_success_in_the_future_is_due(self):
+        # Rechner ohne RTC: die Uhr kann beim Booten zurueckliegen, ein alter
+        # Zeitstempel steht dann in der Zukunft. Einem solchen Wert darf kein
+        # Refresh geopfert werden.
+        self.assertTrue(self.due(last_success_epoch=self.NOW + 30 * 86400))
+
+    def test_an_attempt_in_the_future_blocks(self):
+        # Gegenlaeufig zum Erfolgsfeld, und mit Absicht: waere auch das
+        # "erlaubt", verloere der Sturmwaechter bei rueckwaerts laufender Uhr
+        # genau dann seine Wirkung, wenn er gebraucht wird. Der Wochenlauf
+        # schreibt last_attempt neu, sobald die Uhr wieder stimmt.
+        self.assertFalse(self.due(last_success_epoch=self.NOW - 30 * 86400,
+                                  last_attempt_epoch=self.NOW + 3600))
+
+    def test_unusable_values_never_suppress_a_refresh(self):
+        for bad in (True, "gestern", None, [], float("nan")):
+            with self.subTest(bad=bad):
+                self.assertTrue(self.due(last_success_epoch=bad))
+
+    def test_an_unusable_attempt_does_not_block(self):
+        # Sonst braechte ein einziger kaputter Wert den Nachholer dauerhaft zum
+        # Schweigen - wieder die stille Richtung.
+        self.assertTrue(self.due(last_success_epoch=self.NOW - 30 * 86400,
+                                 last_attempt_epoch="kaputt"))
+
+    def test_the_two_thresholds_are_ordered_as_documented(self):
+        # Ein Wiederholabstand groesser als das Faelligkeitsfenster hiesse: der
+        # Sturmwaechter blockiert laenger, als die Faelligkeit ueberhaupt
+        # zurueckliegen darf - der Nachholer kaeme nie zum Zug.
+        self.assertLess(mrt.REFRESH_RETRY_AFTER_SECONDS,
+                        mrt.REFRESH_DUE_AFTER_SECONDS)
+
+
+class StatePathAnchorTests(unittest.TestCase):
+    """refresh_state.json haengt am MODULVERZEICHNIS, nicht am cwd - dieselbe
+    Begruendung wie bei devices.json: Cron und Wrapper starten mit beliebigem
+    Arbeitsverzeichnis. Ein relativer Pfad legte je nach Aufrufort eine zweite
+    Datei an, und der Nachhol-Lauf saehe nie einen Vorlauf."""
+
+    def test_the_state_path_is_anchored_at_the_module_directory(self):
+        path = Path(mrt.__file__).resolve().parent / "refresh_state.json"
+        self.assertTrue(path.is_absolute())
+        self.assertEqual((REPO_DIR / "refresh_state.json").resolve(), path)
+
+    def test_the_state_path_constant_itself_is_absolute(self):
+        text = (REPO_DIR / "midea_refresh_tokens.py").read_text(encoding="utf-8")
+        self.assertIn('STATE_PATH = Path(__file__).parent / "refresh_state.json"',
+                      text)
+
+    def test_the_state_file_is_ignored_by_git(self):
+        # Bei einer git-basierten Installation liegt die Datei IM Arbeitsbaum.
+        # Ohne Eintrag taucht sie dort dauerhaft als unversionierte Aenderung
+        # auf - und irgendwann in einem Commit.
+        ignored = (REPO_DIR / ".gitignore").read_text(encoding="utf-8")
+        self.assertIn("refresh_state.json", ignored)
+
+
 if __name__ == "__main__":
     unittest.main()

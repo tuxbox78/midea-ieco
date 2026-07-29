@@ -9,6 +9,11 @@ devices.json.bak
 # credentials), but keep it ignored so an upgraded install can never commit an
 # old one that still holds a plaintext password.
 credentials.json
+# Bookkeeping of midea_refresh_tokens.py: when a full refresh was last started
+# and last succeeded. No secrets in it (timestamps only), but it is per-install
+# runtime state — and in a git-based install it sits right inside the working
+# tree, where it would otherwise show up forever as an untracked change.
+refresh_state.json
 # Isolation config for the midealocal CLI. 0.2.0 writes it only inside a
 # per-call temp dir (an empty {} that pins the CLI away from a user-global
 # config), never in the project tree — ignored purely defensively.

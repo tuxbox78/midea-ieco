@@ -45,6 +45,7 @@ import argparse
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -73,6 +74,18 @@ from midea_i18n import (install_excepthook_redaction, install_log_redaction,
 # nicht umkonfigurieren (siehe install_log_redaction).
 
 CONFIG_PATH = Path(__file__).parent / "devices.json"
+
+# Buchhaltung des Token-Refresh: wann zuletzt ein vollstaendiger Lauf BEGONNEN
+# hat und wann zuletzt einer vollstaendig GELUNGEN ist. Genau wie CONFIG_PATH am
+# MODULVERZEICHNIS aufgehaengt, nicht am Arbeitsverzeichnis: Cron-Lauf und
+# Wrapper starten mit beliebigem cwd, ein relativer Pfad legte je nach Aufrufort
+# eine zweite Datei an - und der Nachhol-Lauf saehe nie einen Vorlauf.
+#
+# Die Datei enthaelt KEINE Geheimnisse (nur Zeitstempel), bekommt aber dieselben
+# Rechte 0600 wie devices.json: sie liegt daneben, entsteht ueber denselben
+# Schreibweg, und eine Ausnahme von "was dieses Werkzeug schreibt, gehoert dem
+# Nutzer allein" braeuchte einen Grund, den es hier nicht gibt.
+STATE_PATH = Path(__file__).parent / "refresh_state.json"
 SUBPROCESS_TIMEOUT = 60
 
 # Zeitlimit fuer die GESAMTE Verifikation eines Kandidaten, also authenticate()
@@ -107,6 +120,21 @@ VERIFY_TIMEOUT = 30
 # Grund (RETRY_DELAY).
 CANDIDATE_DELAY = 5.0
 DEVICE_DELAY = 2.0
+
+# Ab welchem Alter des letzten VOLLSTAENDIGEN Erfolgs ein Nachhol-Lauf
+# (--only-if-due) faellig ist. Bewusst etwas unter dem Wochentakt des regulaeren
+# Cron-Jobs (0 3 * * 0): ein Rechner, der kurz VOR dem Slot startet, soll
+# nachholen statt ihn knapp zu verfehlen.
+REFRESH_DUE_AFTER_SECONDS = 6 * 24 * 3600
+
+# Untere Schranke zwischen zwei Nachhol-VERSUCHEN, unabhaengig vom Ausgang.
+# Ohne sie liefe ein Rechner, der oft neu startet, bei jedem Start erneut gegen
+# die Geraete - und '@reboot' heisst "der cron-Daemon wurde gestartet", nicht
+# "das System wurde gebootet": ein Paket-Update des cron-Dienstes reicht dafuer
+# bereits aus. Dieselbe Ruecksicht wie bei CANDIDATE_DELAY/DEVICE_DELAY, nur
+# eine Ebene hoeher: eine dichte Folge von Verbindungsaufbauten ist genau das,
+# was ein Midea-Geraet mit voruebergehender Funkstille quittiert.
+REFRESH_RETRY_AFTER_SECONDS = 24 * 3600
 
 
 # Katalog: key -> (englisch, deutsch). Platzhalter im printf-Stil (%s), damit
@@ -314,6 +342,17 @@ _MESSAGES: dict[str, tuple[str, str]] = {
     "main_updated": (
         "devices.json updated: %s",
         "devices.json aktualisiert: %s"),
+    # --- Nachhol-Lauf (--only-if-due) --------------------------------------
+    "due_state_unreadable": (
+        "WARNING: refresh_state.json could not be read (%s: %s) - treating the "
+        "token refresh as due.",
+        "WARNUNG: refresh_state.json konnte nicht gelesen werden (%s: %s) - der "
+        "Token-Refresh gilt daher als faellig."),
+    "due_state_bad_shape": (
+        "WARNING: refresh_state.json does not contain a JSON object - treating "
+        "the token refresh as due.",
+        "WARNUNG: refresh_state.json enthaelt kein JSON-Objekt - der "
+        "Token-Refresh gilt daher als faellig."),
     # --- Fehler des discover-Unterprozesses -------------------------------
     # Diese Texte werden als RuntimeError geworfen UND ueber "dev_fetch_failed"
     # an den Nutzer ausgegeben - sie muessen daher genauso uebersetzt sein wie
@@ -463,6 +502,108 @@ def save_config(config: dict) -> None:
     _atomic_write_json). Bei einem Schreibfehler bleibt die bisherige Datei
     unveraendert; der Fehler (OSError) wird an den Aufrufer weitergereicht."""
     _atomic_write_json(CONFIG_PATH, config)
+
+
+# =============================================================================
+# Nachhol-Lauf: Zustand lesen, bewerten, fortschreiben
+#
+# Wozu das Ganze: der regulaere Cron-Job frischt die Tokens woechentlich auf
+# (0 3 * * 0). Ein Rechner, der zu dieser Zeit ausgeschaltet war, ueberspringt
+# den Termin STILL - und abgelaufene Tokens sind der haeufigste Weg, auf dem
+# dieses Werkzeug im Feld ausfaellt. Eine zusaetzliche '@reboot'-Zeile holt den
+# Lauf beim naechsten Start nach; damit sie nicht bei JEDEM Start gegen die
+# Geraete arbeitet, entscheidet refresh_is_due anhand der beiden hier
+# gefuehrten Zeitstempel.
+# =============================================================================
+
+def read_refresh_state() -> dict:
+    """Liest refresh_state.json und liefert IMMER ein Dict.
+
+    Anders als load_config() bricht das hier NICHT ab: die Datei ist reine
+    Buchhaltung dieses Werkzeugs, kein Konfigurationsdokument des Nutzers. Jeder
+    Zweifelsfall - unlesbar, kein JSON, kein Objekt - ergibt einen LEEREN
+    Zustand, und ein leerer Zustand gilt weiter unten als "noch nie gelaufen".
+    Das ist die sichere Richtung: der Nachhol-Lauf arbeitet dann einmal zu viel
+    (harmlos, und durch REFRESH_RETRY_AFTER_SECONDS gedeckelt), statt
+    stillschweigend auszusetzen - Letzteres ist genau der Fehler, gegen den
+    dieses Feature gebaut ist.
+
+    Eine FEHLENDE Datei ist der Normalfall vor dem ersten vollstaendigen Lauf
+    und bleibt deshalb still. Gemeldet wird nur eine vorhandene, aber
+    unbrauchbare."""
+    if not STATE_PATH.exists():
+        return {}
+    try:
+        with open(STATE_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError) as exc:  # ValueError deckt JSONDecodeError UND UnicodeDecodeError ab
+        print(t("due_state_unreadable", type(exc).__name__, exc), file=sys.stderr)
+        return {}
+    if not isinstance(data, dict):
+        print(t("due_state_bad_shape"), file=sys.stderr)
+        return {}
+    return data
+
+
+def _state_age_seconds(state: dict, key: str, now: float) -> float | None:
+    """Alter des Zeitstempels ``key`` in Sekunden - oder None, wenn unbrauchbar.
+
+    Unbrauchbar heisst: Schluessel fehlt, Wert ist kein int/float, ist ein bool
+    (isinstance(True, int) ist in Python WAHR - ein von Hand eingetragenes
+    ``true`` darf nicht als Epoche 1 durchgehen) oder ist nicht endlich (Pythons
+    json-Modul liest ``NaN`` und ``Infinity`` klaglos ein).
+
+    Ein NEGATIVES Ergebnis - Zeitstempel in der Zukunft, weil die Uhr
+    zurueckgestellt wurde oder der Rechner ohne RTC erst nach dem Booten eine
+    richtige Zeit bekommt - wird hier bewusst NICHT aufgeloest: die beiden
+    Aufrufer in refresh_is_due brauchen darauf gegenlaeufige Antworten."""
+    value = state.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value):
+        return None
+    return now - float(value)
+
+
+def refresh_is_due(now: float, state: dict) -> bool:
+    """Soll jetzt ein Nachhol-Refresh laufen?
+
+    Rein: keine Uhr, kein Dateisystem, keine Ausgabe - jeder Grenzfall ist damit
+    ohne Wartezeit und ohne Wanduhr pruefbar.
+
+    Zwei Bedingungen muessen BEIDE erfuellt sein:
+
+      1. Faelligkeit   - der letzte VOLLSTAENDIGE Erfolg liegt mindestens
+                         REFRESH_DUE_AFTER_SECONDS zurueck (oder ist unbekannt).
+      2. Sturmwaechter - der letzte VERSUCH liegt mindestens
+                         REFRESH_RETRY_AFTER_SECONDS zurueck (oder ist unbekannt).
+
+    Ohne (2) liefe ein oft neu startender Rechner bei jedem Start erneut gegen
+    die Geraete, denn (1) allein bliebe erfuellt, solange kein Lauf GELINGT -
+    also gerade im Stoerungsfall, in dem das am meisten schadet.
+
+    Unbrauchbare oder unplausible Werte werden GEGENLAEUFIG aufgeloest, jeweils
+    zugunsten der Geraete:
+
+      * last_success unbrauchbar oder in der Zukunft -> faellig. Einem Wert, dem
+        man nicht trauen kann, darf kein Refresh geopfert werden.
+      * last_attempt unbrauchbar -> erlaubt; sonst blockierte ein kaputter
+        Zustand den Nachholer dauerhaft.
+      * last_attempt in der Zukunft -> blockiert, als waere eben ein Versuch
+        gelaufen. Waere auch das "erlaubt", verloere der Sturmwaechter bei einer
+        rueckwaerts laufenden Uhr genau dann seine Wirkung, wenn er gebraucht
+        wird. Festfressen kann sich das nicht: der regulaere Wochenlauf schreibt
+        last_attempt ohnehin neu, sobald die Uhr wieder stimmt.
+
+    Entschieden wird ausschliesslich ueber die ``*_epoch``-Zahlen; die
+    ``*_utc``-Zeichenketten daneben sind reine Lesehilfe."""
+    success_age = _state_age_seconds(state, "last_success_epoch", now)
+    if success_age is not None and 0 <= success_age < REFRESH_DUE_AFTER_SECONDS:
+        return False
+    attempt_age = _state_age_seconds(state, "last_attempt_epoch", now)
+    if attempt_age is not None and attempt_age < REFRESH_RETRY_AFTER_SECONDS:
+        return False
+    return True
 
 
 def _run_discover(host: str) -> subprocess.CompletedProcess:
