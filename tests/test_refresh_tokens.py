@@ -2991,6 +2991,32 @@ class RefreshIsDueTests(unittest.TestCase):
                         mrt.REFRESH_DUE_AFTER_SECONDS)
 
 
+class ThresholdMeaningTests(unittest.TestCase):
+    """Die beiden Schwellwerte gegen ihren ZWECK gepinnt, nicht nur gegen ihre
+    Ordnung. Alle uebrigen Tabellentests rechnen ihre Eingaben aus den
+    Konstanten und koennen einen geaenderten Wert daher nie sehen - ohne diese
+    Klasse blieb die Suite gruen, wenn die Faelligkeit auf 8 Tage (ueber den
+    Wochentakt) oder der Sturmwaechter auf 2 Stunden rutschte."""
+
+    # Der reale Cron-Takt des Wochenlaufs: 0 3 * * 0.
+    WEEKLY_PERIOD = 7 * 24 * 3600
+
+    def test_due_fires_before_the_weekly_slot(self):
+        # Streng UNTER dem Wochentakt: ein Rechner, der kurz vor dem Slot
+        # startet, soll nachholen statt ihn knapp zu verfehlen. Und nicht zu
+        # klein, sonst feuert der Nachholer auf einem taeglich laufenden Rechner
+        # staendig einen zweiten Vollrefresh.
+        self.assertLess(mrt.REFRESH_DUE_AFTER_SECONDS, self.WEEKLY_PERIOD)
+        self.assertGreaterEqual(mrt.REFRESH_DUE_AFTER_SECONDS, 5 * 24 * 3600)
+
+    def test_the_storm_guard_is_at_least_a_day(self):
+        # Untergrenze zwischen zwei VERSUCHEN. Faellt sie auf wenige Stunden,
+        # laeuft ein Rechner, dessen cron-Dienst mehrmals taeglich neu startet,
+        # entsprechend oft gegen die Geraete - genau die dichte Verbindungsfolge,
+        # die diese Anlagen mit Funkstille quittieren. Exakt 24 h festgenagelt.
+        self.assertEqual(mrt.REFRESH_RETRY_AFTER_SECONDS, 24 * 3600)
+
+
 class RefreshStateWriteTests(_StateAndConfigMixin):
     """Fortschreiben des Zustands: Rechte, Atomaritaet - und vor allem, dass
     ein Vermerk den anderen nicht loescht."""
