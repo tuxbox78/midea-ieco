@@ -19,6 +19,19 @@ Contents:
   into a per-call temp dir, temp-dir cleanup on both success and error, a single
   invocation with no fallback, that the removed `--username`/`--password` flags
   are rejected, and the msmart-missing probe).
+  It also covers the `@reboot` catch-up (`--only-if-due`) in five groups: reading
+  `refresh_state.json` (every unusable shape yields an empty state, and only a
+  *present* but broken file is reported), the age helper (the `isinstance(True,
+  int)` trap and the `NaN`/`Infinity` that `json.load` accepts without complaint —
+  with a counter-check that it really does), the full decision table for
+  `refresh_is_due` incl. both thresholds' exact boundaries and a timestamp in the
+  future resolved in *opposite* directions per field, writing the state (0600, no
+  `.tmp` orphan, and above all that one stamp never erases the other), and `main()`
+  itself: exit 0 without reading the config when not due, exit 1 for
+  `--only-if-due` without `--all`, no state written for a `--name` run or an empty
+  device list, the attempt recorded even when the device loop raises — which is
+  what pins it *before* the loop — and no success recorded on a partial failure.
+  All twelve mutations of that logic were confirmed to turn the suite red.
 - `test_ensure.py` — unit tests for `midea_ieco_ensure.py` (config loading, the
   apply-retry hardening, and the offline `list`/no-argument overview — exit 0,
   no network contact, and never prints token/key).

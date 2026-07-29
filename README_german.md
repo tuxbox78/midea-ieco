@@ -246,6 +246,27 @@ Log-Rotation nicht vergessen, z. B. mit `logrotate` oder einfach:
 0 0 1 * * truncate -s 0 /opt/local/midea-ieco/ieco.log /opt/local/midea-ieco/refresh.log
 ```
 
+### Einen verpassten Token-Refresh nachholen
+
+Die Wochenzeile oben hilft nur, wenn der Rechner in genau diesem Moment läuft. Ein Host, der sonntags um 03:00 Uhr ausgeschaltet ist, überspringt den Refresh **still** — und abgelaufene Tokens sind der häufigste Weg, auf dem dieses Werkzeug ausfällt. Eine weitere Zeile schließt die Lücke:
+
+```cron
+# Bei jedem Start: Tokens auffrischen, aber nur wenn der Wochenlauf wirklich ausfiel
+@reboot sleep 120 && cd /opt/local/midea-ieco && venv/bin/python3 midea_refresh_tokens.py --all --only-if-due >> refresh.log 2>&1
+```
+
+`--only-if-due` ist das, was diese Zeile bei jedem Start unbedenklich macht. Das Werkzeug führt neben `devices.json` eine kleine Datei `refresh_state.json` und frischt nur auf, wenn der letzte **vollständige** Lauf mindestens 6 Tage und der letzte Versuch mindestens 24 Stunden zurückliegt. Sonst schreibt es eine Zeile und endet mit 0, ohne ein einziges Gerät anzusprechen:
+
+```text
+Token-Refresh ist noch nicht faellig - nichts getan (letzter vollstaendiger Lauf: 2026-07-26T03:00:11Z, letzter Versuch: 2026-07-26T03:00:04Z).
+```
+
+Beide Wächter werden gebraucht. `@reboot` bedeutet „der cron-Daemon wurde gestartet", nicht „das System wurde gebootet" — schon ein Paket-Update des cron-Dienstes löst es aus. Ohne den zweiten Wächter liefe ein oft neu startender Rechner also jedes Mal mit einem vollen Refresh gegen deine Geräte. Das `sleep 120` gibt dem Netzwerk einen Moment zum Hochkommen; es ist eine Kulanzfrist, kein Warten auf das Netz — scheitert der Lauf trotzdem, bleibt die Wochenzeile der Auffang.
+
+Jeder `--all`-Lauf hält diese Datei aktuell, auch der wöchentliche und der, den der Installer bei der Einrichtung ausführt — auf einer laufenden Installation findet der Nachholer daher nichts zu tun und bleibt still.
+
+> **Wird nicht automatisch eingetragen.** Der Installer schreibt diese Zeile noch nicht; wer sie möchte, ergänzt sie von Hand. `--only-if-due` setzt `--all` voraus — zusammen mit `--name` endet es mit einem Nutzungsfehler, denn der gespeicherte Zustand ist eine Aussage über alle Geräte, nicht über ein einzelnes.
+
 ### Was der Installer zu einer bestehenden Crontab sagt
 
 Läuft `install.sh` auf einem bereits eingerichteten Rechner — meist als schlichter
@@ -565,6 +586,7 @@ Die App bietet keine bedingte Logik wie „iECO nur aktivieren, wenn die Anlage 
 | `midea_conn.py` | Gibt die LAN-Verbindung eines Geräts frei. `msmart-ng` bietet dafür keine öffentliche API — der einzige Griff in dessen Interna ist hier gekapselt |
 | `devices.example.json` | Vorlage für `devices.json` — kopieren, dann eigene Geräte eintragen |
 | `devices.json` | Lokale Gerätekonfiguration (Name, IP, Port, ID, Token, Key). Lokal erzeugt, **git-ignoriert** |
+| `refresh_state.json` | Wann ein vollständiger Token-Refresh zuletzt begonnen hat und zuletzt gelungen ist. Von jedem `--all`-Lauf geschrieben, von `--only-if-due` gelesen. Nur Zeitstempel, keine Geheimnisse — trotzdem `chmod 600` wie der Nachbar. Lokal erzeugt, **git-ignoriert** |
 
 ## Erkenntnisse aus der Entwicklung
 

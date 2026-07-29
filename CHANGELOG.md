@@ -6,6 +6,52 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **`midea_refresh_tokens.py --only-if-due`: a token refresh that may run at every
+  start without running against the units every time.** The weekly cron job
+  (`0 3 * * 0`) only helps if the machine happens to be on at that moment; a host
+  switched off on Sunday night skips the refresh **silently**, and expired tokens
+  are the most common way this tool stops working in the field. The new flag makes
+  an `@reboot` catch-up line safe to add:
+
+  ```cron
+  @reboot sleep 120 && cd /opt/local/midea-ieco && venv/bin/python3 midea_refresh_tokens.py --all --only-if-due >> refresh.log 2>&1
+  ```
+
+  A new file `refresh_state.json` next to `devices.json` records when a full
+  refresh last **started** and last **succeeded**; every `--all` run keeps it up to
+  date, including the one the installer performs during setup. `--only-if-due`
+  refreshes only when the last complete refresh is at least 6 days old **and** the
+  last attempt at least 24 hours old — otherwise it prints one line and exits 0
+  without reading `devices.json`, importing `msmart-ng` or touching the network.
+
+  Two guards rather than one, because neither covers the other's case: `@reboot`
+  fires whenever the *cron daemon* starts — a package upgrade of cron does it too —
+  and the success timestamp alone would not stop the repetition, because it stays
+  old for exactly as long as no run succeeds. That is the situation in which
+  repeated attempts do the most harm to a unit that tolerates a single local
+  connection.
+
+  Suggested by @muibusan in issue #4, which asked for systemd timer units. The
+  timer part was declined for now — cron has to stay for Alpine and macOS, so it
+  would mean a second scheduling backend permanently — but `Persistent=true` was
+  the one genuinely functional advantage in that request, and this delivers that
+  advantage without the second backend.
+
+  Details of the state file: timestamps only, no secrets, yet written `chmod 600`
+  through the same atomic path as `devices.json`; a failure to write it is reported
+  and never changes the exit code of the refresh itself; anything missing,
+  unreadable or implausible in it counts as "due", so a broken state can never
+  silently *suppress* a refresh. A timestamp in the future — a machine without an
+  RTC, whose clock is only right after NTP — is resolved in opposite directions on
+  purpose: the success field then counts as unusable (refresh) and the attempt
+  field as "just now" (wait), both in favour of the units. `--only-if-due` requires
+  `--all` and exits 1 with `--name`, because the recorded state is a statement
+  about the whole fleet.
+
+  Not written by the installer yet — both READMEs document the line for manual
+  addition; wiring it into `install.sh` is a separate step.
+
 ### Fixed
 - **A lost capability roundtrip was reported as "this unit cannot do iECO".**
   `get_capabilities()` does not raise when the unit stays quiet — it logs

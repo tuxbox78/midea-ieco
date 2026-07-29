@@ -666,6 +666,21 @@ listed it as equivalent, and that no longer holds.
 
 ## Deliberately not covered
 
+- **Two refresh runs that start in the same instant can still both reach the
+  devices.** The catch-up guard (`--only-if-due`) writes `last_attempt` *before* the
+  device loop precisely so that a second run started afterwards backs off — but two
+  processes that get past the check before either has written it are not excluded.
+  Realistically this needs the `@reboot` line and the weekly line to fire at the
+  same second on a machine that boots at 03:00 on a Sunday. *Cost:* two local
+  connections to a unit that tolerates one, i.e. a temporarily quiet unit — the
+  same class the delays elsewhere in the tool guard against, not data loss. *Why not
+  closed:* the obvious fix is an `O_EXCL` lock file, and that trades this rare case
+  for a worse one — a run killed mid-flight (power cut, OOM, `kill -9`) leaves the
+  lock behind, and from then on the refresh never runs again, silently. A guard
+  whose failure mode is permanent silent non-execution is the wrong trade for a tool
+  whose entire purpose is preventing silent non-execution. Written down instead of
+  left to be rediscovered.
+
 - **A capability answer that arrives but cannot be decoded is still blamed on the
   unit.** `_send_commands_get_responses` sets `_online = len(responses) > 0` on the
   **raw** byte list, *before* `Response.construct` validates and discards anything

@@ -245,6 +245,27 @@ Remember log rotation, for example with `logrotate` or simply:
 0 0 1 * * truncate -s 0 /opt/local/midea-ieco/ieco.log /opt/local/midea-ieco/refresh.log
 ```
 
+### Catching up a missed token refresh
+
+The weekly line above only helps if the machine is running at that moment. A host that is switched off on Sunday at 03:00 skips the refresh **silently** — and expired tokens are the most common way this tool stops working. One more line closes that gap:
+
+```cron
+# At every start: refresh tokens, but only if the weekly run was actually missed
+@reboot sleep 120 && cd /opt/local/midea-ieco && venv/bin/python3 midea_refresh_tokens.py --all --only-if-due >> refresh.log 2>&1
+```
+
+`--only-if-due` is what makes this safe to run at every start. The tool keeps a small file `refresh_state.json` next to `devices.json` and refreshes only when the last **complete** refresh is at least 6 days old *and* the last attempt at least 24 hours old. Otherwise it prints one line and exits 0 without contacting a single device:
+
+```text
+Token refresh is not due yet - nothing done (last full refresh: 2026-07-26T03:00:11Z, last attempt: 2026-07-26T03:00:04Z).
+```
+
+Both guards are needed. `@reboot` means "the cron daemon started", not "the system booted" — a package upgrade of cron triggers it as well — so without the second guard a machine that restarts often would run a full refresh against your units every single time. The `sleep 120` gives the network a moment to come up; it is a grace period, not a wait-for-network, and if the run fails anyway the weekly line stays the backstop.
+
+Every `--all` run keeps that file up to date, including the weekly one and the one the installer performs during setup — so on a working installation the catch-up finds nothing to do and stays quiet.
+
+> **Not written automatically.** The installer does not add this line yet; add it by hand if you want it. `--only-if-due` requires `--all` — combined with `--name` it exits with a usage error, because the recorded state is a statement about all devices, not about a single one.
+
 ### What the installer says about an existing crontab
 
 When `install.sh` runs on a machine that is already set up — most often a plain
@@ -566,6 +587,7 @@ The app does not provide conditional logic such as "enable iECO only if the unit
 | `midea_conn.py` | Releases a device's LAN connection. `msmart-ng` offers no public way to do this, so the one place that reaches into its internals is isolated here |
 | `devices.example.json` | Template for `devices.json` — copy it, then fill in your devices |
 | `devices.json` | Your local device config (name, IP, port, ID, token, key). Generated locally, **git-ignored** |
+| `refresh_state.json` | When a full token refresh was last started and last succeeded. Written by every `--all` run, read by `--only-if-due`. Timestamps only, no secrets — but `chmod 600` like its neighbour. Generated locally, **git-ignored** |
 
 ## Development lessons learned
 
