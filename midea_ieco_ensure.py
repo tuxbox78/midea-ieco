@@ -35,6 +35,12 @@ from typing import TYPE_CHECKING
 from midea_i18n import (install_excepthook_redaction, install_log_redaction,
                         make_translator, resolve_lang)  # noqa: F401
 
+# Verbindungsabbau: msmart-ng hat dafuer keine oeffentliche API - die Begruendung
+# und der gemessene Befund stehen in midea_conn.py. Bis dorthin ausgelagert,
+# damit der Griff in fremde Interna an EINER Stelle steht und dort gepruefte
+# Waechter hat.
+from midea_conn import close_connection
+
 if TYPE_CHECKING:
     # Nur fuer Typpruefer: der echte Import passiert lazy in
     # connect_and_refresh, damit das Modul - und damit die netzwerkfreie
@@ -52,9 +58,12 @@ RETRY_DELAY = 3.0
 
 # Nachlauf zwischen apply() und der Verifikation. Das Geraet uebernimmt den
 # gesetzten Zustand nicht sofort; wird zu frueh nachgelesen, meldet es noch den
-# alten Wert und der Lauf gaelte faelschlich als fehlgeschlagen. Ausserdem faellt
-# in diese Zeit das Schliessen und der erneute Verbindungsaufbau - bei einem
-# Geraet, das nur EINE lokale Verbindung vertraegt, ist das kein Detail.
+# alten Wert und der Lauf gaelte faelschlich als fehlgeschlagen.
+#
+# Die Pause liegt NACH dem Schliessen der Verbindung und VOR dem erneuten
+# Verbindungsaufbau (siehe ensure_ieco). Sie ist damit zugleich die Ruhephase
+# zwischen zwei Sitzungen - bei einem Geraet, das nur EINE lokale Verbindung
+# vertraegt, ist das kein Detail.
 SETTLE_DELAY = 2.0
 
 # Pause nach jedem Geraet. Anders als im Schwestermodul (dort CANDIDATE_DELAY/
@@ -236,6 +245,12 @@ _MESSAGES: dict[str, tuple[str, str]] = {
     "dev_verify_failed": (
         "[%s] ERROR during verification: %s",
         "[%s] FEHLER bei Verifikation: %s"),
+    "dev_verify_no_answer": (
+        "[%s] ERROR: the unit sent no state back for the verification - it is "
+        "unclear whether iECO was applied. Please try again in a few minutes.",
+        "[%s] FEHLER: Die Anlage hat fuer die Verifikation keinen Zustand "
+        "zurueckgeliefert - ob iECO uebernommen wurde, ist damit offen. Bitte "
+        "in einigen Minuten erneut versuchen."),
     "dev_status_after": (
         "[%s] Status after action: power=%s, mode=%s, ieco=%s, eco=%s",
         "[%s] Status nach Aktion: power=%s, mode=%s, ieco=%s, eco=%s"),
@@ -418,20 +433,6 @@ def print_overview() -> None:
     print(t("ov_path_note", CMD_MAIN))
 
 
-async def close_device(device: AC) -> None:
-    for method_name in ("close", "disconnect", "stop"):
-        method = getattr(device, method_name, None)
-        if method is None:
-            continue
-        try:
-            result = method()
-            if asyncio.iscoroutine(result):
-                await result
-            return
-        except Exception:
-            pass
-
-
 async def connect_and_refresh(dev_conf: dict, retries: int = CONNECT_RETRIES,
                               with_capabilities: bool = False) -> AC:
     """Verbindet, authentifiziert und liest den Live-Status.
@@ -468,7 +469,7 @@ async def connect_and_refresh(dev_conf: dict, retries: int = CONNECT_RETRIES,
             return device
         except Exception as exc:
             last_exc = exc
-            await close_device(device)
+            close_connection(device)
             print(t("conn_attempt_failed", name, attempt, retries,
                     type(exc).__name__, exc))
             if attempt < retries:
@@ -571,8 +572,11 @@ async def ensure_ieco(dev_conf: dict, only_if_on: bool) -> bool:
                 print(t("dev_apply_attempt_failed", name, attempt, ACTION_RETRIES,
                         type(exc).__name__, exc))
                 if attempt < ACTION_RETRIES:
+                    # Wie bei der Verifikation unten: ERST schliessen, DANN
+                    # warten. So liegt die Pause zwischen den Sitzungen und
+                    # nicht innerhalb einer noch offenen.
+                    close_connection(device)
                     await asyncio.sleep(RETRY_DELAY)
-                    await close_device(device)
                     # Fuer den naechsten Versuch eine FRISCHE Verbindung
                     # aufbauen (ein fehlgeschlagener Versuch kann das AC-Objekt
                     # mit defektem Socket-Zustand hinterlassen). Scheitert schon
@@ -600,8 +604,18 @@ async def ensure_ieco(dev_conf: dict, only_if_on: bool) -> bool:
             print(t("dev_apply_failed", name, last_exc))
             return False
 
+        # Reihenfolge ist hier tragend: ERST schliessen, DANN warten, dann neu
+        # verbinden. Damit faellt die Nachlaufpause in eine Zeit, in der das
+        # Geraet gar keine Verbindung haelt - genau die Ruhe, die eine Anlage
+        # braucht, die nur EINE lokale Verbindung vertraegt.
+        #
+        # Vorher stand das Schliessen NACH der Pause, und weil es zudem
+        # wirkungslos war (siehe midea_conn.py), lief die Verifikation unten in
+        # eine ZWEITE gleichzeitige Verbindung, waehrend die erste noch offen
+        # war. Das Werkzeug konnte damit selbst das Verstummen erzeugen, das es
+        # anschliessend als Geraetefehler meldete.
+        close_connection(device)
         await asyncio.sleep(SETTLE_DELAY)
-        await close_device(device)
         try:
             # with_capabilities=True ist hier zwingend: sonst pollt refresh() die
             # IECO-Property nicht und device.ieco laese faelschlich False - die
@@ -609,6 +623,20 @@ async def ensure_ieco(dev_conf: dict, only_if_on: bool) -> bool:
             device = await connect_and_refresh(dev_conf, with_capabilities=True)
         except RuntimeError as exc:
             print(t("dev_verify_failed", name, exc))
+            return False
+
+        # Dass connect_and_refresh zurueckkam, heisst NICHT, dass das Geraet
+        # geantwortet hat: msmart-ng reicht Netzfehler aus refresh() und
+        # get_capabilities() nicht nach oben, sondern faengt sie in
+        # Device._send_command ab und liefert eine leere Antwortliste. Ohne
+        # diese Pruefung stuenden hier die DEFAULTS des frischen AC-Objekts, und
+        # der Lauf meldete "iECO ist laut Geraet weiterhin deaktiviert" - eine
+        # Ursachenaussage ueber ein Geraet, das gar nichts gesagt hat.
+        # device.online ist das beobachtbare Gegenstueck (msmart-ng setzt es auf
+        # 'len(responses) > 0'), dasselbe Signal, das oben schon vor der Aktion
+        # geprueft wird.
+        if not device.online:
+            print(t("dev_verify_no_answer", name))
             return False
 
         print(t("dev_status_after", name, device.power_state,
@@ -622,7 +650,7 @@ async def ensure_ieco(dev_conf: dict, only_if_on: bool) -> bool:
         return True
 
     finally:
-        await close_device(device)
+        close_connection(device)
 
 
 def _device_config_problem(d: dict) -> str | None:

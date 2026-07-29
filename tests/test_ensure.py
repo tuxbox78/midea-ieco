@@ -26,6 +26,9 @@ sys.path.insert(0, str(REPO_DIR))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import _stub_msmart  # noqa: E402,F401  (registriert Fake-msmart VOR dem Import)
+# Gemeinsame, formtreue LAN-Attrappe: das echte AirConditioner-Objekt hat kein
+# close(), das Aufraeumen laeuft ueber die private Kette _lan._disconnect().
+from _stub_msmart import RecordingLAN as _RecordingLAN  # noqa: E402
 import midea_ieco_ensure as mie  # noqa: E402
 
 # Ausgabesprache fuer das GESAMTE Modul auf Englisch pinnen (den Default).
@@ -118,6 +121,14 @@ class FakeDevice:
         self.apply_calls = 0
         self.caps_calls = 0
         self.refresh_calls = 0
+        self.close_calls = 0
+        self._lan = _RecordingLAN(self._note_close)
+
+    def _note_close(self) -> None:
+        """Haken fuer Unterklassen, die das Schliessen anders protokollieren
+        wollen. Wird ueber _lan._disconnect() erreicht, nicht ueber ein
+        close() - das echte Geraeteobjekt hat keines."""
+        self.close_calls += 1
 
     async def get_capabilities(self):
         self.caps_calls += 1
@@ -131,9 +142,6 @@ class FakeDevice:
         self.apply_calls += 1
         if self._apply_raises is not None:
             raise self._apply_raises
-
-    async def close(self):
-        pass
 
 
 def _scripted_connect(items):
@@ -265,7 +273,12 @@ class CapabilityGatedDevice:
         self._true_ieco = true_ieco
         self._caps = False
         self._refreshed_after_caps = False
+        self.close_calls = 0
+        self._lan = _RecordingLAN(self._note_close)
         self.apply_calls = 0
+
+    def _note_close(self) -> None:
+        self.close_calls += 1
 
     @property
     def ieco(self):
@@ -285,9 +298,6 @@ class CapabilityGatedDevice:
 
     async def apply(self):
         self.apply_calls += 1
-
-    async def close(self):
-        pass
 
 
 class IecoVerificationCapabilityTests(unittest.TestCase):
@@ -313,6 +323,39 @@ class IecoVerificationCapabilityTests(unittest.TestCase):
         d_action = CapabilityGatedDevice(power_state=False, true_ieco=False)
         d_verify = CapabilityGatedDevice(power_state=True, true_ieco=True)
         self.assertTrue(self._run([d_action, d_verify]))
+
+    def test_a_verification_without_an_answer_is_not_called_disabled(self):
+        """Antwortet das Geraet auf die Verifikation gar nicht, darf der Lauf
+        keine Aussage ueber iECO treffen.
+
+        msmart-ng reicht Netzfehler aus refresh()/get_capabilities() nicht nach
+        oben: Device._send_command faengt sie und liefert eine leere
+        Antwortliste. connect_and_refresh kehrt dann normal zurueck, und ohne
+        die online-Pruefung staenden in device.ieco die DEFAULTS des frischen
+        Objekts. Der Lauf meldete daraufhin 'iECO ist laut Geraet weiterhin
+        deaktiviert' - eine Ursachenaussage ueber ein Geraet, das nichts gesagt
+        hat.
+
+        Der Test ist bewusst so gebaut, dass er ohne die Pruefung nicht etwa
+        eine andere Meldung liefert, sondern ERFOLG: das Verifikationsgeraet
+        traegt true_ieco=True. Nur die fehlende Antwort macht den Unterschied."""
+        d_action = CapabilityGatedDevice(power_state=True, true_ieco=False)
+        d_verify = CapabilityGatedDevice(power_state=True, true_ieco=True)
+        d_verify.online = False
+
+        connect = _scripted_connect([d_action, d_verify])
+        with ExitStack() as es:
+            es.enter_context(mock.patch.object(mie, "connect_and_refresh", connect))
+            es.enter_context(mock.patch.object(mie.asyncio, "sleep", _anoop))
+            out = es.enter_context(redirect_stdout(io.StringIO()))
+            result = asyncio.run(mie.ensure_ieco(
+                {"name": "X", "ip": "1", "id": "1"}, only_if_on=False))
+
+        self.assertFalse(result)
+        text = out.getvalue()
+        self.assertIn("no state back", text)
+        # Die alte, falsche Ursachenaussage darf NICHT mehr erscheinen.
+        self.assertNotIn("still disabled", text)
 
     def test_already_on_and_ieco_short_circuits(self):
         # Geraet an und bereits in iECO: der 'schon aktiv'-Kurzschluss greift nur,
@@ -594,9 +637,12 @@ class OverviewWithoutMsmartAnywhereTests(unittest.TestCase):
     def test_list_runs_without_msmart(self):
         work = tempfile.mkdtemp()
         self.addCleanup(lambda: shutil.rmtree(work, ignore_errors=True))
-        for name in ("midea_ieco_ensure.py", "midea_refresh_tokens.py",
-                     "midea_i18n.py"):
-            shutil.copy(REPO_DIR / name, work)
+        # ALLE Module aus dem Repo-Wurzelverzeichnis kopieren statt einer
+        # gepflegten Namensliste: die Werkzeuge importieren einander (i18n,
+        # Verbindungsabbau), und eine Liste, an die man bei jedem neuen Modul
+        # denken muss, faellt genau dann um, wenn eines dazukommt.
+        for path in sorted(REPO_DIR.glob("*.py")):
+            shutil.copy(path, work)
         target = os.path.join(work, "midea_ieco_ensure.py")
         code = (
             "import runpy, sys\n"
@@ -787,6 +833,10 @@ class _RecordingAC:
         self.operational_mode = _OpMode.COOL
         self.supports_ieco = True
         self.auth_raises = None
+        # Das Schliessen laeuft ueber dieselbe private Kette wie beim echten
+        # Objekt und wird in DIESELBE Reihenfolgeliste protokolliert - die
+        # Tests unten pruefen die Abfolge authenticate/refresh/close.
+        self._lan = _RecordingLAN(lambda: self.calls.append("close"))
         _RecordingAC.instances.append(self)
 
     async def authenticate(self, token, key):
@@ -800,9 +850,6 @@ class _RecordingAC:
 
     async def refresh(self):
         self.calls.append("refresh")
-
-    async def close(self):
-        self.calls.append("close")
 
 
 class ConnectAndRefreshBodyTests(unittest.TestCase):
@@ -1432,9 +1479,9 @@ class PacingBoundsTests(unittest.TestCase):
 
 
 class _EventDevice(FakeDevice):
-    """FakeDevice, das apply() und close() in eine gemeinsame Ereignisliste
-    protokolliert - damit laesst sich die REIHENFOLGE pruefen statt nur die
-    Anzahl."""
+    """FakeDevice, das apply() und das Schliessen (ueber _lan._disconnect) in
+    eine gemeinsame Ereignisliste protokolliert - damit laesst sich die
+    REIHENFOLGE pruefen statt nur die Anzahl."""
 
     def __init__(self, events, **kwargs):
         super().__init__(**kwargs)
@@ -1444,8 +1491,9 @@ class _EventDevice(FakeDevice):
         self._events.append("apply")
         await super().apply()
 
-    async def close(self):
+    def _note_close(self) -> None:
         self._events.append("close")
+        super()._note_close()
 
 
 class PacingOrderTests(unittest.TestCase):
@@ -1493,16 +1541,25 @@ class PacingOrderTests(unittest.TestCase):
     def test_settle_pause_sits_between_apply_and_the_verification(self):
         # Ohne die Pause laese die Verifikation den Zustand, bevor das Geraet
         # ihn uebernommen hat - der Lauf gaelte faelschlich als gescheitert.
-        # Und das Schliessen muss VOR dem erneuten Verbinden liegen.
+        #
+        # Die Abfolge apply -> close -> sleep -> connect ist genau festgelegt:
+        # geschlossen wird VOR der Pause, damit diese in eine Zeit faellt, in
+        # der das Geraet gar keine Verbindung haelt. Laege das Schliessen hinter
+        # der Pause, wartete das Werkzeug zwei Sekunden auf einer offenen
+        # Sitzung und verbaende sich unmittelbar danach neu - bei einer Anlage,
+        # die nur EINE lokale Verbindung vertraegt, ist das die ungeschickteste
+        # aller Reihenfolgen.
         events = []
         self.assertEqual(
             self._events(events,
                          [_EventDevice(events, power_state=True, ieco=False),
                           _EventDevice(events, power_state=True, ieco=True)]),
-            ["connect", "apply", f"sleep {mie.SETTLE_DELAY}", "close",
+            ["connect", "apply", "close", f"sleep {mie.SETTLE_DELAY}",
              "connect", "close"])
 
     def test_retry_pause_sits_before_the_reconnect(self):
+        # Gleiche Regel im Wiederholpfad: erst schliessen, dann warten, dann
+        # neu verbinden.
         events = []
         self.assertEqual(
             self._events(events, [
@@ -1510,8 +1567,8 @@ class PacingOrderTests(unittest.TestCase):
                              apply_raises=RuntimeError("erster Versuch")),
                 _EventDevice(events, power_state=True, ieco=False),
                 _EventDevice(events, power_state=True, ieco=True)]),
-            ["connect", "apply", f"sleep {mie.RETRY_DELAY}", "close", "connect",
-             "apply", f"sleep {mie.SETTLE_DELAY}", "close", "connect", "close"])
+            ["connect", "apply", "close", f"sleep {mie.RETRY_DELAY}", "connect",
+             "apply", "close", f"sleep {mie.SETTLE_DELAY}", "connect", "close"])
 
     def test_the_device_is_closed_even_when_the_run_fails(self):
         # Der finally-Block ist die einzige Zusage, dass eine Verbindung auch im

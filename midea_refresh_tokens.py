@@ -54,6 +54,12 @@ import tempfile
 import time
 from pathlib import Path
 
+# Verbindungsabbau: msmart-ng hat dafuer keine oeffentliche API - die Begruendung
+# und der gemessene Befund stehen in midea_conn.py. Bis dorthin ausgelagert,
+# damit der Griff in fremde Interna an EINER Stelle steht und dort gepruefte
+# Waechter hat.
+from midea_conn import close_connection
+
 # Sprachwahl: gemeinsame Mechanik fuer beide Werkzeuge (Reihenfolge und
 # englischer Default sind dort dokumentiert). resolve_lang wird mitimportiert,
 # damit es weiterhin ueber dieses Modul erreichbar bleibt.
@@ -69,14 +75,27 @@ from midea_i18n import (install_excepthook_redaction, install_log_redaction,
 CONFIG_PATH = Path(__file__).parent / "devices.json"
 SUBPROCESS_TIMEOUT = 60
 
-# Zeitlimit fuer EINEN Verifikationsversuch (authenticate bzw. refresh).
-# Bewusst groesser als msmart-ngs eigener Worst Case: dessen LAN.authenticate
-# braucht im Fehlerfall bis zu 5s Verbindungsaufbau + 3 interne Wiederholungen
-# a 2s Lesetimeout = ~11s. Ein kleinerer Deckel (frueher 10s) wuerde msmart-ngs
-# eigene Wiederholungslogik mitten im Lauf abschneiden und den Abbruch als
-# "Zeitlimit" ausweisen, obwohl das Geraet noch geantwortet haette - ein
-# Falschnegativ, das die Diagnose unten zusaetzlich verfaelschen wuerde.
-VERIFY_TIMEOUT = 15
+# Zeitlimit fuer die GESAMTE Verifikation eines Kandidaten, also authenticate()
+# UND refresh() zusammen.
+#
+# Bewusst groesser als msmart-ngs eigener Worst Case: LAN.authenticate braucht
+# bis zu 5s Verbindungsaufbau + 3 interne Wiederholungen a 2s Lesetimeout = 11s
+# im Fehlerfall, plus 1s Nachlauf, wenn der Handshake gelingt (das sleep(1) am
+# Ende von LAN.authenticate wird auf dem Fehlerpfad nicht mehr erreicht) - also
+# bis zu ~12s. LAN.send fuer refresh() nochmals 3 x 2s = ~6s. Ein kleinerer
+# Deckel wuerde msmart-ngs eigene Wiederholungslogik mitten
+# im Lauf abschneiden und den Abbruch als "Zeitlimit" ausweisen, obwohl das
+# Geraet noch geantwortet haette - ein Falschnegativ, das die Diagnose unten
+# zusaetzlich verfaelschen wuerde.
+#
+# Warum EIN Budget statt zweier: frueher lag um jeden der beiden Aufrufe ein
+# eigenes 15s-Limit. Der schlechteste Fall waren damit 30s, ohne dass diese
+# Zahl irgendwo stand - das Werkzeug sagte "15s" und konnte doppelt so lange
+# brauchen. Der Wert hier ist genau jener bisherige Gesamt-Worst-Case, nur
+# jetzt ausgesprochen und tatsaechlich durchgesetzt. Kein Lauf, der bisher
+# durchlief, faellt dadurch heraus: pro Schritt ist der Deckel groesser als
+# zuvor, in der Summe unveraendert.
+VERIFY_TIMEOUT = 30
 
 # Pause zwischen zwei Kandidaten-Verifikationen bzw. zwischen zwei Geraeten.
 # Midea-Klimaanlagen halten nur EINE lokale Verbindung gleichzeitig und
@@ -149,6 +168,11 @@ _MESSAGES: dict[str, tuple[str, str]] = {
     "diag_cap": (
         "Time limit reached (%ss) - device is responding unusually slowly",
         "Zeitlimit erreicht (%ss) - Geraet reagiert ungewoehnlich langsam"),
+    "diag_no_state": (
+        "handshake succeeded, but the device sent no state back - it accepted "
+        "the connection and then went quiet",
+        "Handshake erfolgreich, aber das Geraet lieferte keinen Zustand zurueck "
+        "- es nahm die Verbindung an und verstummte dann"),
     "diag_rejected": (
         "device actively rejected the token (device replied with ERROR)",
         "Geraet hat den Token aktiv abgelehnt (ERROR-Antwort des Geraets)"),
@@ -590,9 +614,11 @@ def classify_verify_failure(exc: BaseException) -> tuple[str, str]:
     zusaetzlich am Zeitverhalten unterscheidbar: eine ERROR-Antwort scheitert
     praktisch sofort, ein stummes Geraet erst nach mehreren Sekunden.
 
-    Ein bereits von uns gesetztes Zeitlimit (asyncio.wait_for -> TimeoutError)
+    Ein bereits von uns gesetztes Zeitlimit (asyncio.timeout -> TimeoutError)
     wird bewusst getrennt ausgewiesen, damit es nicht mit einem stummen Geraet
-    verwechselt wird."""
+    verwechselt wird. Das gilt nur, solange das Limit waehrend authenticate()
+    zuschlaegt - waehrend refresh() verschluckt msmart-ng die Ursache, dort
+    entscheidet stattdessen die online-Pruefung in verify_credentials."""
     text = str(exc).strip()
     haystack = text.lower()
 
@@ -607,7 +633,7 @@ def classify_verify_failure(exc: BaseException) -> tuple[str, str]:
         if marker in haystack:
             return code, t(message_key)
 
-    # Erst jetzt der eigene Deckel: asyncio.wait_for wirft einen TimeoutError
+    # Erst jetzt der eigene Deckel: asyncio.timeout wirft einen TimeoutError
     # OHNE Meldungstext, der oben folglich auf keine Marke passt.
     #
     # asyncio.TimeoutError wird ausdruecklich MIT aufgefuehrt, obwohl es ab
@@ -747,23 +773,48 @@ async def verify_credentials(ip: str, port: int, device_id: int, key: str,
 
     device = AC(ip=ip, port=port, device_id=device_id)
     try:
-        await asyncio.wait_for(device.authenticate(token, key), timeout=VERIFY_TIMEOUT)
-        await asyncio.wait_for(device.refresh(), timeout=VERIFY_TIMEOUT)
+        # asyncio.timeout statt zweier wait_for-Aufrufe: EIN Budget spannt sich
+        # ueber beide Schritte, sodass der Deckel das ist, was er verspricht
+        # (siehe VERIFY_TIMEOUT). asyncio.timeout ist seit Python 3.11 die
+        # empfohlene Form; das Projekt setzt 3.11 voraus. Bei Ablauf wirft es
+        # denselben TimeoutError wie zuvor wait_for - classify_verify_failure
+        # ordnet ihn unveraendert als VERIFY_CAP ein.
+        async with asyncio.timeout(VERIFY_TIMEOUT):
+            await device.authenticate(token, key)
+            await device.refresh()
+
+        # Ein erfolgreiches refresh() ist KEIN Beweis: msmart-ng meldet
+        # Netzfehler an dieser Stelle nicht nach oben. Device._send_command
+        # faengt ProtocolError und TimeoutError, protokolliert sie und liefert
+        # eine leere Antwortliste; refresh() kehrt dann voellig normal zurueck.
+        # Ein Geraet, das den Handshake besteht und danach schweigt, sah fuer
+        # diese Funktion deshalb aus wie ein geglueckter Test - der Kandidat
+        # galt als verifiziert und sein Token wurde gespeichert. Das hebelte
+        # genau die Zusage aus, fuer die es diese Funktion gibt.
+        #
+        # device.online ist das beobachtbare Gegenstueck dazu: msmart-ng setzt
+        # es in _send_commands_get_responses auf 'len(responses) > 0', also
+        # genau dann auf False, wenn nichts zurueckkam. Es ist damit der einzige
+        # Weg, einen verschluckten Fehler von aussen zu bemerken.
+        #
+        # VERIFY_SILENT und kein eigener Code: die Aussage "Verbindung steht,
+        # das Geraet antwortet nicht" trifft hier woertlich zu, der Code liegt
+        # bereits in _BLOCKING_CODES, und die Wahrheitstabelle von
+        # summarize_failure_hint bleibt damit unberuehrt.
+        if not device.online:
+            return False, VERIFY_SILENT, t("diag_no_state")
+
         return True, "", ""
     except Exception as exc:
         code, text = classify_verify_failure(exc)
         return False, code, text
     finally:
-        for method_name in ("close", "disconnect", "stop"):
-            method = getattr(device, method_name, None)
-            if method is None:
-                continue
-            try:
-                result = method()
-                if asyncio.iscoroutine(result):
-                    await result
-            except Exception:
-                pass
+        # Schliessen ist hier besonders wichtig: die Kandidaten werden
+        # NACHEINANDER gegen dasselbe Geraet geprueft, und die Anlage haelt nur
+        # EINE lokale Verbindung. Eine offen gebliebene Verbindung aus Kandidat
+        # 1 laesst Kandidat 2 und 3 ins Leere laufen - der Lauf meldete dann
+        # "antwortet nicht", obwohl er die Stille selbst erzeugt hat.
+        close_connection(device)
 
 
 def update_device(dev_conf: dict) -> bool:

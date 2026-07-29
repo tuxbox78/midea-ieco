@@ -48,6 +48,14 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from msmart.device.AC.device import AirConditioner as AC
 
+# Dieses Werkzeug liegt in tools/, das gemeinsame Modul im Repo-Wurzel-
+# verzeichnis. Ohne diesen Eintrag scheitert der Import beim direkten Aufruf
+# (python3 tools/probe_ieco_current_mode.py), weil dann nur tools/ auf dem
+# Suchpfad steht. Vor dem Import, damit die Reihenfolge erkennbar traegt.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from midea_conn import close_connection  # noqa: E402
+
 logging.basicConfig(level=logging.WARNING)
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "devices.json"
@@ -85,20 +93,6 @@ def load_device(name: str) -> dict:
              f"Bekannt: {', '.join(known) if known else '(keine)'}")
 
 
-async def close_device(device: AC) -> None:
-    for method_name in ("close", "disconnect", "stop"):
-        method = getattr(device, method_name, None)
-        if method is None:
-            continue
-        try:
-            result = method()
-            if asyncio.iscoroutine(result):
-                await result
-            return
-        except Exception:
-            pass
-
-
 async def connect(dev_conf: dict) -> AC:
     """Baut eine frische, authentifizierte Verbindung auf und liest den Status.
 
@@ -122,7 +116,7 @@ async def connect(dev_conf: dict) -> AC:
             return device
         except Exception as exc:
             last_exc = exc
-            await close_device(device)
+            close_connection(device)
             print(f"  Verbindungsversuch {attempt}/{CONNECT_RETRIES} fehlgeschlagen "
                   f"({type(exc).__name__}: {exc})")
             if attempt < CONNECT_RETRIES:
@@ -205,7 +199,7 @@ async def main() -> None:
         device.ieco = True
         await device.apply()
     finally:
-        await close_device(device)
+        close_connection(device)
 
     # Firmware Zeit geben, den Wechsel zu uebernehmen, bevor zurueckgelesen wird.
     await asyncio.sleep(args.settle)
@@ -244,7 +238,7 @@ async def main() -> None:
             await device.apply()
             print("  iECO wieder ausgeschaltet.")
     finally:
-        await close_device(device)
+        close_connection(device)
 
     print("")
     print("Naechster Modus: per Fernbedienung umstellen, dann dieses Skript erneut "

@@ -22,8 +22,26 @@ Contents:
 - `test_ensure.py` — unit tests for `midea_ieco_ensure.py` (config loading, the
   apply-retry hardening, and the offline `list`/no-argument overview — exit 0,
   no network contact, and never prints token/key).
+- `test_conn.py` — unit tests for `midea_conn.py`, the one place that reaches
+  into `msmart-ng`'s internals to release a connection. Three layers, because no
+  single one of them would have caught the defect it replaced: a loopback server
+  that counts real accepts and disconnects (so closing is observed, not
+  believed — including a mutation clamp carrying the old, ineffective
+  implementation, which must fail the same assertion); a fidelity check that no
+  device fake in the suite offers a teardown name the real object lacks; and a
+  contract test pinning the private path against the real library. That last one
+  runs as a **subprocess** — this suite registers an `msmart` stub, so an
+  in-process check would have verified the stub instead. It skips only when
+  `msmart-ng` is not installed at all; CI runs it in the `install-smoke` job with
+  `MIDEA_IECO_REQUIRE_MSMART` set, under which a skip is a failure. A crashed
+  probe fails everywhere — a guard that turns its own breakage into a green run
+  is worse than no guard. `test_conn.py` also covers the `tools/` probes by
+  starting them as a user would, from a foreign working directory — `py_compile`
+  checks syntax only and would not notice an import that fails to resolve.
 - `_stub_msmart.py` — registers a minimal fake `msmart` package so the modules
-  import without the real dependency.
+  import without the real dependency. Deliberately shape-faithful: it mirrors the
+  real teardown path (`_lan._disconnect`, synchronous) and offers no
+  `close`/`disconnect`/`stop`, because the real `AirConditioner` has none.
 - `test_install.sh` — extracts individual `install.sh` functions and exercises
   them in isolation (the atomic 0600 `devices.json` write, cron-line quoting
   incl. both logs covered by the logrotate line, device-name validation, the

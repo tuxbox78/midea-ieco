@@ -9,9 +9,42 @@ Die Fake-``AirConditioner``-Klasse ist bewusst minimal: Tests, die konkretes
 Geraeteverhalten brauchen, ersetzen stattdessen ``connect_and_refresh`` bzw.
 uebergeben eigene Fake-Geraete - die Stub-Klasse dient nur dazu, den Import
 gelingen zu lassen.
+
+FORMTREUE: Die Klasse bildet den Aufraeum-Weg des echten Objekts nach - ein
+``_lan`` mit synchronem ``_disconnect()`` - und definiert bewusst KEIN
+``close``/``disconnect``/``stop``, weil msmart-ngs ``AirConditioner`` diese
+Namen nicht kennt (gemessen gegen 2026.7.0). Das ist keine Kosmetik: fuenf
+Attrappen, die MEHR konnten als das echte Objekt, haben ueber Monate einen
+toten Aufraeum-Pfad gruen gehalten. Eine Attrappe darf aermer sein als die
+Wirklichkeit, nie reicher - und ebenso wenig strenger, siehe das refresh() in
+tests/test_refresh_tokens.py. tests/test_conn.py sichert das ab.
 """
 import sys
 import types
+
+
+class RecordingLAN:
+    """Bildet ``msmart.lan.LAN`` so weit nach, wie das Aufraeumen es braucht.
+
+    Traegend ist die FORM: ``_disconnect`` heisst so wie in msmart-ng, ist
+    SYNCHRON und mehrfach aufrufbar (das echte ``LAN._disconnect`` prueft intern
+    auf ein vorhandenes Protokoll und tut ohne Verbindung nichts).
+
+    Hier zentral definiert und nicht je Testdatei erneut: alle Geraete-Attrappen
+    der Suite brauchen genau diese Form, und drei Kopien waeren drei Stellen, an
+    denen sie auseinanderlaufen koennte.
+
+    ``on_disconnect`` ist ein optionaler Haken fuer Attrappen, die das
+    Schliessen zusaetzlich in ihre eigene Reihenfolgeliste protokollieren."""
+
+    def __init__(self, on_disconnect=None):
+        self.disconnect_calls = 0
+        self._on_disconnect = on_disconnect
+
+    def _disconnect(self) -> None:
+        self.disconnect_calls += 1
+        if self._on_disconnect is not None:
+            self._on_disconnect()
 
 
 def install() -> None:
@@ -28,6 +61,7 @@ def install() -> None:
             self.ip = ip
             self.port = port
             self.device_id = device_id
+            self._lan = RecordingLAN()
 
     dev_mod.AirConditioner = AirConditioner
     msmart.device = device_pkg

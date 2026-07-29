@@ -42,6 +42,82 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cover it only up to 8146 characters.
 
 ### Fixed
+- **The tools never actually closed a device connection, and could therefore
+  cause the silence they reported.** Reported by @wihelde in issue #2 while
+  chasing a different problem, then measured here. Both tools released their
+  connection through a helper that probed the device object for `close`,
+  `disconnect` and `stop`. `msmart-ng`'s `AirConditioner` has none of the three —
+  all three `getattr` calls return `None` — so the helper fell straight through
+  and did nothing. It looked defensive and was a complete no-op.
+
+  What that cost, measured against a counting loopback server: after the
+  supposed close the connection was still open, and a second one to the same
+  peer then stood **concurrently** — the shape of every close-then-reconnect in
+  these tools. Midea units hold exactly one local session,
+  so the second one runs into nothing and the unit stays quiet for a while.
+  `midea_refresh_tokens.py` tests its candidates one after another against the
+  same unit, and `midea_ieco_ensure.py` deliberately closes and reconnects to
+  verify after `apply()` — both are precisely the sequences that suffer. A run
+  could produce the very "device does not answer" it then reported.
+
+  The teardown now goes through `device._lan._disconnect()`, isolated in the new
+  `midea_conn.py`. Four points worth naming:
+  - it is **synchronous**, because `msmart-ng`'s is (`await` on it raises
+    `TypeError`). That is an advantage rather than a compromise: without an
+    `await` there is no cancellation point, so the cleanup can neither be
+    interrupted nor hang — not even inside a `finally` while the surrounding
+    coroutine is being cancelled;
+  - it **returns whether it ran**. Without that, "did it really close?" is
+    unanswerable from outside — which is why the predecessor's uselessness went
+    unnoticed for months;
+  - a broken chain is **logged, never swallowed**. The old helper's silent
+    fallthrough is what hid the defect;
+  - closing now happens **before** the pause, not after it. `SETTLE_DELAY` and
+    `RETRY_DELAY` thereby become genuine quiet windows between two sessions
+    instead of a wait held on an open one.
+
+- **A device that went quiet after the handshake was reported as verified, and
+  its token was saved.** This is the one with real consequences, and it defeats
+  the single promise `verify_credentials` exists to keep.
+
+  `msmart-ng` does not report network errors out of `refresh()`.
+  `Device._send_command` catches `ProtocolError` and `TimeoutError`, logs them,
+  and returns an empty response list; `refresh()` then returns entirely
+  normally. So a unit that completed the V3 handshake and then stopped
+  answering raised nothing at all — `verify_credentials` saw two successful
+  awaits and returned `(True, "", "")`. The candidate counted as verified and
+  its token/key were written into `devices.json`. Measured against the real
+  library, this needs no timeout and no exotic timing: roughly six seconds, the
+  length of `msmart-ng`'s own read retries.
+
+  There is exactly one observable counter-signal, and it is now checked:
+  `msmart-ng` sets `_online = len(responses) > 0` in
+  `_send_commands_get_responses`, the single funnel every command passes
+  through. If nothing came back, `device.online` is `False`. A candidate whose
+  state read-back produced nothing is now rejected as `silent` — "handshake
+  succeeded, but the device sent no state back" — instead of being saved.
+
+  **This makes `devices.json` be written less often, not more.** A run that
+  previously ended with a stored token can now end in a failure. That is the
+  point: the stored token was never verified, only assumed.
+
+  The same root cause had a milder second face in `midea_ieco_ensure.py`. Its
+  verification round-trip after `apply()` read `device.ieco` without checking
+  whether the unit had answered at all, so a silent read-back was reported as
+  "iECO is still disabled according to the device" — a statement about a device
+  that had said nothing. It now says that no state came back.
+
+- **The verification cap promised 15 s and could take 30.** Each candidate ran
+  under two independent `wait_for` budgets, one around `authenticate()` and one
+  around `refresh()`, so the real worst case was their sum — a number that
+  appeared nowhere while the diagnostic text said "15s". Both are now spanned by
+  a single `asyncio.timeout` (the recommended form since Python 3.11, which this
+  project requires anyway), and `VERIFY_TIMEOUT` states that former total
+  outright. The per-step cap is larger than it was and the total is unchanged,
+  so the only runs that could newly fail are those where each step stayed under
+  15 s while the sum reached 30 — unreachable with the pinned library, whose own
+  worst case is about 12 s plus 6 s.
+
 - **Error messages could put a device token into the log file.** The cron lines
   redirect with `2>&1`, and the logs are created with the user's normal umask —
   usually world-readable, while `devices.json` is `chmod 600`. Two quoted texts
@@ -154,6 +230,50 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `[;&|<>()]` returns `(midea-ieco all)` unchanged.
 
 ### Added
+- **A test that can see whether a connection actually closed — and a guard so a
+  test double can never again be more capable than reality.** The dead teardown
+  above survived for months *because the suite was green*: every device fake in
+  the suite defined a `close()` that `msmart-ng`'s `AirConditioner` does not
+  have, so the assertion "the device is closed" exercised a branch that could
+  never run in production. A fake may be poorer than the real object; it must
+  never be richer.
+
+  Three layers now, because none of them alone would have caught it:
+  - `tests/test_conn.py` opens a real connection to a loopback server that counts
+    accepts and disconnects, so closing is *observed* rather than believed. It
+    carries the previous implementation verbatim as a mutation clamp — that clamp
+    must fail the same assertion, otherwise the test above has stopped measuring
+    what it claims;
+  - a fidelity check over every device fake in the suite, which fails if one
+    offers a teardown name the real object lacks. All five failed it when first
+    written;
+  - a contract test pinning the private path against the real library: it exists,
+    is synchronous, takes no arguments. It runs as a **subprocess** because this
+    suite registers an `msmart` stub — an in-process check would have quietly
+    verified the stub. In CI it runs in the `install-smoke` job, the only place
+    with the real dependency installed; without `msmart-ng` it skips visibly.
+    Its inverse guard fails once upstream ships a public `close()`, asking for
+    this workaround to be removed rather than left in place forever.
+
+    A guard that can silently disable itself is worse than none, and this one
+    nearly could: `unittest` exits 0 on an all-skipped run, and every failure of
+    the probe — including a changed constructor signature, precisely the
+    upstream break it exists to catch — was turned into a skip. Two rules now
+    close that. A **crashed probe is a failure**, never a skip. And the CI step
+    sets `MIDEA_IECO_REQUIRE_MSMART`, under which **any** skip becomes a
+    failure, because a missing dependency is itself a finding there.
+
+  `close_connection` also refuses a teardown that has become a coroutine. Left
+  unchecked, calling it would return an un-awaited coroutine object: nothing
+  closed, success reported, and the only trace a `RuntimeWarning` outside the
+  project's logging and redaction — the same silent uselessness this module was
+  written to end.
+
+  Also: the `tools/` probes are now covered by a test that starts them the way a
+  user does — as a subprocess from a foreign working directory. `py_compile`,
+  which is what the suite ran over them before, checks syntax only and would not
+  notice an import that fails to resolve.
+
 - **The installer now says so when a managed cron job is not active.** A crontab
   carrying our marker counts as "already set up", so nothing more is written — if
   the iECO line had since been deleted or commented out, the product silently did

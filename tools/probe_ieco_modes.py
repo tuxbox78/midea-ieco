@@ -60,6 +60,14 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from msmart.device.AC.device import AirConditioner as AC
 
+# Dieses Werkzeug liegt in tools/, das gemeinsame Modul im Repo-Wurzel-
+# verzeichnis. Ohne diesen Eintrag scheitert der Import beim direkten Aufruf
+# (python3 tools/probe_ieco_modes.py), weil dann nur tools/ auf dem Suchpfad
+# steht. Vor dem Import, damit die Reihenfolge erkennbar traegt.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from midea_conn import close_connection  # noqa: E402
+
 logging.basicConfig(level=logging.WARNING)
 
 # devices.json liegt im Repo-Root, dieses Skript in tools/ - daher parent.parent.
@@ -130,21 +138,6 @@ def load_device(name: str) -> dict:
              f"Bekannt: {', '.join(known) if known else '(keine)'}")
 
 
-async def close_device(device: AC) -> None:
-    """Verbindung best-effort schliessen (Methodenname variiert je Version)."""
-    for method_name in ("close", "disconnect", "stop"):
-        method = getattr(device, method_name, None)
-        if method is None:
-            continue
-        try:
-            result = method()
-            if asyncio.iscoroutine(result):
-                await result
-            return
-        except Exception:
-            pass
-
-
 async def connect(dev_conf: dict, retries: int = CONNECT_RETRIES,
                   delay: float = RETRY_DELAY) -> AC:
     """Baut eine FRISCHE, authentifizierte Verbindung auf und liest den Status.
@@ -175,7 +168,7 @@ async def connect(dev_conf: dict, retries: int = CONNECT_RETRIES,
             return device
         except Exception as exc:
             last_exc = exc
-            await close_device(device)
+            close_connection(device)
             print(f"    Verbindungsversuch {attempt}/{retries} fehlgeschlagen "
                   f"({type(exc).__name__}: {exc})")
             if attempt < retries:
@@ -231,7 +224,7 @@ async def restore(dev_conf: dict, snap: dict) -> bool:
         return False
     finally:
         if device is not None:
-            await close_device(device)
+            close_connection(device)
 
 
 async def probe_mode(dev_conf: dict, mode, settle: float) -> tuple[str, str]:
@@ -256,7 +249,7 @@ async def probe_mode(dev_conf: dict, mode, settle: float) -> tuple[str, str]:
         # Durchgang die Messung nicht als falsches Positiv verfaelscht.
         device.ieco = False
         await device.apply()
-        await close_device(device)
+        close_connection(device)
         device = None
         await asyncio.sleep(settle)
 
@@ -275,7 +268,7 @@ async def probe_mode(dev_conf: dict, mode, settle: float) -> tuple[str, str]:
         # --- Schritt 3: iECO aktivieren ------------------------------------
         device.ieco = True
         await device.apply()
-        await close_device(device)
+        close_connection(device)
         device = None
         await asyncio.sleep(settle)
 
@@ -298,7 +291,7 @@ async def probe_mode(dev_conf: dict, mode, settle: float) -> tuple[str, str]:
         return (RESULT_ERROR, f"{type(exc).__name__}: {exc}")
     finally:
         if device is not None:
-            await close_device(device)
+            close_connection(device)
 
 
 def parse_modes(spec: str | None, device: AC) -> list:
@@ -420,7 +413,7 @@ async def main() -> None:
         original = snapshot(device)
         modes = parse_modes(args.modes, device)
     finally:
-        await close_device(device)
+        close_connection(device)
 
     print(f"Ausgangszustand: {describe(original)}")
     print("")

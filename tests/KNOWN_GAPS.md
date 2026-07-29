@@ -152,6 +152,18 @@ them). Written down because the marker text alone does not distinguish them:
 *Cheapest fix:* match the marker together with the exception type, or ask msmart-ng
 upstream for distinguishable messages. Not worth it while the paths are unreachable.
 
+**One inference this entry did not draw, and it mattered.** "`refresh()` never
+propagates them" is not only a reason these markers stay unreachable — it also
+meant `verify_credentials` saw *no exception at all* when a unit went quiet after
+the handshake, and therefore reported the candidate as **verified** and saved its
+token. The observation above was correct and written down; the consequence was not.
+A later change even added a marker for `Read cancelled.` in the belief that it could
+reach a user, which this very entry already ruled out. Both are fixed: the marker is
+gone again, and `verify_credentials` now requires `device.online` after `refresh()`
+(`msmart-ng` sets it to `len(responses) > 0`), which is the only observable trace a
+swallowed error leaves. Recorded here because the cost was not the missing knowledge
+— it was having the knowledge and not following it through.
+
 ### 3. `env -i` (no `HOME`) breaks two install-update tests
 
 Pre-existing and confirmed against `a159ec7`. `git` needs `HOME` for its config, so
@@ -655,11 +667,14 @@ listed it as equivalent, and that no longer holds.
 ## Deliberately not covered
 
 - **`hint_all_cap`** was removed rather than tested: our verification cap sits above
-  msmart-ng's own worst case (`authenticate` ≈ 12 s and it does not propagate
-  network errors at all; the `refresh` ≈ 6 s figure is an estimate that has not been
-  re-derived from the pinned source), so an all-timeout run is not expected to occur.
-  `VERIFY_CAP` still classifies correctly if it ever does; there is simply no invented
-  advice attached to it.
+  msmart-ng's own worst case, so an all-timeout run is not expected to occur.
+  Both figures have since been re-derived from the pinned source: `authenticate`
+  ≈ 12 s (5 s connect + 3 × 2 s read timeout, plus the 1 s trailing sleep that is
+  only reached when the handshake succeeds), and `refresh` → `LAN.send` ≈ 6 s
+  (`RETRIES = 3`, 2 s per read). `VERIFY_CAP` still classifies correctly if it ever
+  does fire; there is simply no invented advice attached to it. Note the cap can
+  only *surface* while `authenticate()` runs — during `refresh()` msmart-ng
+  swallows the cause, and what surfaces there is the `online` check instead.
 - **The generated crontab of existing installations** is never rewritten. The
   installer points out managed lines that lack `MIDEA_IECO_LANG` and prints the
   corrected ones, but the user's crontab is theirs. This is a deliberate boundary,
@@ -684,6 +699,32 @@ listed it as equivalent, and that no longer holds.
   pins the exit code and that the message names the missing path and points at
   `install.sh` — deliberately not the phrasing, so translating it later needs no
   test change.
+
+- **The `msmart-ng` teardown contract does not run without the real dependency.**
+  The connection teardown in `midea_conn.py` uses the private chain
+  `device._lan._disconnect()`, and `tests/test_conn.py::MsmartContractTests` pins
+  that path against the real library. It runs its probe in a **subprocess** — this
+  suite registers an `msmart` stub, so an in-process check would have verified the
+  stub — and skips only when `msmart-ng` is genuinely **not installed**, which is
+  the normal state on a developer machine. (An earlier version of this entry said
+  it skips *because msmart is stubbed*; that is wrong — with `msmart-ng` present
+  the test runs, stub or no stub, because the subprocess never imports the stub.)
+  **Consequence:** on a machine without `msmart-ng`, a release that moved the
+  private path goes unnoticed until CI. Cheapest close: install the pinned
+  dependencies locally, or run `python3 -m unittest tests.test_conn.MsmartContractTests`
+  inside the venv. In CI it cannot degrade quietly: the `install-smoke` step sets
+  `MIDEA_IECO_REQUIRE_MSMART`, under which any skip is a failure, and a crashed
+  probe fails everywhere regardless of that variable.
+- **The fake-fidelity check tests three names, not the whole surface.**
+  `FakeFidelityTests` asserts that no device fake offers `close`, `disconnect` or
+  `stop` — the names the real `AirConditioner` lacks and that the previous, dead
+  teardown probed for. It would **not** catch a fake inventing some *other* method
+  the real object does not have. The general form (compare each fake against the
+  real class) needs the real library, which the stubbed suite does not have; the
+  inverse direction — that the real object still lacks these three — is what
+  `MsmartContractTests` pins in CI. Accepted: the narrow check covers the concrete
+  defect class that actually occurred, and the general one would inherit the skip
+  problem above.
 
 ## Corrections to earlier versions of this file
 

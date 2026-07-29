@@ -28,6 +28,9 @@ sys.path.insert(0, str(REPO_DIR))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import _stub_msmart  # noqa: E402,F401  (Fake-msmart VOR midea_ieco_ensure registrieren)
+# Gemeinsame, formtreue LAN-Attrappe: das echte AirConditioner-Objekt hat kein
+# close(), das Aufraeumen laeuft ueber die private Kette _lan._disconnect().
+from _stub_msmart import RecordingLAN as _RecordingLAN  # noqa: E402
 import midea_i18n  # noqa: E402  (die Schwaerzung sitzt dort, nicht in den Werkzeugen)
 import midea_ieco_ensure as mie  # noqa: E402  (nur fuer die Katalog-Aritaetspruefung)
 import midea_refresh_tokens as mrt  # noqa: E402
@@ -164,9 +167,12 @@ def _run_script_without_msmart(testcase, script, argv):
     devices.json."""
     work = tempfile.mkdtemp()
     testcase.addCleanup(lambda: shutil.rmtree(work, ignore_errors=True))
-    for name in ("midea_ieco_ensure.py", "midea_refresh_tokens.py",
-                 "midea_i18n.py"):
-        shutil.copy(REPO_DIR / name, work)
+    # ALLE Module aus dem Repo-Wurzelverzeichnis kopieren statt einer gepflegten
+    # Namensliste: die Werkzeuge importieren einander (i18n, Verbindungsabbau),
+    # und eine Liste, an die man bei jedem neuen Modul denken muss, faellt genau
+    # dann um, wenn eines dazukommt.
+    for path in sorted(REPO_DIR.glob("*.py")):
+        shutil.copy(path, work)
     target = os.path.join(work, script)
     code = (
         "import runpy, sys\n"
@@ -1708,7 +1714,19 @@ class _RecordingAC:
         self.refresh_calls = 0
         self.closed = False
         self.auth_raises = None
+        # Formtreu zu msmart-ng: das Aufraeumen laeuft ueber die PRIVATE Kette
+        # _lan._disconnect() und ist SYNCHRON. Das echte AirConditioner-Objekt
+        # hat kein close() - solange diese Attrappe eines anbot, war die
+        # Zusicherung "das Geraet wird geschlossen" gruen, obwohl der
+        # Produktionscode in Wirklichkeit gar nichts schloss.
+        self._lan = _RecordingLAN(self._note_close)
+        # Wie beim echten Device: online startet False und wird erst durch eine
+        # Antwort wahr (msmart-ng: _online = len(responses) > 0).
+        self.online = False
         _RecordingAC.instances.append(self)
+
+    def _note_close(self) -> None:
+        self.closed = True
 
     async def authenticate(self, token, key):
         self.auth_args = (token, key)
@@ -1718,12 +1736,29 @@ class _RecordingAC:
             raise self.auth_raises
 
     async def refresh(self):
+        """Bildet das VERSCHLUCKEN von Netzfehlern nach, nicht ihr Werfen.
+
+        Das ist der tragende Unterschied zur frueheren Fassung, und er ist kein
+        Detail: msmart-ngs refresh() reicht Netzfehler NICHT nach oben.
+        Device._send_command faengt ProtocolError und TimeoutError, protokolliert
+        sie und liefert eine leere Antwortliste;
+        _send_commands_get_responses setzt dabei _online = len(responses) > 0,
+        also False, und refresh() kehrt normal zurueck.
+
+        Die vorherige Attrappe liess den Abbruch stattdessen durch. Sie war damit
+        STRENGER als die Wirklichkeit - und hielt genau deshalb Tests gruen,
+        waehrend der Produktionscode einen Kandidaten faelschlich als verifiziert
+        meldete. Dieselbe Fehlerklasse wie beim toten Aufraeum-Pfad, nur mit
+        umgekehrtem Vorzeichen: eine Attrappe darf aermer sein als die
+        Wirklichkeit, nie strenger und nie reicher."""
         self.refresh_calls += 1
         if self.refresh_delay:
-            await asyncio.sleep(self.refresh_delay)
-
-    async def close(self):
-        self.closed = True
+            try:
+                await asyncio.sleep(self.refresh_delay)
+            except asyncio.CancelledError:
+                self.online = False
+                return
+        self.online = True
 
 
 class VerifyCredentialsBodyTests(_LangMixin):
@@ -1799,17 +1834,68 @@ class VerifyCredentialsBodyTests(_LangMixin):
         with mock.patch.object(_RecordingAC, "authenticate", _slow):
             return self._call()
 
-    def test_a_hanging_refresh_is_capped_as_well(self):
-        # Der Deckel um refresh() war ungetestet - nur der um authenticate.
-        # Ohne ihn blockierte ein Geraet, das den Handshake annimmt und dann
-        # verstummt, den gesamten Lauf (im Wochen-Cron unbemerkt).
+    def test_one_budget_spans_authenticate_and_refresh_together(self):
+        # Pinnt die Semantik des Deckels, nicht nur seine Existenz: JEDER
+        # Einzelschritt bleibt hier unter dem Limit, die SUMME nicht.
+        #
+        # Der unterscheidende Ausgang ist 'ok': mit zwei unabhaengigen
+        # wait_for-Deckeln (der fruehere Zustand) kaeme jeder Schritt durch, das
+        # Nachlesen gelaenge, und die Funktion meldete ERFOLG. Nur mit einem
+        # gemeinsamen asyncio.timeout wird der Kandidat abgelehnt.
+        _RecordingAC.instances = []
+        with mock.patch.object(mrt, "VERIFY_TIMEOUT", 0.2), \
+                mock.patch.object(_RecordingAC, "auth_delay", 0.15), \
+                mock.patch.object(_RecordingAC, "refresh_delay", 0.15):
+            ok, code, _ = self._call()
+        self.assertFalse(ok)
+        # Nicht VERIFY_CAP: der Deckel bricht das Lesen ab, msmart-ng verschluckt
+        # die Ursache und liefert nur "kein Zustand". Mehr ist von aussen ueber
+        # diesen Lauf ehrlicherweise nicht zu sagen (siehe naechster Test).
+        self.assertEqual(code, mrt.VERIFY_SILENT)
+        # Der Handshake selbst war schnell genug - er darf nicht die Ursache sein.
+        self.assertIsNotNone(_RecordingAC.instances[0].auth_args)
+
+    def test_a_hanging_refresh_is_caught_although_msmart_swallows_the_cause(self):
+        """Ein Geraet, das den Handshake annimmt und dann verstummt, darf nie
+        als verifiziert gelten.
+
+        Frueher tat es das: msmart-ngs refresh() reicht Netzfehler nicht nach
+        oben (Device._send_command faengt ProtocolError/TimeoutError und liefert
+        eine leere Antwortliste), also kam bei verify_credentials KEINE Ausnahme
+        an - und ohne die online-Pruefung meldete sie Erfolg und speicherte das
+        Token. Der Test hier stand damals auf VERIFY_CAP und war gruen, weil die
+        Attrappe den Abbruch durchliess, was das echte Objekt nicht tut.
+
+        Der ehrliche Befund ist VERIFY_SILENT: erkennbar ist nur, dass kein
+        Zustand zurueckkam. Ob die Zeit ablief oder das Geraet schwieg, ist von
+        aussen nicht unterscheidbar, weil msmart-ng die Ursache verwirft."""
         _RecordingAC.instances = []
         with mock.patch.object(mrt, "VERIFY_TIMEOUT", 0.05), \
                 mock.patch.object(_RecordingAC, "refresh_delay", 0.5):
+            ok, code, text = self._call()
+        self.assertFalse(ok)
+        self.assertEqual(code, mrt.VERIFY_SILENT)
+        self.assertIn("no state", text)
+        # Der Handshake war erfolgreich - nur das Nachlesen haengt.
+        self.assertIsNotNone(_RecordingAC.instances[0].auth_args)
+
+    def test_a_silent_device_after_the_handshake_is_never_verified(self):
+        """Der realistischere Zwilling des Tests darueber - ganz OHNE Zeitlimit.
+
+        Erschoepft msmart-ng seine eigenen Lesewiederholungen, verschluckt es den
+        Fehler genauso: refresh() kehrt normal zurueck, nur online bleibt False.
+        Das ist der haeufigere Weg in denselben Fehlschlag und braucht keine
+        Sekunde Wartezeit."""
+        _RecordingAC.instances = []
+
+        async def _refresh_without_answer(self_):
+            self_.refresh_calls += 1
+            self_.online = False        # wie msmart: len(responses) == 0
+
+        with mock.patch.object(_RecordingAC, "refresh", _refresh_without_answer):
             ok, code, _ = self._call()
         self.assertFalse(ok)
-        self.assertEqual(code, mrt.VERIFY_CAP)
-        # Der Handshake war erfolgreich - nur das Nachlesen haengt.
+        self.assertEqual(code, mrt.VERIFY_SILENT)
         self.assertIsNotNone(_RecordingAC.instances[0].auth_args)
 
 
@@ -2662,12 +2748,19 @@ class NewDeviceAndInputTests(_ConfigPathMixin):
 class VerifyTimeoutHeadroomTests(unittest.TestCase):
     """#2: Der eigene Deckel darf msmart-ngs interne Wiederholungslogik nicht
     abschneiden - sonst wird ein noch laufender Versuch als 'Zeitlimit'
-    fehlgedeutet. msmart-ng 2026.7.0 braucht im Fehlerfall bis zu
-    5s (connect) + 3 x 2s (Lesetimeout) = 11s."""
+    fehlgedeutet.
+
+    Seit das Budget BEIDE Schritte zusammen umspannt (ein asyncio.timeout statt
+    zweier wait_for), muss es auch gegen die SUMME beider Worst Cases gemessen
+    werden - gegen nur einen davon zu pruefen waere seitdem zu schwach."""
 
     def test_timeout_exceeds_msmart_worst_case(self):
-        msmart_worst_case = 5 + 3 * 2
-        self.assertGreater(mrt.VERIFY_TIMEOUT, msmart_worst_case)
+        # authenticate: 5s Verbindungsaufbau + 3 x 2s Lesetimeout + 1s Nachlauf
+        authenticate_worst_case = 5 + 3 * 2 + 1
+        # refresh -> LAN.send: 3 x 2s Lesetimeout
+        refresh_worst_case = 3 * 2
+        self.assertGreater(mrt.VERIFY_TIMEOUT,
+                           authenticate_worst_case + refresh_worst_case)
 
 
 if __name__ == "__main__":

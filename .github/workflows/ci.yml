@@ -67,3 +67,24 @@ jobs:
 
       - name: Verify midealocal discover import path
         run: venv/bin/python -m midealocal.cli discover --help
+
+      # msmart-ng offers no public way to close a device connection, so
+      # midea_conn.py reaches through the private chain device._lan._disconnect().
+      # If a future release moves or renames it, close_connection() silently
+      # becomes a no-op again — exactly the defect this replaced, where every
+      # candidate leaked a connection to a unit that tolerates only one.
+      #
+      # This assertion can ONLY live here. The `test` job stubs msmart out, so
+      # the same test skips itself there; running it against the stub would
+      # check the fake and prove nothing. The test also re-checks the inverse:
+      # should upstream ever ship a public close(), it fails and asks for the
+      # workaround to be removed.
+      #
+      # MIDEA_IECO_REQUIRE_MSMART turns any skip into a failure. Without it the
+      # guard could disable itself: unittest exits 0 on an all-skipped run, so a
+      # crashed probe — a changed constructor signature, exactly the upstream
+      # break this exists to catch — would read as a green build.
+      - name: Verify the msmart-ng teardown contract still holds
+        env:
+          MIDEA_IECO_REQUIRE_MSMART: "1"
+        run: venv/bin/python -m unittest tests.test_conn.MsmartContractTests -v

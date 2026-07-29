@@ -34,10 +34,12 @@ for f in install.sh midea_ieco_ensure.sh tests/test_install.sh tests/test_wrappe
 done
 
 echo "### python syntax (py_compile) ###"
-# tools/ ist mit drin, damit auch die Diagnose-Werkzeuge (die nur von Hand am
-# echten Geraet laufen und deshalb keine Unit-Tests haben) nicht mit einem
-# Syntaxfehler ins Repo gelangen koennen.
-python3 -m py_compile midea_ieco_ensure.py midea_refresh_tokens.py midea_i18n.py tests/*.py tools/*.py || fail=1
+# tools/ ist mit drin, damit auch die Diagnose-Werkzeuge (die sonst nur von Hand
+# am echten Geraet laufen) nicht mit einem Syntaxfehler ins Repo gelangen. Ihre
+# IMPORTE deckt das nicht ab - py_compile prueft nur die Syntax; dafuer startet
+# tests/test_conn.py sie zusaetzlich als Unterprozess.
+python3 -m py_compile midea_ieco_ensure.py midea_refresh_tokens.py midea_i18n.py \
+    midea_conn.py tests/*.py tools/*.py || fail=1
 
 echo "### python unit tests ###"
 python3 -m unittest discover -s tests -p 'test_*.py' || fail=1
