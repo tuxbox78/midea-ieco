@@ -713,6 +713,18 @@ listed it as equivalent, and that no longer holds.
   by hand, a larger change to the argument parsing than a mis-mapped exit code on a
   hand-edit warrants. Recorded rather than fixed.
 
+- **A catch-up line whose `--only-if-due` sits inside a quoted composite is judged
+  correctly only because the detector subsplits.** `_cron_line_is_catchup` mirrors
+  `cron_scan_tools` — tokenize, skip the cd operand and redirection targets, then
+  subsplit each token on whitespace/metacharacters — and matches a *part* that equals
+  `--only-if-due` exactly (not its basename). This is what lets it see the flag in
+  `sh -c '… --only-if-due'`, the form the subsplit was added for. The residual is the
+  mirror of the tool-name detection's own: a *quoted argument that is not the cd
+  operand or a redirect target* and literally contains ` --only-if-due ` with spaces
+  would subsplit to a bare `--only-if-due` part and read as a catch-up. No line the
+  installer writes, and no realistic hand-written one, has that shape; it is the same
+  class `cron_scan_tools` already carries for tool names, recorded here so the two
+  are known to share it.
 - **A capability answer that arrives but cannot be decoded is still blamed on the
   unit.** `_send_commands_get_responses` sets `_online = len(responses) > 0` on the
   **raw** byte list, *before* `Response.construct` validates and discards anything

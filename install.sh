@@ -532,6 +532,15 @@ shell_quote_for_cron() {
 # direkt darunter braucht ihn ebenfalls, und sie laeuft frueher.
 CRON_MARKER="# midea-ieco-managed"
 
+# Laengen-Notbremse fuer die quote-bewusste Zeilenzerlegung (cron_tokenize_line):
+# sie kostet quadratisch mit der Zeilenlaenge und laeuft bei jedem Installer-Start
+# ueber jede markierte Zeile. Ueber dieser Schranke wird eine Zeile nicht
+# zerlegt - in cron_scan_tools UND _cron_line_is_catchup dieselbe Zahl, deshalb
+# hier EINMAL benannt. Die Herleitung (naechster Zweierwert ueber dem groessten
+# vom Installer erzeugten Worst Case von 32921 Zeichen) steht am Nutzungsort in
+# cron_scan_tools.
+CRON_TOKENIZE_MAX_LEN=65536
+
 # Ist der Wert einer MIDEA_IECO_LANG-Zuweisung WIRKSAM? Ein leerer Wert zaehlt
 # NICHT als gesetzt: resolve_lang (hier wie in midea_i18n.py) faellt dafuer auf
 # Englisch zurueck, die Zeile aendert also gar nichts. Genau ein umschliessendes
@@ -793,7 +802,7 @@ cron_tokenize_line() {   # $1 = Cron-Zeile; Ergebnis in CTL_TOKS/CTL_SEP/CTL_RED
 # (Sprachhinweis UND Inaktiv-Hinweis), damit sie nicht auseinanderlaufen.
 #
 # Erkannt an einem Kommando-Token, das EXAKT '--only-if-due' lautet - nicht an
-# einer Teilzeichenkette der Zeile und nicht am Basisnamen eines Tokens. Beide
+# einer Teilzeichenkette der Zeile und nicht am Basisnamen eines Teils. Beide
 # frueheren Heuristiken lagen in BEIDE Richtungen falsch, und je in die teure:
 #   * die Leerraum-Suche hielt '--all --only-if-due>>log' und '"--only-if-due"'
 #     (Flag ohne umgebenden Leerraum bzw. in Quotes) faelschlich fuer die
@@ -801,27 +810,48 @@ cron_tokenize_line() {   # $1 = Cron-Zeile; Ergebnis in CTL_TOKS/CTL_SEP/CTL_RED
 #     und wer sie einsetzt, ersetzt seinen Nachholer durch eine zweite Wochenzeile;
 #   * die Basisnamen-Suche hielt einen Pfad '/opt/--only-if-due' faelschlich fuer
 #     den Nachholer (Basisname '--only-if-due').
-# Ein echtes Flag ist ein EIGENES Token ohne '/'; ein Pfad, der die Zeichenfolge
-# traegt, ist ein anderes Token. Nur die quote-bewusste Zerlegung unterscheidet
-# beide - eine Zeichenketten-Heuristik kann es prinzipiell nicht (ein gequoteter
-# cd-Pfad '/opt/x --only-if-due y' traegt die Zeichenfolge mit Leerraum ringsum).
 #
-# cd-Operand und Umleitungsziel werden uebersprungen, wie in cron_scan_tools:
-# 'cd --only-if-due' waere ein Verzeichnis, kein Flag. Rueckgabe 0 = Nachholer.
+# Die Zerlegung ist deshalb EXAKT die von cron_scan_tools - Tokenizer, cd-Skip,
+# Umleitungsskip UND derselbe Subsplit an Leerraum/Metazeichen -, nur der
+# Endvergleich ist ein anderer: cron_scan_tools bildet den Basisnamen und
+# vergleicht Skriptnamen, hier wird der Teil (nach Entfernen INNERER Quotes,
+# ohne Basisnamen-Bildung) EXAKT gegen '--only-if-due' geprueft. Beides ist
+# noetig:
+#   - der Subsplit deckt das Flag in einem gequoteten Verbundtoken auf
+#     (sh -c '... --only-if-due'); ohne ihn galt so eine Nachhol-Zeile als
+#     Wochenlauf, und der Inaktiv-Hinweis schwieg ueber eine geloeschte
+#     Wochenzeile - stille Nichtausfuehrung. Genau fuer diese sh-c-Form wurde
+#     der Subsplit in cron_scan_tools eingefuehrt;
+#   - der EXAKTE Teilvergleich (statt Basisname) haelt '/opt/--only-if-due'
+#     korrekt fuer keinen Nachholer.
+# cd-Operand und Umleitungsziel werden uebersprungen ('cd --only-if-due' waere
+# ein Verzeichnis). Rueckgabe 0 = Nachholer.
 _cron_line_is_catchup() {   # $1 = Cron-Zeile; braucht cron_tokenize_line
     # Dieselbe Laengen-Notbremse wie in cron_scan_tools: die Zerlegung kostet
     # quadratisch mit der Zeilenlaenge. Eine ueberlange Zeile gilt als NICHT
     # Nachholer - dieselbe Richtung, in die cron_scan_tools sie ohnehin
     # ueberspringt.
-    if [ "${#1}" -gt 65536 ]; then return 1; fi
-    local i prev_was_cd=0
-    local -a CTL_TOKS=() CTL_SEP=() CTL_RED=()
+    if [ "${#1}" -gt "$CRON_TOKENIZE_MAX_LEN" ]; then return 1; fi
+    local i part cleaned prev_was_cd=0
+    local -a CTL_TOKS=() CTL_SEP=() CTL_RED=() parts=()
     cron_tokenize_line "$1"
     for (( i=0; i<${#CTL_TOKS[@]}; i++ )); do
         if [ "${CTL_SEP[i]}" -eq 1 ]; then prev_was_cd=0; continue; fi
         if [ "$prev_was_cd" -eq 1 ]; then prev_was_cd=0; continue; fi
         if [ "${CTL_RED[i]}" -eq 1 ]; then continue; fi
-        if [ "${CTL_TOKS[i]}" = "--only-if-due" ]; then return 0; fi
+        # Subsplit wie in cron_scan_tools: ein gequotetes Verbundtoken
+        # (sh -c '...') traegt das Flag als inneren Teil.
+        parts=("${CTL_TOKS[i]}")
+        case "${CTL_TOKS[i]}" in
+            *[[:space:]\;\&\|\<\>\(\)]*)
+                parts=(); read -r -a parts <<< "${CTL_TOKS[i]//[;&|<>\(\)]/ }" || true ;;
+        esac
+        for part in "${parts[@]}"; do
+            # Nur INNERE Quotes entfernen, KEINE Basisnamen-Bildung: ein Flag hat
+            # keinen '/', ein Pfad '/opt/--only-if-due' bleibt so verschieden.
+            cleaned="${part//\'/}"; cleaned="${cleaned//\"/}"
+            if [ "$cleaned" = "--only-if-due" ]; then return 0; fi
+        done
         if [ "${CTL_TOKS[i]}" = "cd" ]; then prev_was_cd=1; fi
     done
     return 1
@@ -878,7 +908,7 @@ cron_scan_tools() {   # $1 = Crontab; Gate (Marker vorhanden?) liegt beim Aufruf
         # sich weiterhin. Der ehrliche Preis der Schranke: eine handgeschriebene
         # Zeile knapp darunter kostet je Installerstart bis zu rund 100 s.
         # Der Installer selbst erzeugt so etwas nicht.
-        if [ "${#line}" -gt 65536 ]; then continue; fi
+        if [ "${#line}" -gt "$CRON_TOKENIZE_MAX_LEN" ]; then continue; fi
         cron_tokenize_line "$line"
         prev_was_cd=0
         line_ieco=0; line_refresh=0

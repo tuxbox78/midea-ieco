@@ -1369,6 +1369,10 @@ eval "$(extract_func cron_scan_tools "$INSTALL")"
 eval "$(extract_func cron_missing_managed_lines "$INSTALL")"
 eval "$(extract_func print_cron_missing_hint "$INSTALL")"
 eval "$(grep '^CRON_MARKER=' "$INSTALL")"
+# Die Laengenschranke, auf die cron_scan_tools und _cron_line_is_catchup nun als
+# benannte Konstante zugreifen - sonst laufen beide extrahierten Funktionen unter
+# 'set -u' in einen Fehler.
+eval "$(grep '^CRON_TOKENIZE_MAX_LEN=' "$INSTALL")"
 
 # Sentinels statt der echten Zeilen: so laesst sich pruefen, WELCHE Zeile
 # gezeigt wird, ohne den Zeileninhalt hier zu duplizieren (den decken die
@@ -1455,6 +1459,15 @@ assert_hint "@reboot cd /opt && venv/bin/python3 midea_refresh_tokens.py --all '
     "ZEILE_REBOOT" "Nachholer mit Flag in Single-Quotes wird erkannt"
 assert_hint "@reboot cd /opt && venv/bin/python3 midea_refresh_tokens.py --only-if-due --all >> /opt/refresh.log 2>&1 $CRON_MARKER" \
     "ZEILE_REBOOT" "Nachholer mit Flag VOR --all wird erkannt"
+# Verbundtoken: das Flag steckt in einem gequoteten 'sh -c'-Kommando. Ohne den
+# Subsplit im Detektor galt so eine Zeile als Wochenlauf - der Sprachhinweis
+# zeigte die Wochenzeile zum Uebernehmen (Rat zu einer zweiten Wochenzeile),
+# der Inaktiv-Hinweis schwieg ueber eine geloeschte Wochenzeile. Genau fuer
+# 'sh -c "…werkzeug…"' wurde der Subsplit ueberhaupt eingefuehrt.
+assert_hint "@reboot sh -c \"cd /opt && venv/bin/python3 midea_refresh_tokens.py --all --only-if-due\" >> /opt/refresh.log 2>&1 $CRON_MARKER" \
+    "ZEILE_REBOOT" "Nachholer mit Flag in sh -c \"…\" wird erkannt (doppelte Quotes)"
+assert_hint "@reboot sh -c 'venv/bin/python3 midea_refresh_tokens.py --all --only-if-due' >> /opt/refresh.log 2>&1 $CRON_MARKER" \
+    "ZEILE_REBOOT" "Nachholer mit Flag in sh -c '…' wird erkannt (einfache Quotes)"
 # Und die gefaehrliche Gegenrichtung mit Leerraum IM Pfad (die die alte
 # Leerraum-Heuristik faelschlich umdeutete): das bleibt die Wochenzeile.
 assert_hint "0 3 * * 0 cd '/opt/x --only-if-due y' && venv/bin/python3 midea_refresh_tokens.py --all >> /opt/refresh.log 2>&1 $CRON_MARKER" \
@@ -1663,6 +1676,13 @@ $CL_LOGROT" "ZEILE_REFRESH" "nur der Nachholer, kein Wochenlauf: Wochenlauf gilt
 
 assert_missing "$CL_OLD_REBOOT" "ZEILE_IECO
 ZEILE_REFRESH" "der Nachholer allein ersetzt keinen der beiden erwarteten Jobs"
+
+# Dasselbe fuer die Verbundform: eine Nachhol-Zeile, deren Flag in 'sh -c "…"'
+# steckt, darf NICHT als Wochenlauf zaehlen - sonst schwiege der Hinweis ueber
+# die geloeschte Wochenzeile (stille Nichtausfuehrung).
+assert_missing "@reboot sh -c \"cd /opt && venv/bin/python3 midea_refresh_tokens.py --all --only-if-due\" >> /opt/refresh.log 2>&1 $CRON_MARKER" \
+    "ZEILE_IECO
+ZEILE_REFRESH" "sh -c-gewrappter Nachholer zaehlt nicht als Wochenlauf"
 
 # Umgekehrt darf seine ANWESENHEIT keinen Hinweis ausloesen: er ist ein Zusatz,
 # den eine Bestandsinstallation nicht hat und den niemand einfordert.
