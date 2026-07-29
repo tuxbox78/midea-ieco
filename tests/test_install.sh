@@ -1027,6 +1027,14 @@ assert "$rc" "es wurde ueberhaupt eine Crontab geschrieben"
 rc=0; [ "$(wc -c < "$CRON_WRITES" | tr -d ' ')" -eq 1 ] || rc=1
 assert "$rc" "genau EIN Schreibvorgang auf die Crontab"
 
+# Der VORGESCHLAGENE Block (stdout vor der Cron-Frage) zeigt die Nachhol-Zeile.
+# Er ist der einzige Weg, ueber den eine Bestandsinstallation - die nicht neu
+# schreibt - die Zeile ueberhaupt zu sehen bekommt; ohne diese Zusicherung liess
+# sich die Anzeige-Zeile spurlos entfernen (gemessen, blieb gruen).
+rc=0; { grep -q -- '@reboot' "$ONB_OUT" \
+        && grep -q -- '--only-if-due' "$ONB_OUT"; } || rc=1
+assert "$rc" "der vorgeschlagene Cron-Block zeigt die @reboot-Nachhol-Zeile"
+
 # --- die iECO-Zeile: das eigentliche Produkt -------------------------------
 rc=0; cron_line_has 'midea_ieco_ensure.py' \
         '*/20 * * * *' \
@@ -1354,6 +1362,9 @@ eval "$(extract_func _cron_line_sets_lang_inline "$INSTALL")"
 eval "$(extract_func cron_lines_needing_lang "$INSTALL")"
 eval "$(extract_func print_cron_lang_hint "$INSTALL")"
 eval "$(extract_func cron_tokenize_line "$INSTALL")"
+# Der gemeinsame Nachhol-Detektor: seit dieser Runde rufen ihn BEIDE Scanner
+# (Sprachhinweis und Inaktiv-Hinweis), er muss also vor ihnen im Scope stehen.
+eval "$(extract_func _cron_line_is_catchup "$INSTALL")"
 eval "$(extract_func cron_scan_tools "$INSTALL")"
 eval "$(extract_func cron_missing_managed_lines "$INSTALL")"
 eval "$(extract_func print_cron_missing_hint "$INSTALL")"
@@ -1429,9 +1440,32 @@ $CL_NEW_REBOOT
 $CL_LOGROT" "" "alle drei Werkzeug-Zeilen migriert: kein Hinweis"
 
 # Ein Pfad, der die Zeichenfolge zufaellig enthaelt, macht aus der Wochenzeile
-# keinen Nachholer: erkannt wird das Flag mit umgebendem Leerraum.
+# keinen Nachholer: erkannt wird ein Flag-TOKEN, kein Vorkommen in der Zeile.
 assert_hint "0 3 * * 0 cd '/opt/--only-if-due' && venv/bin/python3 midea_refresh_tokens.py --all >> /opt/refresh.log 2>&1 $CRON_MARKER" \
-    "ZEILE_REFRESH" "'--only-if-due' im Pfad deutet die Wochenzeile nicht um"
+    "ZEILE_REFRESH" "'--only-if-due' als Pfadteil deutet die Wochenzeile nicht um"
+
+# --- Formmatrix: die vier Schreibweisen, an denen die fruehere Heuristik scheiterte
+# Alle sprachlos, alle sollen als NACHHOLER erkannt werden -> ZEILE_REBOOT.
+# Vor dieser Runde zeigten die ersten beiden faelschlich die Wochenzeile.
+assert_hint "@reboot sleep 120 && cd /opt && venv/bin/python3 midea_refresh_tokens.py --all --only-if-due>>/opt/refresh.log 2>&1 $CRON_MARKER" \
+    "ZEILE_REBOOT" "Nachholer ohne Leerzeichen vor '>>' wird erkannt"
+assert_hint "@reboot cd /opt && venv/bin/python3 midea_refresh_tokens.py --all \"--only-if-due\" >> /opt/refresh.log 2>&1 $CRON_MARKER" \
+    "ZEILE_REBOOT" "Nachholer mit Flag in Double-Quotes wird erkannt"
+assert_hint "@reboot cd /opt && venv/bin/python3 midea_refresh_tokens.py --all '--only-if-due' >> /opt/refresh.log 2>&1 $CRON_MARKER" \
+    "ZEILE_REBOOT" "Nachholer mit Flag in Single-Quotes wird erkannt"
+assert_hint "@reboot cd /opt && venv/bin/python3 midea_refresh_tokens.py --only-if-due --all >> /opt/refresh.log 2>&1 $CRON_MARKER" \
+    "ZEILE_REBOOT" "Nachholer mit Flag VOR --all wird erkannt"
+# Und die gefaehrliche Gegenrichtung mit Leerraum IM Pfad (die die alte
+# Leerraum-Heuristik faelschlich umdeutete): das bleibt die Wochenzeile.
+assert_hint "0 3 * * 0 cd '/opt/x --only-if-due y' && venv/bin/python3 midea_refresh_tokens.py --all >> /opt/refresh.log 2>&1 $CRON_MARKER" \
+    "ZEILE_REFRESH" "Leerraum-umgebenes '--only-if-due' im cd-Pfad deutet die Wochenzeile nicht um"
+
+# Ein Token, dessen BASISNAME '--only-if-due' ist (eine Zuweisung mit so einem
+# Pfad), darf die Wochenzeile nicht zum Nachholer machen. Erkannt wird das GANZE
+# Token, nicht sein Basisname: ein Vergleich auf den Basisnamen faellt hier um,
+# und dieser Fall ist der einzige, der ihn von der Token-Fassung unterscheidet.
+assert_hint "0 3 * * 0 cd /opt && PYTHONPATH=/x/--only-if-due venv/bin/python3 midea_refresh_tokens.py --all >> /opt/refresh.log 2>&1 $CRON_MARKER" \
+    "ZEILE_REFRESH" "ein Token mit Basisname '--only-if-due' deutet die Wochenzeile nicht um"
 
 assert_hint "MIDEA_IECO_LANG=de
 $CL_OLD_IECO
@@ -1636,6 +1670,20 @@ assert_missing "$CL_NEW_IECO
 $CL_NEW_REFRESH
 $CL_OLD_REBOOT
 $CL_LOGROT" "" "Wochenlauf UND Nachholer vorhanden: kein Hinweis"
+
+# --- der Nachhol-Detektor darf keinen ECHTEN Job unterdruecken --------------
+# Ein Token, dessen Basisname zufaellig '--only-if-due' lautet (ein Pfad in einer
+# Zuweisung), hielt die iECO-Zeile frueher faelschlich fuer den Nachholer und
+# unterdrueckte sie ganz. Jetzt zaehlt nur ein Flag-TOKEN, und der iECO-Job wird
+# erkannt (missIECO=0, also NICHT in der Ausgabe).
+assert_missing "*/20 * * * * PYTHONPATH=/opt/--only-if-due cd /opt && venv/bin/python3 midea_ieco_ensure.py all --only-if-on >> /opt/ieco.log 2>&1 $CRON_MARKER
+$CL_NEW_REFRESH" "" "'--only-if-due' als Pfadteil unterdrueckt den iECO-Job nicht"
+
+# Ein Nachholer, der (untypisch) BEIDE Werkzeuge auf einer Zeile auffuehrt,
+# verliert seinen iECO-Anteil nicht mehr mit: nur der Refresh-Anteil zaehlt
+# nicht als Wochenlauf. Frueher unterdrueckte der Catch-up-Merker die ganze Zeile.
+assert_missing "@reboot cd /opt && venv/bin/python3 midea_ieco_ensure.py all --only-if-on && venv/bin/python3 midea_refresh_tokens.py --all --only-if-due >> /opt/refresh.log 2>&1 $CRON_MARKER
+$CL_NEW_REFRESH" "" "iECO-Anteil einer Nachhol-Zeile zaehlt weiter (kein Ganz-Zeilen-Skip)"
 
 assert_missing "# $CL_OLD_IECO
 $CL_NEW_REFRESH

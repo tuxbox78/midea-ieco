@@ -637,21 +637,17 @@ cron_lines_needing_lang() {   # $1 = bestehende Crontab
         # eine zweite Wochenzeile. Ein Hinweis, der zur falschen Zeile raet, ist
         # schlimmer als keiner.
         #
-        # Erkannt wird die Nachhol-Zeile am Flag MIT umgebendem Leerraum, nicht
-        # als blosse Teilzeichenkette: ein Installationspfad, der zufaellig
-        # '--only-if-due' enthaelt, soll die Wochenzeile nicht umdeuten. Der
-        # Tokenizer aus cron_scan_tools waere noch genauer, ist hier aber
-        # unverhaeltnismaessig - diese Funktion arbeitet bewusst zeilenweise und
-        # billig, und ihr Ergebnis wird nur GEDRUCKT.
+        # Die Unterscheidung uebernimmt _cron_line_is_catchup - DIESELBE Quelle
+        # wie der Inaktiv-Hinweis, damit beide nicht auseinanderlaufen. Eine
+        # frueher hier stehende Zeichenketten-Heuristik lag in beide Richtungen
+        # falsch (Flag ohne Leerraum bzw. in Quotes uebersehen, Pfad mit der
+        # Zeichenfolge falsch als Nachholer gewertet); nur die quote-bewusste
+        # Zerlegung trennt ein echtes Flag von einer Pfad-Zeichenfolge sicher.
         case "$line" in
             *midea_ieco_ensure.py*)    CRON_NEEDS_IECO=1 ;;
             *midea_refresh_tokens.py*)
-                case "$line" in
-                    *[[:space:]]--only-if-due|*[[:space:]]--only-if-due[[:space:]]*)
-                        CRON_NEEDS_REBOOT=1 ;;
-                    *)  CRON_NEEDS_REFRESH=1 ;;
-                esac
-                ;;
+                if _cron_line_is_catchup "$line"; then CRON_NEEDS_REBOOT=1
+                else CRON_NEEDS_REFRESH=1; fi ;;
         esac
     done <<< "$1"
 }
@@ -793,16 +789,55 @@ cron_tokenize_line() {   # $1 = Cron-Zeile; Ergebnis in CTL_TOKS/CTL_SEP/CTL_RED
     return 0
 }
 
+# Ist diese Cron-Zeile der '@reboot'-Nachholer? EINE Quelle fuer beide Scanner
+# (Sprachhinweis UND Inaktiv-Hinweis), damit sie nicht auseinanderlaufen.
+#
+# Erkannt an einem Kommando-Token, das EXAKT '--only-if-due' lautet - nicht an
+# einer Teilzeichenkette der Zeile und nicht am Basisnamen eines Tokens. Beide
+# frueheren Heuristiken lagen in BEIDE Richtungen falsch, und je in die teure:
+#   * die Leerraum-Suche hielt '--all --only-if-due>>log' und '"--only-if-due"'
+#     (Flag ohne umgebenden Leerraum bzw. in Quotes) faelschlich fuer die
+#     Wochenzeile - der Sprachhinweis zeigte dann die Wochenzeile zum Uebernehmen,
+#     und wer sie einsetzt, ersetzt seinen Nachholer durch eine zweite Wochenzeile;
+#   * die Basisnamen-Suche hielt einen Pfad '/opt/--only-if-due' faelschlich fuer
+#     den Nachholer (Basisname '--only-if-due').
+# Ein echtes Flag ist ein EIGENES Token ohne '/'; ein Pfad, der die Zeichenfolge
+# traegt, ist ein anderes Token. Nur die quote-bewusste Zerlegung unterscheidet
+# beide - eine Zeichenketten-Heuristik kann es prinzipiell nicht (ein gequoteter
+# cd-Pfad '/opt/x --only-if-due y' traegt die Zeichenfolge mit Leerraum ringsum).
+#
+# cd-Operand und Umleitungsziel werden uebersprungen, wie in cron_scan_tools:
+# 'cd --only-if-due' waere ein Verzeichnis, kein Flag. Rueckgabe 0 = Nachholer.
+_cron_line_is_catchup() {   # $1 = Cron-Zeile; braucht cron_tokenize_line
+    # Dieselbe Laengen-Notbremse wie in cron_scan_tools: die Zerlegung kostet
+    # quadratisch mit der Zeilenlaenge. Eine ueberlange Zeile gilt als NICHT
+    # Nachholer - dieselbe Richtung, in die cron_scan_tools sie ohnehin
+    # ueberspringt.
+    if [ "${#1}" -gt 65536 ]; then return 1; fi
+    local i prev_was_cd=0
+    local -a CTL_TOKS=() CTL_SEP=() CTL_RED=()
+    cron_tokenize_line "$1"
+    for (( i=0; i<${#CTL_TOKS[@]}; i++ )); do
+        if [ "${CTL_SEP[i]}" -eq 1 ]; then prev_was_cd=0; continue; fi
+        if [ "$prev_was_cd" -eq 1 ]; then prev_was_cd=0; continue; fi
+        if [ "${CTL_RED[i]}" -eq 1 ]; then continue; fi
+        if [ "${CTL_TOKS[i]}" = "--only-if-due" ]; then return 0; fi
+        if [ "${CTL_TOKS[i]}" = "cd" ]; then prev_was_cd=1; fi
+    done
+    return 1
+}
+
 cron_scan_tools() {   # $1 = Crontab; Gate (Marker vorhanden?) liegt beim Aufrufer
     CRON_MISSING_IECO=0; CRON_MISSING_REFRESH=0
     local line trimmed i base part have_ieco=0 have_refresh=0 prev_was_cd=0
     # Je Zeile gesammelt und erst am Zeilenende verrechnet. Grund: die
     # '@reboot'-Nachhol-Zeile ruft midea_refresh_tokens.py auf, ist aber NICHT
-    # der Wochenlauf. Wuerde sie mitzaehlen, schwiege der Hinweis auch dann,
-    # wenn die Wochenzeile geloescht wurde - also genau in dem Fall, fuer den er
-    # existiert. Ob eine Zeile der Nachholer ist, steht erst fest, wenn ihre
-    # Tokens durchlaufen sind; deshalb der Umweg ueber die drei line_*-Merker.
-    local line_ieco=0 line_refresh=0 line_is_catchup=0
+    # der Wochenlauf. Ihr Refresh-Aufruf darf nicht als Wochenlauf zaehlen -
+    # sonst schwiege der Hinweis auch dann, wenn die Wochenzeile geloescht wurde,
+    # genau in dem Fall, fuer den er existiert. Ob eine Zeile der Nachholer ist,
+    # beantwortet der gemeinsame _cron_line_is_catchup (dieselbe Quelle wie beim
+    # Sprachhinweis); ihr iECO-Anteil - untypisch, aber moeglich - zaehlt weiter.
+    local line_ieco=0 line_refresh=0
     # Die drei Token-Arrays gehoeren dem Tokenizer, leben aber nur fuer diesen
     # Aufruf: bash reicht 'local' dynamisch an die gerufene Funktion weiter, so
     # bleibt kein Zustand zurueck (install.sh laeuft unter 'set -u').
@@ -843,7 +878,7 @@ cron_scan_tools() {   # $1 = Crontab; Gate (Marker vorhanden?) liegt beim Aufruf
         if [ "${#line}" -gt 65536 ]; then continue; fi
         cron_tokenize_line "$line"
         prev_was_cd=0
-        line_ieco=0; line_refresh=0; line_is_catchup=0
+        line_ieco=0; line_refresh=0
         if [ "${#CTL_TOKS[@]}" -gt 0 ]; then
             for (( i=0; i<${#CTL_TOKS[@]}; i++ )); do
                 if [ "${CTL_SEP[i]}" -eq 1 ]; then prev_was_cd=0; continue; fi
@@ -891,35 +926,30 @@ cron_scan_tools() {   # $1 = Crontab; Gate (Marker vorhanden?) liegt beim Aufruf
                         # Die bin-Wrapper werden EXAKT verglichen -
                         # 'midea-ieco-update' ist keiner der beiden Jobs, und der
                         # laengere Refresh-Name darf nicht als der kuerzere
-                        # durchgehen.
-                        #
-                        # '--only-if-due' wird als GANZES Token verglichen, nicht
-                        # als Teilzeichenkette der Zeile: ein Pfad, der die
-                        # Zeichenfolge zufaellig enthaelt, darf die Wochenzeile
-                        # nicht zum Nachholer erklaeren - das liesse ihren Job
-                        # als fehlend gelten und raete zu einer zweiten Zeile,
-                        # der teuren Richtung. Der Vergleich laeuft auf 'base',
-                        # also nach dem Entfernen innerer Quotes; ein Flag hat
-                        # keinen '/' und ueberlebt die Basisnamen-Bildung
-                        # unveraendert.
+                        # durchgehen. Die Nachhol-Unterscheidung sitzt NICHT hier
+                        # (Basisname waere durch einen Pfad '/opt/--only-if-due'
+                        # zu taeuschen), sondern in _cron_line_is_catchup am
+                        # Zeilenende.
                         case "$base" in
                             midea_ieco_ensure*|midea-ieco)                   line_ieco=1 ;;
                             midea_refresh_tokens*|midea-ieco-refresh-tokens) line_refresh=1 ;;
-                            --only-if-due)                                   line_is_catchup=1 ;;
                         esac
                     done
                 fi
                 if [ "${CTL_TOKS[i]}" = "cd" ]; then prev_was_cd=1; fi
             done
         fi
-        # Erst jetzt verrechnen: die Nachhol-Zeile zaehlt fuer KEINEN der beiden
-        # erwarteten Jobs. Sie ist ein Zusatz, kein Ersatz - und sie ist auch
-        # nicht selbst "erwartet": eine Bestandsinstallation hat sie nicht, und
-        # sie einzufordern hiesse, dem gesamten Bestand beim naechsten Re-Run
-        # einen fehlenden Job zu melden, den es nie gab (KNOWN_GAPS).
-        if [ "$line_is_catchup" -eq 0 ]; then
-            if [ "$line_ieco" -eq 1 ];    then have_ieco=1;    fi
-            if [ "$line_refresh" -eq 1 ]; then have_refresh=1; fi
+        # Erst jetzt verrechnen. Der iECO-Anteil zaehlt immer; der Refresh-Anteil
+        # nur, wenn die Zeile NICHT der Nachholer ist. Damit ist der Nachholer ein
+        # Zusatz, kein Ersatz - und der (untypische) Fall, dass eine Zeile beide
+        # Werkzeuge auffuehrt, verliert seinen iECO-Anteil nicht mehr mit.
+        # Der Nachholer selbst wird bewusst NICHT eingefordert: eine
+        # Bestandsinstallation hat ihn nicht, und ihn zu verlangen hiesse, dem
+        # gesamten Bestand beim naechsten Re-Run einen fehlenden Job zu melden,
+        # den es nie gab (KNOWN_GAPS).
+        if [ "$line_ieco" -eq 1 ]; then have_ieco=1; fi
+        if [ "$line_refresh" -eq 1 ] && ! _cron_line_is_catchup "$line"; then
+            have_refresh=1
         fi
     done <<< "$1"
     if [ "$have_ieco" -eq 0 ]; then CRON_MISSING_IECO=1; fi
