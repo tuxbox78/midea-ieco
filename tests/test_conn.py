@@ -407,6 +407,7 @@ _CONTRACT_PROBE = r"""
 import inspect, json, sys
 try:
     from msmart.device.AC.device import AirConditioner
+    from msmart.device.AC.command import PropertyId
     from importlib.metadata import version
 except Exception as exc:
     print(json.dumps({"available": False, "reason": str(exc)}))
@@ -415,6 +416,20 @@ except Exception as exc:
 device = AirConditioner(ip="192.0.2.1", port=6444, device_id=1)
 lan = getattr(device, "_lan", None)
 fn = getattr(lan, "_disconnect", None)
+
+# Zweiter Vertrag: die Mitnahme der iECO-Faehigkeit (prime_ieco_property).
+# Auf einem EIGENEN Objekt, damit die Teardown-Sonde oben unberuehrt bleibt.
+caps_cls = getattr(AirConditioner, "Capability", None)
+ieco_flag = getattr(caps_cls, "IECO", None)
+default_flags = getattr(caps_cls, "DEFAULT", None)
+primed = AirConditioner(ip="192.0.2.1", port=6444, device_id=1)
+prime_error = None
+try:
+    primed.override_capabilities({"additional_capabilities": ["IECO"]},
+                                 merge=True)
+except Exception as exc:
+    prime_error = "%s: %s" % (type(exc).__name__, exc)
+
 print(json.dumps({
     "available": True,
     "version": version("msmart-ng"),
@@ -424,6 +439,17 @@ print(json.dumps({
     "disconnect_callable": callable(fn),
     "disconnect_is_coroutine": inspect.iscoroutinefunction(fn) if fn else None,
     "disconnect_params": list(inspect.signature(fn).parameters) if fn else None,
+    "ieco_flag_exists": ieco_flag is not None,
+    # Die PRAEMISSE des Fehlers, den prime_ieco_property beseitigt: ein frisches
+    # Objekt kennt IECO nicht. Faellt das eines Tages weg, ist der halbe
+    # Waechterbau in ensure_ieco gegenstandslos - und das soll auffallen.
+    "ieco_absent_from_default": bool(
+        ieco_flag is not None and default_flags is not None
+        and not (default_flags & ieco_flag)),
+    "prime_error": prime_error,
+    "prime_sets_supports_ieco": bool(getattr(primed, "supports_ieco", False)),
+    "prime_adds_ieco_property": bool(
+        PropertyId.IECO in getattr(primed, "_supported_properties", set())),
 }))
 """
 # Dass hier die ECHTE Bibliothek geprueft wird und keine Attrappe, belegt der
@@ -525,6 +551,50 @@ class MsmartContractTests(unittest.TestCase):
         # Weicht die installierte Fassung von der ab, gegen die der Pfad
         # nachgemessen wurde, ist die Warnung in midea_conn irrefuehrend.
         self.assertEqual(self.probe["version"], midea_conn.PINNED_MSMART_VERSION)
+
+    # -- Vertrag der iECO-Mitnahme (midea_ieco_ensure.prime_ieco_property) ----
+    # Diese vier Zusicherungen koennen NUR hier stehen: in der normalen Suite
+    # ist msmart gestubbt, dort waeren sie wirkungslos.
+
+    def test_the_ieco_capability_flag_still_exists(self):
+        self.assertTrue(self.probe["ieco_flag_exists"],
+                        "AirConditioner.Capability.IECO ist verschwunden - "
+                        "prime_ieco_property kann nichts mehr eintragen.")
+
+    def test_a_fresh_device_still_does_not_claim_ieco(self):
+        # Die Praemisse des behobenen Fehlers. Enthielte Capability.DEFAULT
+        # eines Tages IECO, waere supports_ieco kein Beleg mehr fuer eine
+        # Geraeteaussage - und der caps_answered-Waechter in ensure_ieco
+        # muesste neu gedacht werden.
+        self.assertTrue(
+            self.probe["ieco_absent_from_default"],
+            "Capability.DEFAULT enthaelt jetzt IECO - damit ist supports_ieco "
+            "kein Beweis mehr dafuer, dass das Geraet geantwortet hat. Die "
+            "Waechter in midea_ieco_ensure.ensure_ieco sind nachzuziehen.")
+
+    def test_the_capability_override_is_accepted(self):
+        self.assertIsNone(
+            self.probe["prime_error"],
+            "override_capabilities({'additional_capabilities': ['IECO']}, "
+            "merge=True) wird nicht mehr angenommen: "
+            f"{self.probe['prime_error']}")
+        self.assertTrue(self.probe["prime_sets_supports_ieco"],
+                        "override_capabilities lief durch, ohne supports_ieco "
+                        "zu setzen.")
+
+    def test_the_override_really_arms_the_ieco_property_poll(self):
+        # Der tragende Teil: nicht das Flag zaehlt, sondern dass msmart daraus
+        # _supported_properties nachzieht - nur dann pollt refresh() die
+        # IECO-Property. Bliebe override_capabilities erhalten, riefe aber
+        # _update_supported_properties() nicht mehr auf, waere supports_ieco
+        # True und die Verifikation laese trotzdem wieder den Default False.
+        # Genau diese stille Wirkungslosigkeit soll hier auffallen.
+        self.assertTrue(
+            self.probe["prime_adds_ieco_property"],
+            "override_capabilities traegt PropertyId.IECO nicht mehr in "
+            "_supported_properties ein - refresh() pollt iECO damit nicht "
+            "mehr, und die Verifikation meldet wieder faelschlich 'weiterhin "
+            "deaktiviert'.")
 
 
 class ToolsBootstrapTests(unittest.TestCase):

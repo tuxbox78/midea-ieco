@@ -105,8 +105,18 @@ class FakeDevice:
     """Konfigurierbares Fake-AC-Objekt fuer die Retry-Matrix (#13/#14)."""
 
     def __init__(self, *, online=True, power_state=False, ieco=False,
-                 supports_ieco=True, apply_raises=None, caps_raises=None):
+                 supports_ieco=True, apply_raises=None, caps_raises=None,
+                 caps_lost=False):
         self.online = online
+        # msmart setzt _online PRO Kommando-Batch neu (_send_commands_get_
+        # responses: self._online = len(responses) > 0). Ein refresh(), das
+        # Antworten bekommt, hebt also ein False einer vorangegangenen, verlorenen
+        # Capability-Runde wieder auf - genau diese Heilung verdeckte den Fehler.
+        # _answers ist, was DIESES Geraet je Batch antwortet; online ist das
+        # Ergebnis des LETZTEN Batches. Ohne diese Trennung liesse sich die
+        # Stelle, an der caps_answered abgegriffen wird, verschieben, ohne dass
+        # ein Test rot wird.
+        self._answers = online
         self.power_state = power_state
         self.ieco = ieco
         self.eco = False
@@ -118,6 +128,18 @@ class FakeDevice:
         self.supports_ieco = supports_ieco
         self._apply_raises = apply_raises
         self._caps_raises = caps_raises
+        # Verlorener Capability-Roundtrip, msmart-getreu: get_capabilities()
+        # WIRFT NICHT (msmart loggt und kehrt zurueck), setzt aber online=False
+        # und laesst supports_ieco auf dem Default False stehen. Der vorhandene
+        # caps_raises-Pfad bildet eine Ausnahme nach, die msmart bei Paketverlust
+        # nie wirft - die Attrappe war an dieser Stelle also REICHER als die
+        # Wirklichkeit, dieselbe Umkehrung wie beim erfundenen close().
+        self._caps_lost = caps_lost
+        if caps_lost:
+            self.supports_ieco = False
+        #: Argumente des letzten override_capabilities-Aufrufs, damit Tests die
+        #: Aufrufform pinnen koennen (merge=True ist tragend).
+        self.override_args = None
         self.apply_calls = 0
         self.caps_calls = 0
         self.refresh_calls = 0
@@ -130,13 +152,25 @@ class FakeDevice:
         close() - das echte Geraeteobjekt hat keines."""
         self.close_calls += 1
 
+    def override_capabilities(self, overrides, *, merge=False):
+        """Mitnahme statt Abfrage - im echten Objekt traegt das ueber
+        _update_supported_properties() dieselbe Faehigkeit ein, die sonst
+        get_capabilities() liefert."""
+        self.override_args = (overrides, merge)
+        self.supports_ieco = True
+
     async def get_capabilities(self):
         self.caps_calls += 1
         if self._caps_raises is not None:
             raise self._caps_raises
+        # Ohne Antwort meldet msmart das Geraet als offline und traegt KEINE
+        # Faehigkeit ein - ohne zu werfen.
+        self.online = not self._caps_lost
 
     async def refresh(self):
         self.refresh_calls += 1
+        # Eigener Batch, eigenes _online - siehe _answers oben.
+        self.online = self._answers
 
     async def apply(self):
         self.apply_calls += 1
@@ -147,18 +181,24 @@ class FakeDevice:
 def _scripted_connect(items):
     """Async-Ersatz fuer connect_and_refresh: gibt der Reihe nach die
     uebergebenen Fake-Geraete zurueck; ist ein Eintrag eine Exception, wird sie
-    geworfen (simuliert einen fehlgeschlagenen Reconnect). Bildet
-    with_capabilities nach wie das echte connect_and_refresh: bei True erst
-    get_capabilities(), dann refresh() auf dem Geraet."""
+    geworfen (simuliert einen fehlgeschlagenen Reconnect).
+
+    Bildet den Schalter des echten connect_and_refresh in DERSELBEN Reihenfolge
+    nach: erst die Mitnahme (rein lokal, vor jedem Netzzugriff), dann IMMER
+    refresh(). Das abschliessende refresh() lief hier frueher nur im
+    with_capabilities-Zweig - eine Luecke zur Wirklichkeit, denn das echte
+    connect_and_refresh refresht auf jedem Weg."""
     seq = list(items)
 
-    async def _connect(dev_conf, retries=mie.CONNECT_RETRIES, with_capabilities=False):
+    async def _connect(dev_conf, retries=mie.CONNECT_RETRIES, prime_ieco=False):
         item = seq.pop(0)
         if isinstance(item, BaseException):
             raise item
-        if with_capabilities:
-            await item.get_capabilities()
-            await item.refresh()
+        if prime_ieco:
+            # Bewusst die ECHTE Funktion, nicht nachgebaut: sonst pruefte die
+            # Suite eine Kopie und nicht das, was im Betrieb laeuft.
+            mie.prime_ieco_property(item)
+        await item.refresh()
         return item
 
     return _connect
@@ -264,7 +304,8 @@ class CapabilityGatedDevice:
     danach refresh() (pollt dann IECO) liefen - vorher immer den Default False.
     Genau das liess die Verifikation frueher faelschlich fehlschlagen."""
 
-    def __init__(self, *, power_state=True, true_ieco=True, supports_ieco=True):
+    def __init__(self, *, power_state=True, true_ieco=True, supports_ieco=True,
+                 prime_fails=False):
         self.online = True
         self.power_state = power_state
         self.operational_mode = _OpMode.COOL
@@ -273,6 +314,10 @@ class CapabilityGatedDevice:
         self._true_ieco = true_ieco
         self._caps = False
         self._refreshed_after_caps = False
+        #: Laesst override_capabilities scheitern - der einzige Weg, wie die
+        #: Mitnahme in der Wirklichkeit versagen kann (msmart-Vertragsbruch).
+        self._prime_fails = prime_fails
+        self.override_args = None
         self.close_calls = 0
         self._lan = _RecordingLAN(self._note_close)
         self.apply_calls = 0
@@ -287,6 +332,17 @@ class CapabilityGatedDevice:
     @ieco.setter
     def ieco(self, value):
         self._true_ieco = value
+
+    def override_capabilities(self, overrides, *, merge=False):
+        """Oeffnet DASSELBE Tor wie get_capabilities(): im echten Objekt loesen
+        beide _update_supported_properties() aus, und erst danach pollt
+        refresh() die IECO-Property."""
+        if self._prime_fails:
+            raise ValueError("Unsupported capabilities override.")
+        self.override_args = (overrides, merge)
+        self._caps = True
+        self._refreshed_after_caps = False
+        self.supports_ieco = True
 
     async def get_capabilities(self):
         self._caps = True
@@ -317,9 +373,11 @@ class IecoVerificationCapabilityTests(unittest.TestCase):
 
     def test_verification_reads_true_ieco_via_capabilities(self):
         # Geraet aus -> einschalten + iECO setzen. Das Verifikationsgeraet meldet
-        # iECO nur, wenn die Verifikation Capabilities+refresh gemacht hat. Der
-        # Erfolg beweist with_capabilities=True bei der Verifikation - OHNE den
-        # Fix laese ieco False und assertTrue wuerde scheitern.
+        # iECO nur, wenn vor seinem refresh() die Faehigkeit eingetragen wurde -
+        # das Tor ist dasselbe, gleich ob es get_capabilities() oder die
+        # Mitnahme geoeffnet hat. Der Erfolg beweist also prime_ieco=True bei
+        # der Verifikation; ohne den Schalter laese ieco False und assertTrue
+        # wuerde scheitern.
         d_action = CapabilityGatedDevice(power_state=False, true_ieco=False)
         d_verify = CapabilityGatedDevice(power_state=True, true_ieco=True)
         self.assertTrue(self._run([d_action, d_verify]))
@@ -364,6 +422,142 @@ class IecoVerificationCapabilityTests(unittest.TestCase):
         d = CapabilityGatedDevice(power_state=True, true_ieco=True)
         self.assertTrue(self._run([d]))
         self.assertEqual(d.apply_calls, 0)
+
+
+class PrimeIecoPropertyTests(unittest.TestCase):
+    """prime_ieco_property direkt - Zwilling zu TeardownGuardTests in
+    tests/test_conn.py, und aus demselben Grund noetig.
+
+    Die Funktion meldet nicht, OB sie aufgerufen wurde, sondern ob die
+    Faehigkeit danach wirklich gesetzt ist. Ohne diese Tests laesst sich die
+    Effektpruefung durch ein schlichtes 'return True' ersetzen, ohne dass
+    irgendetwas rot wird: der Rueckgabewert hat im Produktionscode bewusst
+    keinen Konsumenten (ensure_ieco fragt stattdessen das Objekt selbst).
+    Genau diese Konstellation - eine Zusicherung, die niemand einloest - hat
+    beim frueheren close() ueber Monate einen toten Pfad gruen gehalten."""
+
+    def test_a_device_that_accepts_the_override_reports_success(self):
+        device = FakeDevice(supports_ieco=False)
+        self.assertIs(mie.prime_ieco_property(device), True)
+        self.assertEqual(device.override_args,
+                         ({"additional_capabilities": ["IECO"]}, True))
+
+    def test_an_override_without_effect_is_not_reported_as_success(self):
+        """Der Kern: der Aufruf laeuft durch, bewirkt aber nichts.
+
+        Dieser Fall entsteht, wenn eine kuenftige msmart-Fassung
+        override_capabilities behaelt, aber _update_supported_properties()
+        nicht mehr ausloest - dann bliebe iECO ungepollt, und ein 'return True'
+        meldete trotzdem Erfolg."""
+        class SilentlyIneffective:
+            supports_ieco = False
+
+            def override_capabilities(self, overrides, *, merge=False):
+                pass
+
+        self.assertIs(mie.prime_ieco_property(SilentlyIneffective()), False)
+
+    def test_a_raising_override_warns_and_reports_failure(self):
+        class Raises:
+            supports_ieco = False
+
+            def override_capabilities(self, overrides, *, merge=False):
+                raise ValueError("Unsupported capabilities override 'x'.")
+
+        with self.assertLogs("midea_ieco_ensure", level="WARNING") as log:
+            self.assertIs(mie.prime_ieco_property(Raises()), False)
+        text = "\n".join(log.output)
+        self.assertIn("ValueError", text)
+        # Die gepinnte Fassung gehoert in die Warnung: ohne sie bleibt offen,
+        # worauf sich die Erwartung bezog (gleiche Begruendung wie midea_conn).
+        self.assertIn(mie.PINNED_MSMART_VERSION, text)
+
+    def test_a_missing_override_api_never_escalates(self):
+        """Laeuft in der Wiederholschleife von connect_and_refresh: eine
+        Ausnahme von hier wuerde dort als Verbindungsfehler gedeutet und der
+        Lauf meldete erneut eine falsche Ursache."""
+        class NoSuchMethod:
+            supports_ieco = False
+
+        with self.assertLogs("midea_ieco_ensure", level="WARNING"):
+            self.assertIs(mie.prime_ieco_property(NoSuchMethod()), False)
+
+
+class CapabilityHonestyTests(unittest.TestCase):
+    """Ein verlorener Roundtrip darf nie zu einer Aussage ueber die Anlage werden.
+
+    msmart-ng reicht Netzfehler nicht nach oben: get_capabilities() wirft nicht,
+    es loggt "Failed to query capabilities" und kehrt zurueck. Weil
+    Capability.DEFAULT kein IECO enthaelt, meldet ein frisches Geraeteobjekt
+    danach supports_ieco == False - ununterscheidbar von einer Anlage, die iECO
+    wirklich nicht kann. Genau daraus entstand die Falschmeldung "Device reports
+    no iECO capability" ueber ein laufendes, gesundes Geraet.
+
+    Die drei Tests hier sind je gegen eine Mutation gebaut, die die Suite vorher
+    NICHT gefangen hat (M1/M5) bzw. nur ueber die Katalog-Buchhaltung und damit
+    nicht verhaltensmaessig (M3)."""
+
+    def _run(self, items, only_if_on=False):
+        connect = _scripted_connect(items)
+        with ExitStack() as es:
+            es.enter_context(mock.patch.object(mie, "connect_and_refresh", connect))
+            es.enter_context(mock.patch.object(mie.asyncio, "sleep", _anoop))
+            out = es.enter_context(redirect_stdout(io.StringIO()))
+            result = asyncio.run(mie.ensure_ieco(
+                {"name": "X", "ip": "1", "id": "1"}, only_if_on=only_if_on))
+        return result, out.getvalue()
+
+    def test_a_lost_capability_roundtrip_is_not_a_device_limitation(self):
+        """Faengt: caps_answered fest auf True verdrahtet.
+
+        Der Lauf scheitert weiterhin (Exit 2, unveraendert) - aber mit der
+        richtigen Begruendung. Der Gegentest dazu ist
+        DeviceGuardTests.test_device_without_ieco_capability_is_a_failure: dort
+        HAT das Geraet geantwortet, und dort muss die alte Meldung stehen
+        bleiben. Ohne dieses Paar liesse sich eine der beiden Meldungen durch
+        die andere ersetzen, ohne dass etwas rot wird."""
+        device = FakeDevice(power_state=True, caps_lost=True)
+        ok, out = self._run([device])
+        self.assertFalse(ok)
+        self.assertEqual(device.apply_calls, 0)
+        self.assertNotIn("no iECO capability", out)
+        self.assertIn("no usable answer", out)
+        # Die Statuszeile darf hier gar nicht erscheinen: ihr ieco-Wert waere
+        # der Default eines frischen Objekts, kein Messwert.
+        self.assertNotIn("Status before action", out)
+
+    def test_the_carried_capability_is_merged_not_replaced(self):
+        """Faengt: merge=True -> merge=False.
+
+        Mit merge=False ersetzte override_capabilities den gesamten Flag-Satz
+        durch IECO allein und loeschte Capability.DEFAULT. Hier faellt das nicht
+        auf, weil die Verifikation nur ieco liest - deshalb wird die Aufrufform
+        selbst gepinnt und nicht bloss ihre Wirkung."""
+        d_action = CapabilityGatedDevice(power_state=True, true_ieco=False)
+        d_verify = CapabilityGatedDevice(power_state=True, true_ieco=True,
+                                         supports_ieco=False)
+        ok, _ = self._run([d_action, d_verify])
+        self.assertTrue(ok)
+        self.assertEqual(d_verify.override_args,
+                         ({"additional_capabilities": ["IECO"]}, True))
+
+    def test_a_failed_carry_over_is_not_called_disabled(self):
+        """Faengt: der supports_ieco-Waechter der Verifikation entfernt.
+
+        Ohne ihn faellt der Lauf still in "iECO ist laut Geraet weiterhin
+        deaktiviert" zurueck - ueber eine Anlage, die den Wert nie genannt hat.
+        Das Verifikationsgeraet traegt bewusst true_ieco=True: OHNE den Waechter
+        meldete der Lauf nicht etwa eine andere Meldung, sondern eine falsche."""
+        d_action = CapabilityGatedDevice(power_state=True, true_ieco=False)
+        d_verify = CapabilityGatedDevice(power_state=True, true_ieco=True,
+                                         supports_ieco=False, prime_fails=True)
+        # Die Warnung der gescheiterten Mitnahme gehoert GEFANGEN: sonst schreibt
+        # jeder gruene Suite-Lauf eine Produktionsmeldung nach stderr.
+        with self.assertLogs("midea_ieco_ensure", level="WARNING"):
+            ok, out = self._run([d_action, d_verify])
+        self.assertFalse(ok)
+        self.assertNotIn("still disabled", out)
+        self.assertIn("could not be carried into the verification", out)
 
 
 class ModeLabelTests(unittest.TestCase):
@@ -831,7 +1025,12 @@ class _RecordingAC:
         self.ieco = True
         self.eco = False
         self.operational_mode = _OpMode.COOL
-        self.supports_ieco = True
+        # FALSCH waere True: ein frisches msmart-AirConditioner meldet
+        # supports_ieco == False, weil Capability.DEFAULT kein IECO enthaelt.
+        # Mit True waere diese Attrappe REICHER als die Wirklichkeit - und genau
+        # dieses Attribut liest prime_ieco_property als Wirkungsnachweis.
+        self.supports_ieco = False
+        self.override_args = None
         self.auth_raises = None
         # Das Schliessen laeuft ueber dieselbe private Kette wie beim echten
         # Objekt und wird in DIESELBE Reihenfolgeliste protokolliert - die
@@ -844,6 +1043,24 @@ class _RecordingAC:
         self.calls.append("authenticate")
         if self.auth_raises is not None:
             raise self.auth_raises
+
+    #: Wird die Mitnahme abgelehnt? BEWUSST nur auf Klassenebene und NICHT in
+    #: __init__: ein Instanzattribut wuerde ein per mock.patch.object gesetztes
+    #: Klassenattribut ueberschatten - der Test liefe dann gruen, ohne je eine
+    #: Ausnahme ausgeloest zu haben.
+    override_raises = None
+
+    def override_capabilities(self, overrides, *, merge=False):
+        # Eine scheiternde Uebernahme hinterlaesst NICHTS - weder Eintrag in der
+        # Reihenfolgeliste noch gesetzte Faehigkeit.
+        if self.override_raises is not None:
+            raise self.override_raises
+        # In DIESELBE Reihenfolgeliste wie authenticate/refresh: nur so laesst
+        # sich pinnen, dass die Mitnahme VOR dem refresh() passiert - danach
+        # waere sie wirkungslos, weil refresh() die Property dann nicht pollt.
+        self.calls.append("override_capabilities")
+        self.override_args = (overrides, merge)
+        self.supports_ieco = True
 
     async def get_capabilities(self):
         self.calls.append("get_capabilities")
@@ -893,17 +1110,72 @@ class ConnectAndRefreshBodyTests(unittest.TestCase):
         self._connect(dev)
         self.assertEqual(_RecordingAC.instances[0].init_args[1], 6444)
 
-    def test_without_capabilities_only_refresh_runs(self):
+    def test_a_plain_connect_only_authenticates_and_refreshes(self):
+        # Der Normalweg fragt KEINE Capabilities ab: fuer eine reine Status-/
+        # Power-Abfrage waere das ein unnoetiger Roundtrip auf einer Anlage, die
+        # genau eine Verbindung vertraegt.
         self._connect()
         self.assertEqual(_RecordingAC.instances[0].calls, ["authenticate", "refresh"])
 
-    def test_with_capabilities_queries_them_before_refresh(self):
-        # Reihenfolge ist wesentlich: refresh() pollt die IECO-Property nur,
-        # wenn get_capabilities() sie zuvor in _supported_properties eingetragen
-        # hat. Andersherum laese device.ieco immer den Default False.
-        self._connect(with_capabilities=True)
+    def test_prime_ieco_carries_the_capability_in_before_refresh(self):
+        # Zwilling zum Test darueber, und aus demselben Grund tragend: die
+        # Mitnahme wirkt nur VOR dem refresh(). Danach eingetragen, pollte
+        # refresh() die IECO-Property nicht mehr und device.ieco laese wieder
+        # den Default False - der Fehler, den die Mitnahme beseitigen soll.
+        # Sie steht bewusst auch vor authenticate(): sie ist rein lokal und
+        # braucht keine Verbindung.
+        self._connect(prime_ieco=True)
         self.assertEqual(_RecordingAC.instances[0].calls,
-                         ["authenticate", "get_capabilities", "refresh"])
+                         ["override_capabilities", "authenticate", "refresh"])
+        self.assertEqual(_RecordingAC.instances[0].override_args,
+                         ({"additional_capabilities": ["IECO"]}, True))
+
+    def test_prime_ieco_is_off_by_default(self):
+        # Negativfall: ohne den Schalter darf NICHTS mitgenommen werden - sonst
+        # behauptete der Initial-Read eine Faehigkeit, statt sie zu erfragen.
+        self._connect()
+        self.assertNotIn("override_capabilities", _RecordingAC.instances[0].calls)
+
+    def test_every_retry_carries_the_capability_into_its_own_object(self):
+        # Jeder Versuch baut ein FRISCHES AC-Objekt, und ein frisches Objekt hat
+        # leere Capability-Flags. Traegt nur der erste Versuch die Faehigkeit
+        # ein, verliert sie jeder Folgeversuch - die Verifikation meldete dann
+        # 'unklar' auf einer voellig gesunden Anlage. Geprueft wird deshalb
+        # JEDES Objekt, nicht nur instances[0]; ein Zaehltest ueber die Objekte
+        # allein sieht diesen Unterschied nicht.
+        with mock.patch.object(_RecordingAC, "authenticate",
+                               side_effect=RuntimeError("nope"), autospec=True):
+            with self.assertRaises(RuntimeError):
+                self._connect(retries=3, prime_ieco=True)
+        self.assertEqual(len(_RecordingAC.instances), 3)
+        for index, instance in enumerate(_RecordingAC.instances):
+            # authenticate ist ersetzt und protokolliert nicht mit; die Mitnahme
+            # muss trotzdem als ERSTES stattgefunden haben.
+            self.assertEqual(instance.calls[:1], ["override_capabilities"],
+                             f"Versuch {index + 1} ohne Mitnahme")
+
+    def test_a_failing_carry_over_does_not_abort_the_connection(self):
+        # prime_ieco_property darf nie eskalieren: es laeuft INNERHALB der
+        # Wiederholschleife, eine Ausnahme wuerde dort als Verbindungsfehler
+        # gedeutet und der Lauf meldete 'Verbindung fehlgeschlagen nach 3
+        # Versuchen' - wieder eine falsche Ursache. Ohne diesen Test laesst sich
+        # an der AUFRUFSTELLE eine Eskalation einbauen, ohne dass etwas rot wird
+        # (die Nicht-Eskalation der Funktion selbst pinnt PrimeIecoPropertyTests).
+        with mock.patch.object(_RecordingAC, "override_raises",
+                               ValueError("Unsupported capabilities override.")):
+            with self.assertLogs("midea_ieco_ensure", level="WARNING"):
+                self._connect(prime_ieco=True)
+        self.assertEqual(len(_RecordingAC.instances), 1, "es wurde wiederholt")
+        self.assertEqual(_RecordingAC.instances[0].calls,
+                         ["authenticate", "refresh"])
+
+    def test_the_pinned_version_is_the_one_from_midea_conn(self):
+        # Die Begruendung im Modulkopf ('wird NICHT hier kopiert') ist ohne
+        # diese Zusicherung unerzwungen: eine lokale Kopie liefe gruen durch und
+        # koennte spaeter still von midea_conn abweichen.
+        import midea_conn
+        self.assertIs(mie.PINNED_MSMART_VERSION,
+                      midea_conn.PINNED_MSMART_VERSION)
 
     def test_every_retry_uses_a_brand_new_device_object(self):
         # Ein fehlgeschlagener Versuch hinterlaesst einen defekten Socket-
@@ -1517,14 +1789,16 @@ class PacingOrderTests(unittest.TestCase):
         seq = list(items)
 
         async def _connect(dev_conf, retries=mie.CONNECT_RETRIES,
-                           with_capabilities=False):
+                           prime_ieco=False):
             events.append("connect")
             item = seq.pop(0)
             if isinstance(item, BaseException):
                 raise item
-            if with_capabilities:
-                await item.get_capabilities()
-                await item.refresh()
+            # Gleiche Reihenfolge wie im echten connect_and_refresh und in
+            # _scripted_connect: erst die Mitnahme, dann immer refresh.
+            if prime_ieco:
+                mie.prime_ieco_property(item)
+            await item.refresh()
             return item
 
         async def _sleep(seconds):

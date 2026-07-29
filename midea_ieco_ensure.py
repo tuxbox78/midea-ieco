@@ -39,7 +39,11 @@ from midea_i18n import (install_excepthook_redaction, install_log_redaction,
 # und der gemessene Befund stehen in midea_conn.py. Bis dorthin ausgelagert,
 # damit der Griff in fremde Interna an EINER Stelle steht und dort gepruefte
 # Waechter hat.
-from midea_conn import close_connection
+#
+# PINNED_MSMART_VERSION kommt aus demselben Modul und wird NICHT hier kopiert:
+# es gibt genau eine Fassung, gegen die dieses Projekt nachgemessen hat, und
+# zwei Konstanten mit demselben Zweck laufen frueher oder spaeter auseinander.
+from midea_conn import PINNED_MSMART_VERSION, close_connection
 
 if TYPE_CHECKING:
     # Nur fuer Typpruefer: der echte Import passiert lazy in
@@ -50,6 +54,13 @@ if TYPE_CHECKING:
 # Frueher stand hier logging.basicConfig(level=logging.WARNING). Die Ablosung
 # steht jetzt in main(): der Root-Logger gehoert dem Prozess, und ein blosser
 # Import soll ihn nicht umkonfigurieren (siehe install_log_redaction).
+
+# Modul-Logger fuer den EINEN Fall, der keine Geraetemeldung ist, sondern eine
+# Aussage ueber die Bibliothek: bricht msmart-ngs Capability-Vertrag, gehoert
+# das in denselben Kanal wie die Warnungen aus midea_conn.py (stderr, ab
+# WARNING, durch die Schwaerzung von install_log_redaction) - und nicht in den
+# Geraete-Meldungsstrom auf stdout, den Nutzer als Statusbericht lesen.
+_LOGGER = logging.getLogger(__name__)
 
 CONFIG_PATH = Path(__file__).parent / "devices.json"
 CONNECT_RETRIES = 3
@@ -197,6 +208,15 @@ _MESSAGES: dict[str, tuple[str, str]] = {
     "conn_gave_up": (
         "Connection to %s failed after %s attempts",
         "Verbindung zu %s fehlgeschlagen nach %s Versuchen"),
+    # Keine Geraetemeldung, sondern ein Bibliotheksbefund - geht deshalb ueber
+    # _LOGGER nach stderr, nicht in den Statusbericht auf stdout.
+    "prime_failed": (
+        "WARNING: msmart-ng did not accept the iECO capability override "
+        "(%s: %s; verified against msmart-ng %s). The verification round falls "
+        "back to reporting an unclear result - please report this.",
+        "WARNUNG: msmart-ng hat die Uebernahme der iECO-Faehigkeit nicht "
+        "angenommen (%s: %s; geprueft gegen msmart-ng %s). Die Verifikation "
+        "meldet daraufhin ein unklares Ergebnis - bitte melden."),
     # --- ensure_ieco --------------------------------------------------------
     "dev_error": (
         "[%s] ERROR: %s",
@@ -215,6 +235,16 @@ _MESSAGES: dict[str, tuple[str, str]] = {
     "dev_status_before": (
         "[%s] Status before action: power=%s, mode=%s, ieco=%s, eco=%s",
         "[%s] Status vor Aktion: power=%s, mode=%s, ieco=%s, eco=%s"),
+    # Bewusst "no usable answer" statt "did not answer": die Abfrage kann aus
+    # zwei Bloecken bestehen, und geht nur der zweite verloren, HAT die Anlage
+    # geantwortet - verwertbar ist das Ergebnis trotzdem nicht. Der Text darf
+    # nur behaupten, was in beiden Faellen gilt.
+    "dev_caps_no_answer": (
+        "[%s] ERROR: the capability query produced no usable answer - whether "
+        "the unit supports iECO is unknown. Please try again in a few minutes.",
+        "[%s] FEHLER: Die Capability-Abfrage hat keine verwertbare Antwort "
+        "ergeben - ob die Anlage iECO kann, ist damit offen. Bitte in einigen "
+        "Minuten erneut versuchen."),
     "dev_no_ieco_capability": (
         "[%s] ERROR: Device reports no iECO capability.",
         "[%s] FEHLER: Geraet meldet keine iECO-Faehigkeit."),
@@ -251,6 +281,13 @@ _MESSAGES: dict[str, tuple[str, str]] = {
         "[%s] FEHLER: Die Anlage hat fuer die Verifikation keinen Zustand "
         "zurueckgeliefert - ob iECO uebernommen wurde, ist damit offen. Bitte "
         "in einigen Minuten erneut versuchen."),
+    "dev_verify_inconclusive": (
+        "[%s] ERROR: the iECO capability could not be carried into the "
+        "verification - whether iECO was applied is therefore open. Please try "
+        "again in a few minutes.",
+        "[%s] FEHLER: Die iECO-Faehigkeit liess sich nicht in die Verifikation "
+        "uebernehmen - ob iECO uebernommen wurde, ist damit offen. Bitte in "
+        "einigen Minuten erneut versuchen."),
     "dev_status_after": (
         "[%s] Status after action: power=%s, mode=%s, ieco=%s, eco=%s",
         "[%s] Status nach Aktion: power=%s, mode=%s, ieco=%s, eco=%s"),
@@ -433,21 +470,92 @@ def print_overview() -> None:
     print(t("ov_path_note", CMD_MAIN))
 
 
+def prime_ieco_property(device: "AC") -> bool:
+    """Traegt die iECO-Faehigkeit direkt in ein frisches Geraeteobjekt ein,
+    statt sie erneut beim Geraet zu erfragen.
+
+    WOZU
+    ----
+    msmart-ngs refresh() pollt die IECO-Property nur, wenn sie in
+    _supported_properties steht - und dort landet sie normalerweise erst durch
+    get_capabilities(). Geht dieser Roundtrip verloren, liefert device.ieco den
+    Default False, OHNE dass irgendetwas gescheitert waere: get_capabilities()
+    wirft nicht, es loggt und kehrt zurueck (msmart/device/AC/device.py:602-611).
+    Die Verifikationsrunde meldete daraufhin "iECO ist laut Geraet weiterhin
+    deaktiviert" - eine Ursachenaussage ueber ein Geraet, das dazu nichts gesagt
+    hat, und das ueber eine Einstellung, die es zuvor angenommen hatte.
+
+    override_capabilities() ist msmart-ngs eigener, oeffentlicher Weg dafuer;
+    die AC-Fassung ruft intern _update_supported_properties() (device.py:785-791)
+    und traegt PropertyId.IECO damit genauso ein wie eine geglueckte
+    Capability-Abfrage. Das folgende refresh() pollt die Property dann
+    unabhaengig davon, ob ein Capability-Austausch durchkommt - der Fehlerfall
+    verschwindet strukturell statt erkannt zu werden, und die Runde spart
+    zugleich einen bis zwei Roundtrips auf einer Anlage, die genau EINE lokale
+    Verbindung vertraegt.
+
+    WANN ES ERLAUBT IST
+    -------------------
+    NUR nachdem das Geraet im selben Lauf selbst gemeldet hat, dass es iECO
+    kann. In ensure_ieco ist das gesichert: der supports_ieco-Waechter bricht
+    vorher ab, die Verifikationsrunde wird sonst gar nicht erreicht. Vor jenem
+    Waechter waere die Mitnahme eine Behauptung statt einer Erinnerung - dort
+    muss weiterhin get_capabilities() gefragt werden.
+
+    merge=True ist tragend: mit merge=False ersetzte der Aufruf den gesamten
+    Flag-Satz durch IECO allein und loeschte damit Capability.DEFAULT.
+
+    Rueckgabe:
+        True, wenn die Faehigkeit danach tatsaechlich gesetzt ist.
+
+    Geprueft wird der EFFEKT, nicht der Aufruf. Ein override_capabilities, das
+    durchlaeuft ohne zu wirken - etwa weil eine kuenftige Fassung
+    _update_supported_properties() nicht mehr ausloest -, waere genau die stille
+    Wirkungslosigkeit, gegen die midea_conn.py angetreten ist. Der Aufrufer darf
+    den Wert ignorieren; ensure_ieco liest stattdessen device.supports_ieco, weil
+    das dieselbe Frage am Objekt selbst stellt.
+
+    Wirft nie: die Funktion laeuft innerhalb der Wiederholschleife von
+    connect_and_refresh, und eine Ausnahme von hier wuerde dort als
+    Verbindungsfehler gedeutet - der Lauf meldete "Verbindung fehlgeschlagen
+    nach 3 Versuchen" und damit erneut eine falsche Ursache."""
+    try:
+        device.override_capabilities(
+            {"additional_capabilities": ["IECO"]}, merge=True)
+    except Exception as exc:  # noqa: BLE001 - siehe Docstring: nie eskalieren
+        _LOGGER.warning(t("prime_failed", type(exc).__name__, exc,
+                          PINNED_MSMART_VERSION))
+        return False
+    return bool(getattr(device, "supports_ieco", False))
+
+
 async def connect_and_refresh(dev_conf: dict, retries: int = CONNECT_RETRIES,
-                              with_capabilities: bool = False) -> AC:
+                              prime_ieco: bool = False) -> AC:
     """Verbindet, authentifiziert und liest den Live-Status.
 
-    Standardmaessig OHNE get_capabilities() - fuer eine reine Status-/Power-
-    Abfrage (z.B. den --only-if-on-Schnellpfad) ist dieser zusaetzliche
-    Netzwerk-Roundtrip unnoetig.
+    Standardmaessig OHNE jede Capability-Behandlung - fuer eine reine Status-/
+    Power-Abfrage (z.B. den --only-if-on-Schnellpfad) ist das unnoetig.
 
-    Mit with_capabilities=True wird get_capabilities() VOR refresh() aufgerufen.
-    Das ist zwingend, sobald der WAHRE ieco-Zustand gelesen werden soll: msmart-
-    ng's refresh() pollt nur Properties aus _supported_properties, und die werden
-    erst durch get_capabilities() befuellt. Ohne diesen Aufruf pollt refresh()
-    die IECO-Property NICHT, und device.ieco liefert immer den Default False -
-    selbst wenn iECO am Geraet aktiv ist (genau das liess die Verifikation frueher
-    faelschlich fehlschlagen)."""
+    Der Hintergrund, warum es den prime_ieco-Schalter unten ueberhaupt braucht:
+    msmart-ngs refresh() pollt nur Properties aus _supported_properties, und die
+    IECO-Property landet dort erst, wenn die Faehigkeit bekannt ist. Fehlt sie, pollt
+    refresh() die Property NICHT, und device.ieco liefert immer den Default
+    False - selbst wenn iECO am Geraet aktiv ist. Genau das liess die
+    Verifikation frueher faelschlich fehlschlagen.
+
+    Mit prime_ieco=True wird die bereits bekannte iECO-Faehigkeit vor refresh()
+    in das frische Objekt eingetragen (siehe prime_ieco_property) - ohne
+    Netzzugriff. Das ist der Weg der Verifikationsrunde: dort ist die Faehigkeit
+    im selben Lauf schon belegt, ein zweiter Capability-Roundtrip waere nur eine
+    weitere Gelegenheit, verloren zu gehen.
+
+    Einen with_capabilities-Schalter gab es hier frueher ebenfalls. Er ist
+    entfallen, als die Verifikation auf die Mitnahme umgestellt wurde: der
+    einzige verbliebene Ort, an dem wirklich GEFRAGT werden muss, ist der
+    Initial-Read in ensure_ieco - und der braucht den Rueckgabewert von
+    device.online zwischen get_capabilities() und refresh(), den diese Funktion
+    nicht durchreichen kann. Ein Schalter, den niemand mehr setzt, waere ein
+    Zweig, den Tests gruen halten und den nie jemand ausfuehrt."""
     # Lazy-Import (spiegelt midea_refresh_tokens.verify_credentials): erst der
     # tatsaechliche Geraetezugriff braucht msmart. So bleibt das Modul - und
     # damit die netzwerkfreie Uebersicht `list` - auch ohne installiertes
@@ -462,9 +570,14 @@ async def connect_and_refresh(dev_conf: dict, retries: int = CONNECT_RETRIES,
             device_id=int(dev_conf["id"]),
         )
         try:
+            # Die Mitnahme steht bewusst VOR authenticate() und damit vor jedem
+            # Netzzugriff: sie ist eine rein lokale Eintragung, kann also nicht
+            # scheitern, weil das Geraet schweigt. Sie muss INNERHALB der
+            # Schleife liegen, weil jeder Versuch ein frisches AC-Objekt baut -
+            # und damit auch dessen leere Capability-Flags neu entstehen.
+            if prime_ieco:
+                prime_ieco_property(device)
             await device.authenticate(dev_conf["token"], dev_conf["key"])
-            if with_capabilities:
-                await device.get_capabilities()
             await device.refresh()
             return device
         except Exception as exc:
@@ -509,15 +622,44 @@ async def ensure_ieco(dev_conf: dict, only_if_on: bool) -> bool:
         # Default False. Also Capabilities abfragen und danach erneut refreshen.
         try:
             await device.get_capabilities()
+            # Der Erfolg der Capability-Abfrage MUSS hier festgehalten werden,
+            # vor dem refresh(): msmart-ng setzt _online pro Kommando-Batch neu
+            # (device.py:573), das folgende refresh() ueberschreibt also ein
+            # False der Capability-Runde wieder mit True. Danach ist nicht mehr
+            # feststellbar, ob die Abfrage jemals beantwortet wurde.
+            #
+            # Der except-Block darunter faengt diesen Fall NICHT: bei
+            # Paketverlust wirft get_capabilities() nicht, es loggt "Failed to
+            # query capabilities" und kehrt zurueck (device.py:602-611). Er
+            # bleibt trotzdem noetig - er deckt Dekodierfehler ab, die msmart
+            # nicht abfaengt (nachgemessen: ein pruefsummen- und CRC-gueltiges,
+            # aber zu kurzes Capabilities-Frame ergibt einen IndexError).
+            caps_answered = device.online
             await device.refresh()
         except Exception as exc:
             print(t("dev_caps_failed", name, type(exc).__name__, exc))
+            return False
+
+        # Dieser eine Fall MUSS vor der Statuszeile abbiegen: ohne verwertbare
+        # Capability-Antwort ist device.ieco der Default eines frischen Objekts
+        # (Capability.DEFAULT enthaelt IECO nicht, device.py:149-154), und die
+        # Statuszeile meldete einen Wert, den die Anlage nie genannt hat -
+        # ausgerechnet in der Zeile direkt ueber der Fehlermeldung.
+        #
+        # Alle ANDEREN Faelle bekommen die Statuszeile: meldet die Anlage
+        # schlicht kein iECO, sind power/mode/eco gemessene Werte und als
+        # Diagnose wertvoll - und ihr ieco=False ist dann kein Platzhalter,
+        # sondern die zutreffende Aussage ueber ein Geraet ohne diese Faehigkeit.
+        if not device.supports_ieco and not caps_answered:
+            print(t("dev_caps_no_answer", name))
             return False
 
         print(t("dev_status_before", name, is_on,
                 _mode_label(device.operational_mode), device.ieco, device.eco))
 
         if not device.supports_ieco:
+            # Die Anlage HAT geantwortet und iECO nicht gemeldet - erst jetzt
+            # ist die Aussage ueber ihre Faehigkeiten gedeckt.
             print(t("dev_no_ieco_capability", name))
             return False
 
@@ -617,10 +759,16 @@ async def ensure_ieco(dev_conf: dict, only_if_on: bool) -> bool:
         close_connection(device)
         await asyncio.sleep(SETTLE_DELAY)
         try:
-            # with_capabilities=True ist hier zwingend: sonst pollt refresh() die
-            # IECO-Property nicht und device.ieco laese faelschlich False - die
-            # Ursache der frueher zu Unrecht als Fehlschlag gewerteten Verifikation.
-            device = await connect_and_refresh(dev_conf, with_capabilities=True)
+            # refresh() muss die IECO-Property pollen, sonst laese device.ieco
+            # faelschlich False - die Ursache der frueher zu Unrecht als
+            # Fehlschlag gewerteten Verifikation. Dafuer genuegt hier die
+            # MITNAHME statt einer erneuten Abfrage: dass die Anlage iECO kann,
+            # hat sie in diesem Lauf bereits gesagt (sonst haette der
+            # supports_ieco-Waechter oben abgebrochen). Ein zweiter
+            # Capability-Roundtrip waere nur eine weitere Gelegenheit, verloren
+            # zu gehen - und genau darueber meldete der Lauf dann "iECO ist laut
+            # Geraet weiterhin deaktiviert", obwohl das Setzen geglueckt war.
+            device = await connect_and_refresh(dev_conf, prime_ieco=True)
         except RuntimeError as exc:
             print(t("dev_verify_failed", name, exc))
             return False
@@ -637,6 +785,16 @@ async def ensure_ieco(dev_conf: dict, only_if_on: bool) -> bool:
         # geprueft wird.
         if not device.online:
             print(t("dev_verify_no_answer", name))
+            return False
+
+        # Nach geglueckter Mitnahme ist supports_ieco per Konstruktion True
+        # (prime_ieco_property prueft genau das nach). Ein False kann hier
+        # deshalb NUR bedeuten, dass die Mitnahme nicht gewirkt hat - dann wurde
+        # die IECO-Property nie gepollt und device.ieco traegt wieder den
+        # Default. Ohne diesen Waechter fiele der Lauf still in genau die
+        # Falschaussage zurueck, die die Mitnahme beseitigen soll.
+        if not device.supports_ieco:
+            print(t("dev_verify_inconclusive", name))
             return False
 
         print(t("dev_status_after", name, device.power_state,
