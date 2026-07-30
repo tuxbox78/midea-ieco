@@ -39,7 +39,7 @@ echo "### python syntax (py_compile) ###"
 # IMPORTE deckt das nicht ab - py_compile prueft nur die Syntax; dafuer startet
 # tests/test_conn.py sie zusaetzlich als Unterprozess.
 python3 -m py_compile midea_ieco_ensure.py midea_refresh_tokens.py midea_i18n.py \
-    midea_conn.py tests/*.py tools/*.py || fail=1
+    midea_conn.py midea_apply.py tests/*.py tools/*.py || fail=1
 
 echo "### python unit tests ###"
 python3 -m unittest discover -s tests -p 'test_*.py' || fail=1
