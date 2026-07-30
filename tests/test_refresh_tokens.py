@@ -1996,13 +1996,64 @@ class DiscoverRobustnessTests(_LangMixin):
             self._ns(err='{"tokenlist": [{"key": "aa", "token": "bb"}]}'))
         self.assertEqual(matches, [("aa", "bb")])
 
-    def test_the_first_reported_appliance_id_is_used(self):
-        # Mehrere Treffer: der erste gehoert zum abgefragten Host. Mit '[-1]'
-        # landete die ID eines anderen Geraets im Eintrag.
-        _, appliance_id = mrt._parse_discover_output(self._ns(
-            out='applianceCodes: 111 ... applianceCodes: 222 ... '
-                '"tokenlist": [{"key": "aa", "token": "bb"}]'))
-        self.assertEqual(appliance_id, "111")
+    def test_device_id_is_extracted_from_the_real_discover_line(self):
+        # midea-local 6.6.1 loggt die Geraete-ID in discover.py als dict-repr
+        # ("Found a supported device: {'device_id': N, ...}") - NICHT als das
+        # von der Bibliothek nirgends erzeugte "applianceCodes". Genau dieses
+        # reale Format muss die Extraktion greifen, sonst schlaegt '--name X
+        # --host Y' fuer ein neues Geraet immer fehl.
+        _, device_id = mrt._parse_discover_output(self._ns(
+            err="Found a supported device: {'device_id': 111, 'type': 172, "
+                "'ip_address': '192.0.2.99', 'port': 6444, 'protocol': 3}\n"
+                '{"tokenlist": [{"key": "aa", "token": "bb"}]}'))
+        self.assertEqual(device_id, "111")
+
+    def test_device_id_is_not_confused_with_the_appliance_id_log_line(self):
+        # Guard B: In derselben Ausgabe nennt cloud.pys get_keys-Zeile eine
+        # 'appliance_id', und die Rohantwort enthaelt 'udpId' und Portzahlen.
+        # Keine dieser Nachbarzahlen darf die device_id-Extraktion kapern - die
+        # echte device_id (111) muss gewinnen, nicht 222/999/6444.
+        _, device_id = mrt._parse_discover_output(self._ns(
+            err="Found a supported device: {'device_id': 111, 'port': 6444}\n"
+                "Response from get_keys() for appliance_id 222 with method 1: {}\n"
+                'response: {"tokenlist": [{"udpId": "999", "key": "aa", '
+                '"token": "bb"}]}'))
+        self.assertEqual(device_id, "111")
+
+    def test_a_zero_device_id_counts_as_absent(self):
+        # Guard A: Der Protokoll-1-Pfad in discover.py liefert device_id=0, wenn
+        # das Geraet keine ID meldet. Ein gespeichertes id=0 waere ein nie
+        # verifizierbarer Bogus-Eintrag - 0 gilt daher als "keine ID". Die
+        # (key, token)-Paare werden trotzdem normal extrahiert.
+        matches, device_id = mrt._parse_discover_output(self._ns(
+            out="Found a supported device: {'device_id': 0, 'protocol': 1}\n"
+                '{"tokenlist": [{"key": "aa", "token": "bb"}]}'))
+        self.assertEqual(matches, [("aa", "bb")])
+        self.assertIsNone(device_id)
+
+    def test_faithful_discover_transcript_yields_both_pairs_and_device_id(self):
+        # Der Integrationstest, der den Bug GEFANGEN haette: eine originalgetreue,
+        # aus den echten _LOGGER-Statements von midea-local 6.6.1 rekonstruierte
+        # discover --debug-Ausgabe (discover.py:257 device-dict; MideaAirCloud
+        # ._api_request loggt die Rohantwort mit tokenlist; get_cloud_keys loggt
+        # die 'appliance_id'-Zeile). Prueft BEIDES - (key, token) UND device_id -
+        # statt wie frueher ein bibliotheks-unmoegliches Format zu pinnen.
+        transcript = (
+            "2026-07-30 12:00:00.400 DEBUG (MainThread) [midealocal.discover] "
+            "Found a supported device: {'device_id': 152836102618963, "
+            "'type': 172, 'ip_address': '192.0.2.99', 'port': 6444, "
+            "'model': '12345678', 'sn': '0000', 'protocol': 3}\n"
+            "2026-07-30 12:00:01.000 DEBUG (MainThread) [midealocal.cloud] "
+            "Midea cloud API url: https://x/v1/iot/secure/getToken, data: {}, "
+            'response: b\'{"errorCode":"0","result":{"tokenlist":'
+            '[{"udpId":"abcdef","token":"b2b2","key":"a1a1"}]}}\'\n'
+            "2026-07-30 12:00:01.100 DEBUG (MainThread) [midealocal.cloud] "
+            "Response from get_keys() for appliance_id 152836102618963 with "
+            "method 1: {'tokenlist': [{'udpId': 'abcdef', 'token': 'b2b2', "
+            "'key': 'a1a1'}]}")
+        matches, device_id = mrt._parse_discover_output(self._ns(err=transcript))
+        self.assertEqual(matches, [("a1a1", "b2b2")])
+        self.assertEqual(device_id, "152836102618963")
 
 
 class RedactedOutputPathTests(_LangMixin):

@@ -449,7 +449,21 @@ _TOKENLIST_ARRAY_RE = re.compile(r'"tokenlist"\s*:\s*\[(.*?)\]', re.DOTALL)
 _ENTRY_RE = re.compile(r"\{(.*?)\}", re.DOTALL)
 _KEY_RE = re.compile(r'"key"\s*:\s*"([0-9a-fA-F]+)"')
 _TOKEN_RE = re.compile(r'"token"\s*:\s*"([0-9a-fA-F]+)"')
-APPLIANCE_ID_RE = re.compile(r"applianceCodes['\"]?\s*[:=]\s*['\"]?(\d+)")
+
+# Geraete-ID (device_id) aus derselben --debug-Ausgabe. midea-local loggt sie in
+# discover.py als Python-dict-repr:
+#   [midealocal.discover] Found a supported device: {'device_id': N, 'type': .., ..}
+# NICHT als "applianceCodes" - dieses Feld (Plural) erzeugt die Bibliothek
+# NIRGENDS (grep ueber midea-local 6.6.1: null Treffer). Die fruehere Regex
+# darauf lieferte daher IMMER None und machte 'discover'-basiertes Hinzufuegen
+# eines neuen Geraets ('--name X --host Y') strukturell unmoeglich.
+# Das Literal 'device_id' kommt in der Ausgabe nur in genau dieser Zeile vor:
+# die get_keys-Zeile nennt 'appliance_id', die Cloud-Rohantwort 'udpId'/'userId',
+# und die Hex-Dumps koennen 'device_id' gar nicht buchstabieren (Hex-Alphabet).
+# Die Extraktion ist damit kollisionsfrei (Guard B). Das '['\"]?'-Muster deckt
+# sowohl die dict-repr-Form ('device_id': N) als auch eine etwaige JSON-Form
+# ("device_id": N) ab.
+DEVICE_ID_RE = re.compile(r"device_id['\"]?\s*[:=]\s*['\"]?(\d+)")
 
 
 def extract_token_key_pairs(text: str) -> list[tuple[str, str]]:
@@ -797,8 +811,10 @@ def _run_discover(host: str) -> subprocess.CompletedProcess:
 
 
 def _parse_discover_output(result: subprocess.CompletedProcess) -> tuple[list[tuple[str, str]], str | None]:
-    """Extrahiert (key, token)-Kandidaten und Appliance-ID aus einem discover-
-    Ergebnis. Wirft RuntimeError bei Nicht-Null-Exit oder fehlender tokenlist."""
+    """Extrahiert (key, token)-Kandidaten und die Geraete-ID (device_id) aus einem
+    discover-Ergebnis. Wirft RuntimeError bei Nicht-Null-Exit oder fehlender
+    tokenlist. Die device_id ist None, wenn die Ausgabe keine (nicht-null)
+    Geraete-ID enthaelt (siehe DEVICE_ID_RE, Guard A)."""
     combined_output = result.stdout + result.stderr
     if result.returncode != 0:
         tail = combined_output[-800:] if combined_output else t("err_no_output")
@@ -807,13 +823,18 @@ def _parse_discover_output(result: subprocess.CompletedProcess) -> tuple[list[tu
     if not matches:
         tail = combined_output[-800:] if combined_output else t("err_no_output")
         raise RuntimeError(t("err_no_tokenlist", tail))
-    appliance_ids = APPLIANCE_ID_RE.findall(combined_output)
-    return matches, (appliance_ids[0] if appliance_ids else None)
+    # Guard A: ERSTER NICHT-NULL-Treffer. midea-locals discover.py liefert im
+    # Protokoll-1-Pfad (get_id_from_response) device_id=0, wenn das Geraet keine
+    # ID meldet; ein gespeichertes id=0 waere ein nie verifizierbarer Bogus-
+    # Eintrag. Kein Treffer -> None -> der Aufrufer meldet sauber "keine ID".
+    device_ids = DEVICE_ID_RE.findall(combined_output)
+    return matches, next((d for d in device_ids if int(d) != 0), None)
 
 
 def fetch_candidate_credentials(host: str) -> tuple[list[tuple[str, str]], str | None]:
     """Ruft discover --debug auf und gibt ALLE gefundenen (key, token)-
-    Kandidaten zurueck, sowie die gemeldete Appliance-ID (falls vorhanden).
+    Kandidaten zurueck, sowie die per UDP-discovery gemeldete Geraete-ID
+    (device_id, falls vorhanden).
     Wirft RuntimeError bei einem klaren Ausfuehrungsfehler (Timeout, kein
     tokenlist-Eintrag in der Ausgabe, midealocal nicht installiert).
 
@@ -1112,6 +1133,9 @@ def update_device(dev_conf: dict) -> bool:
         print(t("dev_fetch_failed", name, exc))
         return False
 
+    # appliance_id ist die vom Geraet per UDP-discovery gemeldete device_id
+    # (siehe DEVICE_ID_RE / _parse_discover_output). Der Name bleibt bewusst
+    # appliance_id, weil weiter unten bereits ein lokales 'device_id' existiert.
     existing_id = str(dev_conf.get("id", "")).strip()
     if appliance_id is not None:
         if existing_id and existing_id != appliance_id:
