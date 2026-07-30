@@ -1480,6 +1480,30 @@ assert_hint "0 3 * * 0 cd '/opt/x --only-if-due y' && venv/bin/python3 midea_ref
 assert_hint "0 3 * * 0 cd /opt && PYTHONPATH=/x/--only-if-due venv/bin/python3 midea_refresh_tokens.py --all >> /opt/refresh.log 2>&1 $CRON_MARKER" \
     "ZEILE_REFRESH" "ein Token mit Basisname '--only-if-due' deutet die Wochenzeile nicht um"
 
+# Leer-Guard fuer den Subsplit. Ein Token, das nur aus Metazeichen besteht (ein
+# gequotetes '>' etwa), subsplittet zu NULL Woertern; ohne den ${#parts[@]}-Guard
+# bricht "${parts[@]}" unter 'set -u' auf der macOS-System-bash 3.2 ab (bash >= 4.4
+# nicht - die CI laeuft dort und kann es nie fangen). cron_scan_tools hat den Guard,
+# _cron_line_is_catchup hatte ihn nach dem Uebernehmen des Subsplits kurz nicht.
+# (a) strukturell - faengt das Entfernen des Guards auf JEDER bash-Version.
+# Gesucht wird das Laengen-Teilstueck '#parts[@]' (OHNE fuehrendes '$', also kein
+# SC2016). Das steht NUR in der Guard-Zeile - die parts-Schleife nutzt 'parts[@]'
+# ohne '#'. Bewusst NICHT die genaue Schreibweise '-gt 0' o.ae. gepinnt: eine
+# gueltige Umformulierung des Guards (z.B. '-ne 0') soll keinen Fehlalarm ausloesen;
+# ein ENTFERNTER Guard verschwindet dagegen samt '#parts[@]' und wird rot.
+rc=0; sed -n '/^_cron_line_is_catchup()/,/^}/p' "$INSTALL" \
+        | grep -qF '#parts[@]' || rc=1
+assert "$rc" "_cron_line_is_catchup schuetzt die parts-Schleife mit dem Leer-Guard"
+# (b) Verhalten - der Aufruf laeuft durch (auf bash 3.2 der eigentliche Absturztest)
+# und die Metazeichen-Zeile gilt nicht als Nachholer. 'set -u' wird hier LOKAL
+# erzwungen, nicht bloss von der Harness geerbt: fiele die Option je aus run_all.sh,
+# liefe dieser Absturztest sonst still vakuum.
+cron_meta_probe="$( ( set -u; _cron_line_is_catchup \
+    "0 3 * * 0 venv/bin/python3 midea_refresh_tokens.py --all \">\" >> /x $CRON_MARKER"
+    echo "REACHED:$?" ) 2>&1 )"
+rc=0; case "$cron_meta_probe" in *REACHED:1*) : ;; *) rc=1 ;; esac
+assert "$rc" "Metazeichen-Token stuerzt den Detektor nicht ab (erhalten: $cron_meta_probe)"
+
 assert_hint "MIDEA_IECO_LANG=de
 $CL_OLD_IECO
 $CL_OLD_REFRESH

@@ -67,14 +67,16 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   Both now defer to one shared detector, `_cron_line_is_catchup`, which does exactly
   what `cron_scan_tools` already does to find tool names — tokenize, skip the cd
-  operand and redirection targets, then subsplit each token on whitespace and
-  metacharacters — and matches a *part* that equals `--only-if-due` exactly (not its
-  basename). Both steps are needed: the subsplit exposes the flag inside a quoted
-  composite (`sh -c '… --only-if-due'`, the form the subsplit exists for), while the
-  exact part-match keeps a path like `/opt/x --only-if-due y` or `/opt/--only-if-due`
-  from counting. A plain whitespace or substring heuristic could do neither. The
-  inactive-job notice suppresses only the refresh half of a catch-up line, so a line
-  that also runs iECO keeps counting for it.
+  operand and redirection targets, subsplit each token on whitespace and
+  metacharacters (behind the same empty-parts guard) — and matches a *part* that
+  equals `--only-if-due` exactly (not its basename). Each piece pulls its weight: the
+  subsplit exposes the flag inside a quoted composite (`sh -c '… --only-if-due'`, the
+  form the subsplit exists for); the cd-operand skip keeps a directory such as
+  `cd '/opt/x --only-if-due y'` from counting; and the exact part-match (not
+  basename) keeps a token like `/opt/--only-if-due` from counting. A plain whitespace
+  or substring heuristic could do none of it. The inactive-job notice suppresses only
+  the refresh half of a catch-up line, so a line that also runs iECO keeps counting
+  for it.
 
   The catch-up line is deliberately **not** treated as an expected job: demanding it
   would report a missing job to every installation that predates it

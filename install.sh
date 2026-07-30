@@ -846,12 +846,20 @@ _cron_line_is_catchup() {   # $1 = Cron-Zeile; braucht cron_tokenize_line
             *[[:space:]\;\&\|\<\>\(\)]*)
                 parts=(); read -r -a parts <<< "${CTL_TOKS[i]//[;&|<>\(\)]/ }" || true ;;
         esac
-        for part in "${parts[@]}"; do
-            # Nur INNERE Quotes entfernen, KEINE Basisnamen-Bildung: ein Flag hat
-            # keinen '/', ein Pfad '/opt/--only-if-due' bleibt so verschieden.
-            cleaned="${part//\'/}"; cleaned="${cleaned//\"/}"
-            if [ "$cleaned" = "--only-if-due" ]; then return 0; fi
-        done
+        # Leer-Guard ZWINGEND wie in cron_scan_tools: ein Token, das nur aus
+        # Metazeichen/Leerraum besteht (ein gequotetes '>' etwa), subsplittet zu
+        # NULL Woertern - und "${parts[@]}" bricht dann unter 'set -u' auf der
+        # macOS-System-bash 3.2 mit 'unbound variable' ab (bash >= 4.4 nicht).
+        # Genau diese Zeile fehlte hier einmal und riss den Installer-Re-Run auf
+        # dem Mac ab; die CI (bash 5) kann es nicht sehen.
+        if [ "${#parts[@]}" -gt 0 ]; then
+            for part in "${parts[@]}"; do
+                # Nur INNERE Quotes entfernen, KEINE Basisnamen-Bildung: ein Flag
+                # hat keinen '/', ein Pfad '/opt/--only-if-due' bleibt verschieden.
+                cleaned="${part//\'/}"; cleaned="${cleaned//\"/}"
+                if [ "$cleaned" = "--only-if-due" ]; then return 0; fi
+            done
+        fi
         if [ "${CTL_TOKS[i]}" = "cd" ]; then prev_was_cd=1; fi
     done
     return 1
