@@ -3647,5 +3647,86 @@ class MixinIsolationTests(_ConfigPathMixin):
         self.assertTrue((Path(self.tmp.name) / "refresh_state.json").exists())
 
 
+class LineBufferedStdoutTests(unittest.TestCase):
+    """install_line_buffered_stdout(): stdout wird zeilengepuffert, damit die
+    eigene print()-Ausgabe und die stderr-Diagnostik der Bibliothek in EINER
+    Logdatei (Cron: '>> log 2>&1') in Programmreihenfolge stehen.
+
+    Vier Zusicherungen: die Funktionswirkung selbst (deterministisch, ohne
+    Subprozess), die beiden Guards (Strom ohne reconfigure / None), die
+    Idempotenz, und - als End-zu-End-Beleg - die tatsaechliche Reihenfolge im
+    gemergten Strom eines echten Subprozesses."""
+
+    def test_sets_line_buffering_on_a_real_textiowrapper(self):
+        # Der eigentliche Vertrag: aus block- wird zeilengepuffert. Ein echtes
+        # TextIOWrapper (kein StringIO, das kein reconfigure hat) steht fuer das
+        # sys.stdout eines Cron-Laufs.
+        fake = io.TextIOWrapper(io.BytesIO())
+        enc_before = fake.encoding
+        self.assertFalse(fake.line_buffering)
+        with redirect_stdout(fake):
+            midea_i18n.install_line_buffered_stdout()
+        self.assertTrue(fake.line_buffering)
+        # Encoding bleibt unangetastet - sonst waere die Umlaut-Ausgabe in Gefahr.
+        self.assertEqual(fake.encoding, enc_before)
+
+    def test_is_a_noop_on_streams_without_reconfigure(self):
+        # StringIO (der haeufige Testfall) und None (fensterloser Prozess) haben
+        # kein reconfigure; der Waechter muss geraeuschlos zurueckkehren, statt
+        # den ganzen Lauf mit einem AttributeError zu beenden.
+        with redirect_stdout(io.StringIO()):
+            midea_i18n.install_line_buffered_stdout()
+        with mock.patch.object(midea_i18n.sys, "stdout", None):
+            midea_i18n.install_line_buffered_stdout()
+
+    def test_is_idempotent(self):
+        fake = io.TextIOWrapper(io.BytesIO())
+        with redirect_stdout(fake):
+            midea_i18n.install_line_buffered_stdout()
+            midea_i18n.install_line_buffered_stdout()
+        self.assertTrue(fake.line_buffering)
+
+    def test_merged_stream_stays_in_program_order(self):
+        # End-zu-End: ein echter Subprozess richtet die Waechter wie main() ein
+        # und mischt eine eigene print()-Zeile, eine Bibliothekswarnung (stderr)
+        # und eine zweite print()-Zeile. stdout UND stderr laufen in DIESELBE
+        # Datei (wie die Cron-Zeile mit 2>&1). Nur mit Zeilenpufferung stehen die
+        # drei in Programmreihenfolge; ohne sie kaeme der stdout-Block gesammelt
+        # ans Ende und die Warnung stuende davor.
+        driver = (
+            "import sys, logging\n"
+            f"sys.path.insert(0, {str(REPO_DIR)!r})\n"
+            "import midea_i18n as m\n"
+            "m.install_line_buffered_stdout()\n"
+            "m.install_log_redaction(logging.WARNING)\n"
+            "log = logging.getLogger('msmart.device')\n"
+            "print('AAA own attempt line')\n"
+            "log.warning('BBB library warning line')\n"
+            "print('CCC own conclusion line')\n"
+        )
+        work = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(work, ignore_errors=True))
+        logpath = os.path.join(work, "merged.log")
+        # PYTHONUNBUFFERED aus dem Kind-Env nehmen: sonst waere stdout ohnehin
+        # ungepuffert und der Test wuerde auch bei ENTFERNTEM Waechter gruen -
+        # also kein gueltiger Regressionswaechter mehr.
+        env = {k: v for k, v in os.environ.items() if k != "PYTHONUNBUFFERED"}
+        with open(logpath, "wb") as fh:
+            result = subprocess.run([sys.executable, "-c", driver],
+                                    stdout=fh, stderr=subprocess.STDOUT, env=env)
+        self.assertEqual(result.returncode, 0)
+        text = Path(logpath).read_text(encoding="utf-8")
+        i_attempt = text.find("AAA")
+        i_warning = text.find("BBB")
+        i_conclusion = text.find("CCC")
+        self.assertNotEqual(i_attempt, -1, "eigene attempt-Zeile fehlt im Log")
+        self.assertNotEqual(i_warning, -1, "Bibliothekswarnung fehlt im Log")
+        self.assertNotEqual(i_conclusion, -1, "eigene conclusion-Zeile fehlt im Log")
+        self.assertLess(i_attempt, i_warning,
+                        "attempt-Zeile muss VOR der Bibliothekswarnung stehen")
+        self.assertLess(i_warning, i_conclusion,
+                        "Bibliothekswarnung muss VOR der conclusion-Zeile stehen")
+
+
 if __name__ == "__main__":
     unittest.main()

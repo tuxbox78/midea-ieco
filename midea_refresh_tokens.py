@@ -65,7 +65,8 @@ from midea_conn import close_connection
 # Sprachwahl: gemeinsame Mechanik fuer beide Werkzeuge (Reihenfolge und
 # englischer Default sind dort dokumentiert). resolve_lang wird mitimportiert,
 # damit es weiterhin ueber dieses Modul erreichbar bleibt.
-from midea_i18n import (install_excepthook_redaction, install_log_redaction,
+from midea_i18n import (install_excepthook_redaction,
+                        install_line_buffered_stdout, install_log_redaction,
                         make_translator, resolve_lang)  # noqa: F401
 
 # Dieses Werkzeug hat bisher gar kein Logging eingerichtet - dann bedient
@@ -1275,6 +1276,12 @@ def main() -> None:
     der Geraeteschleife, den Erfolg ganz am Ende. Mit --only-if-due wird dieser
     Zustand vorher ausgewertet und der Lauf ggf. mit Exit 0 uebersprungen (siehe
     refresh_is_due)."""
+    # stdout auf Zeilenpufferung, BEVOR irgendetwas ausgegeben wird: unter Cron
+    # (>> log 2>&1) ist stdout sonst blockgepuffert und die eigene Statusausgabe
+    # erschiene gesammelt am Prozessende, hinter der laufenden stderr-Diagnostik
+    # der Bibliothek - Ursache und Wirkung vertauscht. Warum nur stdout, warum
+    # hier: Docstring von install_line_buffered_stdout().
+    install_line_buffered_stdout()
     # Beide Waechter erst hier, nicht beim Import: Root-Logger und
     # sys.excepthook gelten prozessweit. Sie decken die zwei Wege ab, die der
     # Meldungskatalog nicht sieht - was eine Fremdbibliothek ueber logging

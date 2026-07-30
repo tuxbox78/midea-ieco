@@ -13,6 +13,9 @@ auseinanderlaufen - eine korrigierte Locale-Sonderform in der einen Datei, die
 in der anderen fehlt. Die Kataloge bleiben bewusst bei den jeweiligen Modulen,
 geteilt wird nur die Mechanik. Dasselbe Argument gilt fuer redact_hex(): auch
 das Schwaerzen langer Hex-Werte darf nicht in zwei Fassungen auseinanderlaufen.
+Und ebenso fuer install_line_buffered_stdout(): die Reihenfolge-Garantie fuer die
+gemeinsame Logdatei (stdout und stderr in EINER Datei) muss in beiden Werkzeugen
+identisch gelten, nicht als Kopie je Werkzeug.
 
 Die Aufloesung uebernimmt die REIHENFOLGE von resolve_lang() aus install.sh,
 damit Installer und Laufzeit dieselbe Sprache sprechen:
@@ -167,6 +170,60 @@ class RedactingStreamHandler(logging.StreamHandler):
             sys.stderr.write(redact_hex(puffer.getvalue()))
         except Exception:
             pass
+
+
+def install_line_buffered_stdout() -> None:
+    """Schaltet sys.stdout auf Zeilenpufferung, damit die eigene print()-Ausgabe
+    der Werkzeuge und die stderr-Diagnostik einer Fremdbibliothek in derselben
+    Logdatei in der RICHTIGEN Reihenfolge landen.
+
+    Das Problem, gemessen: Die Cron-Zeilen leiten stdout UND stderr per '2>&1' in
+    eine Datei ('>> ...ieco.log 2>&1'). Nach Datei umgeleitet ist Pythons
+    sys.stdout blockgepuffert, sys.stderr dagegen zeilengepuffert. Die Werkzeuge
+    schreiben ihre Statuszeilen mit print() (stdout), msmart-ng schreibt seine
+    Warnungen ueber logging (stderr, via RedactingStreamHandler). Ein typischer
+    Lauf bleibt unter der Puffergroesse - der gesamte stdout-Block wird deshalb
+    erst beim Prozessende geschrieben, waehrend die stderr-Zeilen laufend
+    erscheinen. In der Datei steht die Bibliothekswarnung eines Geraets dann VOR
+    dem zugehoerigen print()-Block; bei 'all' ueber mehrere Geraete ist die
+    Zuordnung 'welche Warnung gehoert zu welchem Geraet' entkoppelt, weil die
+    pro-Geraet-Bloecke gesammelt hinterherkommen.
+
+    Zeilenpufferung statt Voll-Unbuffering ('-u'/PYTHONUNBUFFERED): flush je Zeile
+    ist die passende Granularitaet, um mit dem ebenfalls zeilengepufferten stderr
+    zeilengenau zu verschraenken. Die Ausgabemenge ist klein (wenige Zeilen je
+    Geraet), der Mehraufwand vernachlaessigbar. Ein In-Code-Fix statt '-u' in der
+    Cron-Zeile erreicht ueberdies BESTEHENDE Installationen ueber das normale
+    Code-Update (die Crontab wird bei einem Update nicht neu geschrieben) und
+    wirkt in JEDEM Umleitungs-/Pipe-Kontext, nicht nur unter Cron.
+
+    NUR stdout, nicht stderr: sys.stderr ist seit CPython 3.9 (bpo-13601) auch bei
+    Nicht-TTY zeilengepuffert; die von install.sh erzwungene Untergrenze Python
+    3.11 garantiert das. Ein reconfigure() auf stderr waere ein No-op.
+
+    In main() gerufen, NICHT beim Import - genau wie install_log_redaction() und
+    install_excepthook_redaction() und aus demselben Grund: sys.stdout gehoert dem
+    Prozess, nicht diesem Modul; ein blosser Import soll die Stroeme des Aufrufers
+    nicht umkonfigurieren.
+
+    Guards: Ist sys.stdout kein TextIOWrapper - in Tests oft ein StringIO ohne
+    reconfigure, oder None in einem fensterlosen Prozess -, passiert nichts. Wirft
+    reconfigure() wider Erwarten doch (etwa auf einem geschlossenen Strom), wird
+    das geschluckt: der Rueckfall ist exakt das heutige Verhalten, nie schlechter -
+    derselbe Grundsatz wie in RedactingStreamHandler.handleError().
+
+    Was das NICHT deckt: einen Strom, der reconfigure() gar nicht kennt - dort
+    bleibt es bei Blockpufferung und alter Reihenfolge. Fuer den Cron-Weg (das
+    echte sys.stdout, ein TextIOWrapper) greift der Fix."""
+    stream = sys.stdout
+    reconfigure = getattr(stream, "reconfigure", None)
+    if reconfigure is None:
+        return
+    try:
+        reconfigure(line_buffering=True)
+    except Exception:
+        # Rueckfall = heutiges Verhalten, nie schlechter (vgl. handleError).
+        pass
 
 
 def install_log_redaction(level: int = logging.WARNING) -> None:

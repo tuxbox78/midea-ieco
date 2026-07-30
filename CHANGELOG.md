@@ -90,6 +90,33 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   assertion noticing.
 
 ### Fixed
+- **Cron logs no longer show cause and effect in the wrong order.** Both cron
+  lines merge a run's stdout and stderr into one file (`… >> ieco.log 2>&1`, and
+  the same for `refresh.log`). Redirected to a file, Python's `sys.stdout` is
+  block-buffered while `sys.stderr` is line-buffered (the latter since CPython 3.9,
+  guaranteed here by the enforced Python 3.11 floor). The tools print their own
+  per-device status with `print()` (stdout); the `msmart-ng` diagnostics travel
+  over `logging` (stderr, via `RedactingStreamHandler`). A typical run stays under
+  the buffer size, so the **entire** stdout block was written only at process exit
+  — after every library warning. In `ieco.log` a unit's `Failed to query
+  capabilities …` therefore stood *above* the `print()` block it belongs to, and
+  across an `all` run over several units the "which warning belongs to which
+  device" correlation was pulled apart, because the per-device blocks arrived
+  collected at the end. That devalued exactly the artifact the README points at
+  for troubleshooting.
+
+  Fix: a new `install_line_buffered_stdout()` in `midea_i18n.py`, called first in
+  both tools' `main()` (next to the existing redaction guards), reconfigures
+  `sys.stdout` to line buffering. Each `print()` line is then flushed on its
+  newline and interleaves with the line-buffered stderr in true chronological
+  order — verified by a subprocess test that merges both streams into one file and
+  asserts the program order survives. Chosen over `-u`/`PYTHONUNBUFFERED` in the
+  cron line because an in-code fix also reaches **existing** installs through the
+  normal code update (the crontab is not rewritten on update) and works in every
+  redirect/pipe context, not just under cron. Only `stdout` is touched; `stderr`
+  is already line-buffered. As a side benefit, the `ts`-timestamp logging recipe
+  suggested in the README now produces truthful timestamps instead of stamping
+  the whole stdout block at process-exit time.
 - **A single hand-typed `id`/`port` no longer aborts the whole
   `midea_refresh_tokens.py --all` run and discards the other devices' freshly
   refreshed tokens.** `update_device` read the device id and port with a bare

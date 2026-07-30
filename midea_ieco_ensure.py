@@ -34,7 +34,8 @@ from typing import TYPE_CHECKING, NamedTuple
 # Sprachwahl: gemeinsame Mechanik fuer beide Werkzeuge (Reihenfolge und
 # englischer Default sind dort dokumentiert). resolve_lang wird mitimportiert,
 # damit es weiterhin ueber dieses Modul erreichbar bleibt.
-from midea_i18n import (install_excepthook_redaction, install_log_redaction,
+from midea_i18n import (install_excepthook_redaction,
+                        install_line_buffered_stdout, install_log_redaction,
                         make_translator, resolve_lang)  # noqa: F401
 
 # Verbindungsabbau: msmart-ng hat dafuer keine oeffentliche API - die Begruendung
@@ -937,6 +938,12 @@ def _device_config_problem(d: dict) -> str | None:
 
 
 async def main() -> None:
+    # stdout auf Zeilenpufferung, BEVOR irgendetwas ausgegeben wird: unter Cron
+    # (>> log 2>&1) ist stdout sonst blockgepuffert und die eigene Statusausgabe
+    # erschiene gesammelt am Prozessende, hinter der laufenden stderr-Diagnostik
+    # der Bibliothek - Ursache und Wirkung vertauscht. Warum nur stdout, warum
+    # hier: Docstring von install_line_buffered_stdout().
+    install_line_buffered_stdout()
     # Beide Waechter erst hier, nicht beim Import: Root-Logger und
     # sys.excepthook gelten prozessweit, und ein blosser Import dieses Moduls
     # soll das Verhalten des Aufrufers nicht aendern. Sie decken die zwei Wege
