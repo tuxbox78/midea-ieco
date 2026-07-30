@@ -2272,12 +2272,15 @@ class RenderedMessageOrderTests(_LangMixin):
             [(False, mrt.VERIFY_SILENT, "x"), (True, "", "")])
         self.assertIn("2/3", out)
 
-    def test_id_mismatch_shows_the_stored_value_before_the_cloud_value(self):
+    def test_id_mismatch_shows_the_stored_value_before_the_device_value(self):
         # Ein Tausch kehrte die Aussage um und schickte den Nutzer die falsche
-        # ID korrigieren.
+        # ID korrigieren. Die gemeldete ID stammt aus der UDP-discovery (das
+        # Geraet meldet sie selbst) - die Meldung darf sie NICHT der Cloud
+        # zuschreiben.
         out = self._run_update([("k", "t")], [(True, "", "")],
                                dev=dict(self.DEV, id=111), appliance_id="222")
         self._assert_order(out, "id=111", "id=222")
+        self.assertNotIn("cloud", out.lower())
 
     def test_total_failure_line_names_the_device_then_the_count(self):
         out = self._run_update(
@@ -2517,6 +2520,55 @@ class SaveConfigIsCalledTests(_ConfigPathMixin):
         saver.assert_not_called()
 
 
+class HostIgnoredWarningTests(_ConfigPathMixin):
+    """--host wirkt nur beim Anlegen eines NEUEN Geraets. Bei --all oder einem
+    bestehenden Geraet ist es wirkungslos - dann MUSS ein sichtbarer Hinweis
+    erscheinen (statt es still zu verschlucken), aber NICHT, wenn --host
+    tatsaechlich ein neues Geraet anlegt. Eigener Capture-Helfer: der
+    _run_main aus SaveConfigIsCalledTests verwirft stdout."""
+
+    HINT = "--host is ignored"  # stabiles Fragment der englischen Meldung
+
+    def _run_capture(self, argv, update_result=True, devices=None):
+        devices = devices if devices is not None else [
+            {"name": "W", "ip": "1.2.3.4", "id": 1}]
+        self.path.write_text(json.dumps({"devices": devices}), encoding="utf-8")
+        buf = io.StringIO()
+        with mock.patch.dict(os.environ, {"MIDEA_IECO_LANG": "en"}), \
+                mock.patch.dict(sys.modules, {"msmart": mock.MagicMock()}), \
+                mock.patch.object(mrt, "update_device", lambda dev: update_result), \
+                mock.patch.object(mrt, "save_config", mock.MagicMock()), \
+                mock.patch.object(mrt.time, "sleep", lambda s: None), \
+                mock.patch.object(mrt.sys, "argv", ["x"] + argv), \
+                redirect_stdout(buf):
+            with self.assertRaises(SystemExit):
+                mrt.main()
+        return buf.getvalue()
+
+    def test_host_with_existing_device_warns(self):
+        # '--name <bestehend> --host <ip>': die gespeicherte IP zaehlt, --host
+        # ist wirkungslos - der Nutzer muss das erfahren.
+        out = self._run_capture(["--name", "W", "--host", "9.9.9.9"])
+        self.assertIn(self.HINT, out)
+
+    def test_host_with_all_warns(self):
+        # '--all --host <ip>': ebenso wirkungslos fuer jedes bestehende Geraet.
+        out = self._run_capture(["--all", "--host", "9.9.9.9"])
+        self.assertIn(self.HINT, out)
+
+    def test_existing_device_without_host_does_not_warn(self):
+        # Ohne --host gibt es nichts zu warnen (Negativfall zur args.host-Haelfte
+        # der Bedingung).
+        out = self._run_capture(["--name", "W"])
+        self.assertNotIn(self.HINT, out)
+
+    def test_host_with_new_device_does_not_warn(self):
+        # Hier WIRKT --host (legt das neue Geraet an) - kein Hinweis (Negativfall
+        # zur new_entry-Haelfte der Bedingung).
+        out = self._run_capture(["--name", "Neu", "--host", "9.9.9.9"], devices=[])
+        self.assertNotIn(self.HINT, out)
+
+
 class UpdateDeviceFailureReturnsTests(_LangMixin):
     """Die drei Fehlerpfade von update_device muessen False liefern.
 
@@ -2556,14 +2608,16 @@ class UpdateDeviceFailureReturnsTests(_LangMixin):
         self.assertIn("cloud down", out)
 
     def test_missing_device_id_is_a_failure(self):
-        # Kandidaten da, aber weder in devices.json noch von der Cloud eine ID:
-        # ohne ID laesst sich keine Verbindung aufbauen, es darf also kein
-        # Erfolg gemeldet und nichts gespeichert werden.
+        # Kandidaten da, aber weder in devices.json noch vom Geraet (per
+        # discovery) eine ID: ohne ID laesst sich keine Verbindung aufbauen, es
+        # darf also kein Erfolg gemeldet und nichts gespeichert werden. Die
+        # Meldung darf das fehlende ID nicht faelschlich der Cloud anlasten.
         dev = {"name": "W", "ip": "1.2.3.4"}
         result, out = self._update(
             dev, fetch_candidate_credentials=lambda host: ([("k", "t")], None))
         self.assertFalse(result)
         self.assertIn("No device ID", out)
+        self.assertNotIn("cloud", out.lower())
         self.assertNotIn("token", dev)
 
 

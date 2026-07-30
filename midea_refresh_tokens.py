@@ -160,15 +160,15 @@ _MESSAGES: dict[str, tuple[str, str]] = {
         "[%s] ERROR while fetching tokens: %s",
         "[%s] FEHLER beim Token-Abruf: %s"),
     "dev_id_mismatch": (
-        "[%s] WARNING: devices.json says id=%s, but the cloud reports id=%s. "
+        "[%s] WARNING: devices.json says id=%s, but the device reports id=%s. "
         "Existing value NOT overwritten.",
-        "[%s] WARNUNG: In devices.json steht id=%s, aber die Cloud meldet id=%s. "
+        "[%s] WARNUNG: In devices.json steht id=%s, aber das Geraet meldet id=%s. "
         "Bestehenden Wert NICHT ueberschrieben."),
     "dev_no_id": (
         "[%s] ERROR: No device ID available (neither in devices.json nor reported "
-        "by the cloud). Entry will NOT be saved.",
-        "[%s] FEHLER: Keine Geraete-ID verfuegbar (weder in devices.json noch von der "
-        "Cloud gemeldet). Eintrag wird NICHT gespeichert."),
+        "by the device). Entry will NOT be saved.",
+        "[%s] FEHLER: Keine Geraete-ID verfuegbar (weder in devices.json noch vom "
+        "Geraet gemeldet). Eintrag wird NICHT gespeichert."),
     "dev_candidates_found": (
         "[%s] %s candidate(s) found, verifying one by one ...",
         "[%s] %s Kandidat(en) gefunden, verifiziere der Reihe nach ..."),
@@ -334,6 +334,12 @@ _MESSAGES: dict[str, tuple[str, str]] = {
     "main_new_needs_host": (
         "Device '%s' is new. Please also pass --host.",
         "Geraet '%s' ist neu. Bitte zusaetzlich --host angeben."),
+    "main_host_ignored": (
+        "Note: --host is ignored here; it only takes effect when adding a NEW "
+        "device with --name. Existing devices use the IP from devices.json.",
+        "Hinweis: --host wird hier ignoriert; es wirkt nur beim Hinzufuegen eines "
+        "NEUEN Geraets mit --name. Bestehende Geraete nutzen die IP aus "
+        "devices.json."),
     "main_new_not_saved": (
         "New device '%s' was NOT saved because the lookup failed.",
         "Neues Geraet '%s' wurde NICHT gespeichert, da der Abruf fehlgeschlagen ist."),
@@ -1275,6 +1281,16 @@ def main() -> None:
                 sys.exit(1)
             new_entry = {"name": args.name, "ip": args.host, "port": 6444, "id": "", "token": "", "key": ""}
             targets = [new_entry]
+
+    # --host legt die IP NUR beim Anlegen eines neuen Geraets fest (new_entry).
+    # Bei --all oder einem bereits bestehenden Geraet zaehlt allein die in
+    # devices.json gespeicherte IP; ein hier mitgegebenes --host bleibt
+    # wirkungslos. Das darf nicht still passieren - wer '--name <bestehend>
+    # --host <neueIP>' tippt, erwartet meist eine IP-Aenderung und soll den
+    # Hinweis sehen, dass sie NICHT stattfindet (die CLI-Hilfe sagt bereits
+    # "nur fuer NEUE Geraete", aber ohne Hinweis zur Laufzeit uebersieht man das).
+    if args.host and new_entry is None:
+        print(t("main_host_ignored"))
 
     # Ab hier wird tatsaechlich gegen die Geraete gearbeitet - den Versuch JETZT
     # vermerken, nicht erst am Ende (Begruendung in record_refresh_attempt).
