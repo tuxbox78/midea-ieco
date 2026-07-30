@@ -265,6 +265,8 @@ Verzeichnisse ueber Umgebungsvariablen ueberschreibbar:
                                  de='  Neu einrichten:       install.sh --reconfigure' ;;
         devices_backed_up) en='Existing devices.json backed up to devices.json.bak.'
                            de='Vorhandene devices.json nach devices.json.bak gesichert.' ;;
+        devices_backup_kept) en='Existing devices.json holds no credentials - keeping the existing devices.json.bak untouched (data-loss guard).'
+                             de='Vorhandene devices.json enthaelt keine Zugangsdaten - bestehende devices.json.bak bleibt unangetastet (Datenverlust-Schutz).' ;;
         hint_obsolete_credentials) en='A credentials.json from an earlier version is no longer needed (0.2.0 fetches device tokens without any cloud credentials). You may delete it: rm %s'
                                    de='Eine credentials.json aus einer frueheren Version wird nicht mehr benoetigt (0.2.0 holt die Geraete-Token ohne jegliche Cloud-Zugangsdaten). Du kannst sie loeschen: rm %s' ;;
         discover_searching) en='Searching for Midea devices on the local network (may take a moment)...'
@@ -1438,6 +1440,29 @@ is_already_configured() {
     [[ -f "$INSTALL_DIR/devices.json" ]]
 }
 
+# Prueft, ob eine devices.json mindestens EIN Geraet mit nicht-leerem token UND
+# key enthaelt - also ueberhaupt lokal nutzbare Zugangsdaten, die eine Sicherung
+# wert sind. Rueckgabe 0 = ja, sonst 1 (Datei fehlt, ist kaputt, oder alle
+# Token/Key-Felder sind leer). Bewusst ueber python3/json statt grep: dieselbe
+# robuste, formatunabhaengige JSON-Lesung wie an den uebrigen Stellen. python3
+# ist am einzigen Aufrufer verfuegbar (er laeuft nach setup_venv_and_deps, also
+# mit aktivierter venv).
+devices_json_has_secrets() {
+    python3 - "$1" <<'PYEOF' 2>/dev/null
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        data = json.load(f)
+except Exception:
+    sys.exit(1)
+devices = data.get("devices") if isinstance(data, dict) else None
+if not isinstance(devices, list):
+    sys.exit(1)
+sys.exit(0 if any(isinstance(d, dict) and d.get("token") and d.get("key")
+                  for d in devices) else 1)
+PYEOF
+}
+
 # Weist einmalig darauf hin, falls aus einer 0.1.x-Installation noch eine
 # credentials.json herumliegt: seit 0.2.0 wird sie nicht mehr benoetigt (der
 # Token-Abruf laeuft ohne Cloud-Zugangsdaten). BEWUSST wird sie NICHT
@@ -1658,9 +1683,26 @@ fi
 # --reconfigure auf bestehender Installation: vorhandene devices.json sichern,
 # bevor das Onboarding sie neu schreibt (Undo-Moeglichkeit). Die .bak-Datei ist
 # git-ignoriert, da sie echte Token/Key-Werte enthaelt.
+#
+# Die .bak ist die EINZIGE Undo-Kopie und kann Token enthalten, die sich lokal
+# nicht mehr neu beschaffen lassen (die Cloud-getToken-Endpunkte werden
+# schrittweise abgeschaltet - siehe midea_refresh_tokens.py). Sie darf deshalb
+# nie durch einen credential-AERMEREN Stand ersetzt werden: Hat ein frueherer
+# Lauf schon eine token-haltige .bak angelegt und ist die AKTUELLE devices.json
+# credential-los (etwa weil ein vorheriger --reconfigure-Lauf token/key leer
+# hinterliess und der Abruf danach scheiterte), wuerde ein blindes 'cp' die
+# letzte gute Kopie vernichten. Genau dann wird die Sicherung uebersprungen;
+# sonst spiegelt sie wie bisher den Stand vor diesem Lauf. Der Normalfall - eine
+# devices.json MIT Werten - wird weiterhin gesichert (auch ueber eine aeltere
+# .bak, denn diese soll den Stand direkt vor diesem Lauf festhalten).
 if [[ "$RECONFIGURE" -eq 1 && -f devices.json ]]; then
-    cp -p devices.json devices.json.bak
-    ok "$(t devices_backed_up)"
+    if [[ -f devices.json.bak ]] && devices_json_has_secrets devices.json.bak \
+       && ! devices_json_has_secrets devices.json; then
+        info "$(t devices_backup_kept)"
+    else
+        cp -p devices.json devices.json.bak
+        ok "$(t devices_backed_up)"
+    fi
 fi
 
 # =============================================================================
@@ -1804,12 +1846,74 @@ done
 python3 - "${DEVICE_ARGS[@]}" <<'PYEOF'
 import json, os, sys, tempfile
 args = sys.argv[1:]
-devices = [
-    {"name": args[k], "ip": args[k + 1], "port": 6444,
-     "id": int(args[k + 2]), "token": "", "key": ""}
-    for k in range(0, len(args), 3)
-]
 target = "devices.json"
+
+# token/key aus der VORHANDENEN devices.json uebernehmen, statt sie bedingungslos
+# mit "" zu ueberschreiben. Bei --reconfigure haelt diese Datei hier noch die
+# zuletzt funktionierenden Werte (Abschnitt 9 hat noch nicht gelaufen). Ohne die
+# Uebernahme schriebe der Installer leere Token ueber gueltige - und schluege
+# danach der Abruf fehl (Cloud abgeschaltet, Geraet belegt, kein Netz), waeren
+# die einzigen lokal vorhandenen Token verloren. Genau die Zusage aus
+# midea_refresh_tokens.py (bestehende Werte NUR nach erfolgreicher Verifikation
+# ueberschreiben) haette der Installer sonst ausgehebelt. Verankert an der
+# Geraete-id, an die token/key gebunden sind; nur vollstaendige, nicht-leere
+# Paare werden uebernommen. Jeder Lese-/Parse-Fehler faellt still auf "kein
+# Uebertrag" zurueck (Verhalten wie ohne Vorgaengerdatei). Ein uebernommener,
+# inzwischen veralteter Wert ist ungefaehrlich: connect_and_refresh (ensure) und
+# update_device (refresh) verifizieren token/key vor jeder Nutzung, ein falscher
+# scheitert dort sichtbar - nie schlechter als ein leeres Feld.
+prev = {}       # id -> (token, key), nur vollstaendige nicht-leere Paare
+prev_port = {}  # id -> port, nur gueltige TCP-Ports (1..65535)
+try:
+    with open(target, encoding="utf-8") as f:
+        stored = json.load(f)
+    stored_devices = stored.get("devices") if isinstance(stored, dict) else None
+    for d in (stored_devices if isinstance(stored_devices, list) else []):
+        if not isinstance(d, dict):
+            continue
+        raw = str(d.get("id", "")).strip()
+        # isascii() VOR isdigit(): sonst gelten Unicode-Ziffern (z.B. hochgestellte
+        # oder arabisch-indische) als "digit", int() wirft dann aber ValueError,
+        # der die Uebernahme fuer ALLE (auch wohlgeformten) Geschwister-Geraete
+        # derselben Datei verwuerfe. Eine kaputte id -> Eintrag ueberspringen, ohne
+        # die anderen zu beeinflussen.
+        if not (raw.isascii() and raw.isdigit()):
+            continue
+        did = str(int(raw))
+        tok, key = d.get("token"), d.get("key")
+        if tok and key:
+            prev.setdefault(did, (tok, key))
+        # Den Port ebenfalls je id uebernehmen: der Rest der Kette bewahrt einen
+        # abweichenden Port bereits (update_device: setdefault('port', 6444);
+        # connect_and_refresh: get('port', 6444)) - einzig der Installer setzte ihn
+        # beim Rewrite hart auf 6444 zurueck und zerstoerte so einen bewusst
+        # gesetzten Port (z.B. eine Portweiterleitung). Nur ein gueltiger TCP-Port
+        # wird uebernommen, sonst bleibt es beim Default 6444.
+        p_raw = d.get("port")
+        try:
+            # bool ist eine int-Subklasse (int(True) == 1) - explizit ausschliessen,
+            # sonst rutschte ein hand-editiertes '"port": true' als Port 1 durch.
+            p = None if isinstance(p_raw, bool) else int(p_raw)
+        except (TypeError, ValueError):
+            p = None
+        if p is not None and 1 <= p <= 65535:
+            prev_port.setdefault(did, p)
+except (OSError, ValueError, TypeError):
+    # TypeError deckt eine devices.json ab, deren "devices" kein Objekt-Array ist
+    # (z.B. '{"devices": null}' durch Hand-Edit/Truncation): die Uebernahme faellt
+    # dann - wie zugesagt - still auf "kein Uebertrag" zurueck, statt den Installer
+    # unter 'set -e' mit einem Traceback abzubrechen. Der isinstance-Guard oben
+    # verhindert diesen Fall bereits; das TypeError bleibt als Sicherheitsnetz.
+    prev, prev_port = {}, {}
+
+devices = []
+for k in range(0, len(args), 3):
+    dev_id = int(args[k + 2])
+    tok, key = prev.get(str(dev_id), ("", ""))
+    devices.append({"name": args[k], "ip": args[k + 1],
+                    "port": prev_port.get(str(dev_id), 6444),
+                    "id": dev_id, "token": tok, "key": key})
+
 directory = os.path.dirname(os.path.abspath(target)) or "."
 fd, tmp = tempfile.mkstemp(dir=directory,
                            prefix="." + os.path.basename(target) + ".", suffix=".tmp")

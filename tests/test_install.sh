@@ -1149,6 +1149,138 @@ rc=0; [ "$(wc -c < "$CRON_WRITES" | tr -d ' ')" -eq 1 ] || rc=1
 assert "$rc" "konfig-sicherer Re-Run: schreibt die Crontab nicht"
 
 # ---------------------------------------------------------------------------
+echo "== --reconfigure: Token-Erhalt (Wurzelfix) + nicht-zerstoerende .bak =="
+# ---------------------------------------------------------------------------
+# Regression fuer den gemeldeten Datenverlust: --reconfigure schrieb token/key
+# bedingungslos leer (Abschnitt 8), BEVOR der Abruf (Abschnitt 9) lief. Schlug
+# der fehl (Cloud abgeschaltet, Geraet belegt, kein Netz), blieben leere Werte
+# stehen - und ein ZWEITER --reconfigure ueberschrieb die gute .bak mit der
+# leeren Datei, die letzte lokale Kopie war weg. Zwei Zusicherungen sichern das
+# ab: (1) vorhandene token/key werden per Geraete-id uebernommen; (2) eine
+# credential-lose devices.json ueberschreibt nie eine token-haltige .bak.
+# Der Refresh-Stub ist eine LEERE Datei (setup_onboarding_sandbox) - Abschnitt 9
+# liefert also nichts; nur der Erhalt aus Abschnitt 8 kann die Werte retten,
+# womit der reale Fehlabruf ohne Netz getreu nachgestellt ist.
+_dj_field() {   # $1 = Datei, $2 = Feldname des ersten Geraets -> stdout (leer bei Fehler)
+    python3 -c 'import json,sys
+try:
+    print(json.load(open(sys.argv[1]))["devices"][0][sys.argv[2]])
+except Exception:
+    pass' "$1" "$2" 2>/dev/null
+}
+
+# (1) Uebernahme bei passender id: token/key ueberleben den --reconfigure --------
+setup_onboarding_sandbox onbtok ""
+printf '%s\n' '{"devices":[{"name":"Wohnzimmer","ip":"192.168.0.5","port":6444,"id":12345,"token":"GUTTOK","key":"GUTKEY"}]}' > "$ONB/devices.json"
+chmod 600 "$ONB/devices.json"
+run_onboarding --reconfigure   # ONB_INPUT liefert id 12345 -> Treffer
+rc=0; [ "$ONB_RC" -eq 0 ] || rc=1
+assert "$rc" "Token-Erhalt: --reconfigure laeuft durch (Exit $ONB_RC)"
+rc=0; [ "$(_dj_field "$ONB/devices.json" token)" = "GUTTOK" ] \
+   && [ "$(_dj_field "$ONB/devices.json" key)" = "GUTKEY" ] || rc=1
+assert "$rc" "id-Treffer: token/key bleiben erhalten (kein leeres Ueberschreiben)"
+
+# (2) Kein Falsch-Uebertrag bei abweichender id ----------------------------------
+setup_onboarding_sandbox onbtok2 ""
+printf '%s\n' '{"devices":[{"name":"Wohnzimmer","ip":"192.168.0.5","port":6444,"id":55555,"token":"ALTTOK","key":"ALTKEY"}]}' > "$ONB/devices.json"
+chmod 600 "$ONB/devices.json"
+run_onboarding --reconfigure   # ONB_INPUT liefert id 12345 -> KEIN Treffer
+rc=0; [ -z "$(_dj_field "$ONB/devices.json" token)" ] || rc=1
+assert "$rc" "abweichende id: kein Falsch-Uebertrag (token bleibt leer)"
+
+# (3) Guard: credential-lose devices.json ueberschreibt keine token-haltige .bak -
+setup_onboarding_sandbox onbtok3 ""
+printf '%s\n' '{"devices":[{"name":"Wohnzimmer","ip":"192.168.0.5","port":6444,"id":12345,"token":"SAVEDTOK","key":"SAVEDKEY"}]}' > "$ONB/devices.json.bak"
+chmod 600 "$ONB/devices.json.bak"
+BAK_SUM_GOOD="$(cksum < "$ONB/devices.json.bak")"
+printf '%s\n' '{"devices":[{"name":"Wohnzimmer","ip":"192.168.0.5","port":6444,"id":12345,"token":"","key":""}]}' > "$ONB/devices.json"
+chmod 600 "$ONB/devices.json"
+run_onboarding --reconfigure
+rc=0; [ "$(cksum < "$ONB/devices.json.bak")" = "$BAK_SUM_GOOD" ] || rc=1
+assert "$rc" "leere devices.json ueberschreibt die token-haltige .bak NICHT"
+rc=0; grep -q "Datenverlust-Schutz" "$ONB_OUT" || rc=1
+assert "$rc" "uebersprungene Sicherung wird sichtbar gemeldet"
+
+# (4) End-to-End-Reproduktion der gemeldeten Zwei-Lauf-Sequenz -------------------
+setup_onboarding_sandbox onbtok4 ""
+printf '%s\n' '{"devices":[{"name":"Wohnzimmer","ip":"192.168.0.5","port":6444,"id":12345,"token":"REALTOK","key":"REALKEY"}]}' > "$ONB/devices.json"
+chmod 600 "$ONB/devices.json"
+run_onboarding --reconfigure   # 1. Lauf: Erhalt rettet REALTOK, .bak = gut
+rc=0; [ "$(_dj_field "$ONB/devices.json" token)" = "REALTOK" ] || rc=1
+assert "$rc" "Repro 1. Lauf: token ueberlebt den ersten --reconfigure"
+# Realen Fehlabruf nachstellen, der token/key leer hinterlaesst, damit der ZWEITE
+# Lauf auf die gefaehrliche Lage trifft (leere devices.json + gute .bak):
+printf '%s\n' '{"devices":[{"name":"Wohnzimmer","ip":"192.168.0.5","port":6444,"id":12345,"token":"","key":""}]}' > "$ONB/devices.json"
+chmod 600 "$ONB/devices.json"
+run_onboarding --reconfigure   # 2. Lauf: gute .bak darf NICHT verloren gehen
+rc=0; [ "$(_dj_field "$ONB/devices.json.bak" token)" = "REALTOK" ] || rc=1
+assert "$rc" "Repro 2. Lauf: gute .bak bleibt erhalten (Datenverlust verhindert)"
+
+# (5) Robust gegen eine kaputte devices.json: "devices" ist kein Objekt-Array -----
+# Ein Hand-Edit oder eine abgeschnittene Datei kann '{"devices": null}' (oder eine
+# Zahl/Bool) ergeben. Die Uebernahme MUSS still auf "kein Uebertrag" zurueckfallen,
+# nicht den Installer unter 'set -e' mit einem Python-Traceback abbrechen.
+setup_onboarding_sandbox onbtok5 ""
+printf '%s\n' '{"devices":null}' > "$ONB/devices.json"
+chmod 600 "$ONB/devices.json"
+run_onboarding --reconfigure
+rc=0; [ "$ONB_RC" -eq 0 ] || rc=1
+assert "$rc" "kaputte devices.json (\"devices\":null): --reconfigure bricht NICHT ab (Exit $ONB_RC)"
+rc=0; [ -n "$(_dj_field "$ONB/devices.json" name)" ] || rc=1
+assert "$rc" "kaputte devices.json: frische devices.json wird trotzdem geschrieben"
+
+# (6) Eine kaputte Geraete-id verwirft NICHT die Uebernahme der wohlgeformten -----
+# Geschwister. Unicode-Ziffern (hier hochgestellte 5, ⁵) sind isdigit()-wahr,
+# aber int() wirft darauf ValueError; ohne isascii-Guard riss dieser eine Eintrag
+# die Uebernahme fuer die ganze Datei ab. Fixture ueber python3 (ASCII-Quelle).
+setup_onboarding_sandbox onbtok6 ""
+python3 - "$ONB/devices.json" <<'PYEOF'
+import json, sys
+json.dump({"devices": [
+    {"name": "Wohnzimmer", "ip": "192.168.0.5", "port": 6444, "id": 12345,
+     "token": "GOODTOK", "key": "GOODKEY"},
+    {"name": "Kaputt", "ip": "192.168.0.9", "port": 6444, "id": "⁵",
+     "token": "X", "key": "Y"},
+]}, open(sys.argv[1], "w"))
+PYEOF
+chmod 600 "$ONB/devices.json"
+run_onboarding --reconfigure   # erzeugt 1 Geraet mit id 12345 -> Treffer erwartet
+rc=0; [ "$(_dj_field "$ONB/devices.json" token)" = "GOODTOK" ] || rc=1
+assert "$rc" "kaputte Geschwister-id verwirft die Uebernahme der guten id nicht"
+
+# (7) Ein abweichender Port wird - wie token/key - je id uebernommen, nicht auf ---
+# 6444 zurueckgesetzt. Konsistent mit update_device (setdefault) und
+# connect_and_refresh (get("port",6444)); der Installer war die einzige Stelle,
+# die einen bewusst gesetzten Port (z.B. Portweiterleitung) beim Rewrite verwarf.
+setup_onboarding_sandbox onbtok7 ""
+printf '%s\n' '{"devices":[{"name":"Wohnzimmer","ip":"192.168.0.5","port":6455,"id":12345,"token":"GUTTOK","key":"GUTKEY"}]}' > "$ONB/devices.json"
+chmod 600 "$ONB/devices.json"
+run_onboarding --reconfigure
+rc=0; [ "$(_dj_field "$ONB/devices.json" port)" = "6455" ] || rc=1
+assert "$rc" "abweichender Port wird uebernommen (nicht auf 6444 zurueckgesetzt)"
+rc=0; [ "$(_dj_field "$ONB/devices.json" token)" = "GUTTOK" ] || rc=1
+assert "$rc" "Port-Uebernahme laesst token/key unberuehrt"
+
+# (7b) Ein unsinniger Port (ausserhalb 1..65535) faellt auf den Default 6444 -----
+# zurueck (Guard) - statt einen ungueltigen Wert weiterzuschleppen.
+setup_onboarding_sandbox onbtok8 ""
+printf '%s\n' '{"devices":[{"name":"Wohnzimmer","ip":"192.168.0.5","port":999999,"id":12345,"token":"GUTTOK","key":"GUTKEY"}]}' > "$ONB/devices.json"
+chmod 600 "$ONB/devices.json"
+run_onboarding --reconfigure
+rc=0; [ "$(_dj_field "$ONB/devices.json" port)" = "6444" ] || rc=1
+assert "$rc" "unsinniger Port (999999) faellt auf den Default 6444 zurueck"
+
+# (7c) Ein bool-Port darf NICHT als Port 1 durchrutschen: bool ist eine ----------
+# int-Subklasse (int(True)==1, das laege im gueltigen Bereich 1..65535). Ein
+# hand-editiertes "port": true muss auf den Default 6444 zurueckfallen.
+setup_onboarding_sandbox onbtok9 ""
+printf '%s\n' '{"devices":[{"name":"Wohnzimmer","ip":"192.168.0.5","port":true,"id":12345,"token":"GUTTOK","key":"GUTKEY"}]}' > "$ONB/devices.json"
+chmod 600 "$ONB/devices.json"
+run_onboarding --reconfigure
+rc=0; [ "$(_dj_field "$ONB/devices.json" port)" = "6444" ] || rc=1
+assert "$rc" "bool-Port (true) faellt auf 6444 zurueck (nicht Port 1)"
+
+# ---------------------------------------------------------------------------
 echo "== Onboarding End-to-End: fremde Cron-Jobs bleiben unangetastet =="
 # ---------------------------------------------------------------------------
 # Der Schreibblock haengt unsere drei Zeilen an die BESTEHENDE Crontab an. Faellt

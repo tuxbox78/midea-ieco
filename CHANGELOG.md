@@ -90,6 +90,25 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   assertion noticing.
 
 ### Fixed
+- **`install.sh --reconfigure` no longer discards working `token`/`key` values —
+  and a second run can no longer destroy the only remaining backup.** Section 8
+  rewrote `devices.json` with empty `token`/`key` for every device *before* the
+  cloud refresh (section 9) ran; if that refresh then failed (a temporarily
+  unreachable or single-connection-blocked device, no network, or a cloud
+  `getToken` endpoint that Midea has disabled), the only local copy of the
+  credentials was gone. A second `--reconfigure` compounded it: the unconditional
+  `cp -p devices.json devices.json.bak` overwrote the still-good backup with the
+  now-empty file — defeating the very guarantee `midea_refresh_tokens.update_device`
+  exists to provide (overwrite stored values *only* after a verified refresh).
+  Two changes close it: onboarding now **carries over an existing `token`/`key`
+  per device id** instead of blanking it (a stale carried value is harmless — both
+  `connect_and_refresh` and `update_device` verify before use; a non-default
+  `port` is carried over the same way — only a valid 1..65535 value — so the
+  installer no longer resets a deliberately configured port), and the
+  pre-reconfigure backup **never replaces a token-bearing `devices.json.bak` with a
+  credential-less `devices.json`** (a visible notice is printed when it is skipped).
+  New regression tests cover the id carry-over, the no-false-carry case, the backup
+  guard, and the full two-run loss sequence.
 - **A fresh-eyes review of the still-unreleased catch-up hardened it before
   release.** Four things it turned up, all fixed here:
   - the **test suite wrote a real `refresh_state.json` into the module directory**.
