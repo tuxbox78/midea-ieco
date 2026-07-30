@@ -46,6 +46,12 @@ from midea_i18n import (install_excepthook_redaction, install_log_redaction,
 # es gibt genau eine Fassung, gegen die dieses Projekt nachgemessen hat, und
 # zwei Konstanten mit demselben Zweck laufen frueher oder spaeter auseinander.
 from midea_conn import PINNED_MSMART_VERSION, close_connection
+# Property-only iECO-Write fuer den Fall, dass NICHT eingeschaltet werden muss
+# (Anlage laeuft, nur iECO nachziehen): sendet ausschliesslich die iECO-Property,
+# kein Zustandsbefehl - power/temp/mode koennen so gar nicht geclobbert werden.
+# An echter Hardware belegt (beide Anlagen: Write angenommen, power/mode/target
+# unveraendert); faellt bei fehlendem Pfad auf apply() zurueck (siehe midea_apply).
+from midea_apply import apply_ieco_only
 
 if TYPE_CHECKING:
     # Nur fuer Typpruefer: der echte Import passiert lazy in
@@ -772,7 +778,17 @@ async def ensure_ieco(dev_conf: dict, only_if_on: bool) -> bool:
 
             # result.prep is READY: frisch gelesen, validiert, scharfgeschaltet.
             try:
-                await device.apply()
+                # Muss NICHT eingeschaltet werden (Anlage laeuft, es ist nur iECO
+                # nachzuziehen)? Dann iECO als REINEN Property-Write senden -
+                # power/temp/mode sind physisch nicht im Frame und koennen nicht
+                # geclobbert werden (an beiden Anlagen on-device belegt). Liefert
+                # apply_ieco_only False (Pfad nicht verfuegbar), nehmen wir das
+                # volle apply() - durch den Reconcile ohnehin gegen den Clobber
+                # abgesichert. needs_power_on=True (Anlage war aus) braucht den
+                # Zustandsbefehl sowieso, um power zu setzen (kurzschluss: dann
+                # wird apply_ieco_only gar nicht erst gerufen).
+                if result.needs_power_on or not await apply_ieco_only(device):
+                    await device.apply()
                 applied = True
                 break
             except Exception as exc:

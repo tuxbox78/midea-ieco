@@ -316,6 +316,79 @@ class RetryHardeningTests(unittest.TestCase):
         self.assertEqual(d1.apply_calls, 0)
 
 
+class PropertyOnlyWiringTests(unittest.TestCase):
+    """needs_power_on steuert die Aktion im READY-Zweig: ein reiner iECO-
+    Property-Write, wenn die Anlage laeuft (nur iECO nachziehen), sonst das volle
+    apply() (das power setzen muss). Der property-only-Pfad ist on-device belegt
+    (tools/probe_ieco_property_only.py, beide Anlagen)."""
+
+    def _run(self, items, only_if_on, prop_only=True):
+        calls = []
+        seq = list(prop_only) if isinstance(prop_only, list) else None
+
+        async def _fake_prop_only(device):
+            calls.append(device)
+            result = seq.pop(0) if seq is not None else prop_only
+            if isinstance(result, BaseException):
+                raise result
+            return result
+
+        connect = _scripted_connect(items)
+        with ExitStack() as es:
+            es.enter_context(mock.patch.object(mie, "connect_and_refresh", connect))
+            es.enter_context(mock.patch.object(mie, "apply_ieco_only",
+                                               _fake_prop_only))
+            es.enter_context(mock.patch.object(mie.asyncio, "sleep", _anoop))
+            es.enter_context(redirect_stdout(io.StringIO()))
+            ok = asyncio.run(mie.ensure_ieco(
+                {"name": "X", "ip": "1", "id": "1"}, only_if_on=only_if_on))
+        return ok, calls
+
+    def test_running_unit_uses_property_only_not_full_apply(self):
+        # Anlage laeuft, nur iECO fehlt (needs_power_on=False) -> property-only,
+        # KEIN volles apply() (das power/temp/mode mitschicken wuerde).
+        d = FakeDevice(power_state=True, ieco=False)
+        d_verify = FakeDevice(power_state=True, ieco=True)
+        ok, prop_calls = self._run([d, d_verify], only_if_on=True)
+        self.assertTrue(ok)
+        self.assertEqual(len(prop_calls), 1)
+        self.assertEqual(d.apply_calls, 0)
+
+    def test_powering_on_uses_full_apply_not_property_only(self):
+        # Anlage aus, ohne --only-if-on einschalten (needs_power_on=True) ->
+        # volles apply(); apply_ieco_only wird gar nicht erst gerufen (es kann
+        # power nicht setzen).
+        d = FakeDevice(power_state=False, ieco=False)
+        d_verify = FakeDevice(power_state=True, ieco=True)
+        ok, prop_calls = self._run([d, d_verify], only_if_on=False)
+        self.assertTrue(ok)
+        self.assertEqual(prop_calls, [])
+        self.assertEqual(d.apply_calls, 1)
+
+    def test_property_path_unavailable_falls_back_to_full_apply(self):
+        # needs_power_on=False, aber apply_ieco_only meldet False (Pfad weg) ->
+        # Rueckfall auf das durch den Reconcile abgesicherte volle apply().
+        d = FakeDevice(power_state=True, ieco=False)
+        d_verify = FakeDevice(power_state=True, ieco=True)
+        ok, prop_calls = self._run([d, d_verify], only_if_on=True, prop_only=False)
+        self.assertTrue(ok)
+        self.assertEqual(len(prop_calls), 1)
+        self.assertEqual(d.apply_calls, 1)
+
+    def test_property_only_network_error_triggers_reconnect_and_retry(self):
+        # Ein Sendefehler aus dem property-only-Write wird wie ein
+        # fehlgeschlagenes apply() behandelt: schliessen, neu verbinden, neu
+        # validieren, erneut versuchen - nie ein Rueckfall auf ein volles apply().
+        d1 = FakeDevice(power_state=True, ieco=False)
+        d2 = FakeDevice(power_state=True, ieco=False)
+        d_verify = FakeDevice(power_state=True, ieco=True)
+        ok, prop_calls = self._run([d1, d2, d_verify], only_if_on=True,
+                                   prop_only=[OSError("boom"), True])
+        self.assertTrue(ok)
+        self.assertEqual(len(prop_calls), 2)
+        self.assertEqual([d1.apply_calls, d2.apply_calls], [0, 0])
+
+
 class EmptyAllTests(unittest.TestCase):
     """C3: 'all' auf leerer devices.json meldet klar Exit 1 statt still 'OK'."""
 
