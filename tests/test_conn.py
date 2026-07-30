@@ -611,7 +611,8 @@ class ToolsBootstrapTests(unittest.TestCase):
     SYNTAX. Ein Import, der zur Laufzeit nicht aufloest, faellt dort nicht auf -
     und diese Werkzeuge haben sonst keine Tests."""
 
-    TOOLS = ("probe_ieco_current_mode.py", "probe_ieco_modes.py")
+    TOOLS = ("probe_ieco_current_mode.py", "probe_ieco_modes.py",
+             "probe_ieco_property_only.py")
 
     def test_every_tool_is_covered_here(self):
         # Kommt ein Werkzeug dazu, soll diese Liste auffallen und nicht
