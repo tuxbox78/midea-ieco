@@ -6,6 +6,32 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-30
+
+This release resolves three field-reported issues (#2, #3, #4) and adds the
+safety rails the credential-free workflow was still missing. Headline changes:
+
+- **Bilingual tools, English by default** (#2) — every user-facing string, the
+  `--help` output and the offline overview now speak English or German
+  (`MIDEA_IECO_LANG` > `LC_ALL` > `LC_MESSAGES` > `LANG`). **German cron users:**
+  scheduled runs now log in English unless you add `MIDEA_IECO_LANG=de` to your
+  crontab.
+- **iECO now respects the operating mode** (#3) — instead of silently failing in a
+  mode that cannot carry iECO (Auto/Dry/Fan), the tool names the mode and, under
+  `--only-if-on`, treats it as normal rather than a fault. Measured across all five
+  modes on a real PortaSplit 2060008E.
+- **`@reboot` catch-up token refresh** (#4) — `--only-if-due` makes a boot-time
+  refresh safe to schedule, so a host that was off at the weekly slot still renews
+  its tokens without hammering the units.
+- **Safer control path** — reconcile-on-every-retry so `--only-if-on` can never
+  power a unit off; an isolated iECO-only property write (`midea_apply.py`); device
+  tokens and keys redacted from log files; a hand-typed `id`/`port` no longer aborts
+  a whole `--all` run.
+- **Readable logs** — stdout is line-buffered, so cron logs keep cause and effect
+  in the right order.
+
+The detailed record follows.
+
 ### Added
 - **`midea_refresh_tokens.py --only-if-due`: a token refresh that may run at every
   start without running against the units every time.** The weekly cron job
@@ -1205,6 +1231,7 @@ First public release.
 - The manual cron log-rotation example truncates `refresh.log` as well as
   `ieco.log`, matching the installer-generated job.
 
-[Unreleased]: https://github.com/tuxbox78/midea-ieco/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/tuxbox78/midea-ieco/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/tuxbox78/midea-ieco/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/tuxbox78/midea-ieco/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/tuxbox78/midea-ieco/releases/tag/v0.1.0
