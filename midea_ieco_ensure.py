@@ -25,6 +25,7 @@ import argparse
 import asyncio
 import enum
 import json
+import random
 import sys
 import logging
 from pathlib import Path
@@ -67,6 +68,18 @@ CONFIG_PATH = Path(__file__).parent / "devices.json"
 CONNECT_RETRIES = 3
 ACTION_RETRIES = 3
 RETRY_DELAY = 3.0
+
+# Additiver Jitter auf RETRY_DELAY: der tatsaechliche Nachlauf zwischen zwei
+# Verbindungsversuchen ist RETRY_DELAY + rand[0, RETRY_JITTER]. BEWUSST NUR
+# additiv (nie unter RETRY_DELAY): die Untergrenze ist die Ruhe, die eine Anlage
+# mit nur EINER lokalen Verbindung zwischen zwei Sitzungen braucht - der Jitter
+# darf sie strecken, nie unterschreiten. Zweck ist die Entzerrung, wenn im
+# 'all'-Lauf mehrere Geraete gleichzeitig ausfallen (sonst schlafen alle exakt
+# RETRY_DELAY und treffen die Wiederverbindung im Gleichtakt) sowie ueber
+# Cron-Zyklen hinweg (Best Practice: "always use jitter"). Als Konstante, damit
+# sich der Nachlauf - wie SETTLE_DELAY/DEVICE_DELAY - gegen sein Band pruefen
+# laesst.
+RETRY_JITTER = 1.0
 
 # Nachlauf zwischen apply() und der Verifikation. Das Geraet uebernimmt den
 # gesetzten Zustand nicht sofort; wird zu frueh nachgelesen, meldet es noch den
@@ -530,6 +543,14 @@ def prime_ieco_property(device: "AC") -> bool:
     return bool(getattr(device, "supports_ieco", False))
 
 
+def _retry_delay() -> float:
+    """Nachlauf zwischen zwei Verbindungsversuchen: RETRY_DELAY plus additiver
+    Jitter (siehe RETRY_JITTER). Als eigene Funktion, damit beide Retry-Stellen
+    exakt dieselbe Berechnung nutzen und Tests den Wert gegen sein Band pruefen
+    koennen."""
+    return RETRY_DELAY + random.uniform(0.0, RETRY_JITTER)
+
+
 async def connect_and_refresh(dev_conf: dict, retries: int = CONNECT_RETRIES,
                               prime_ieco: bool = False) -> AC:
     """Verbindet, authentifiziert und liest den Live-Status.
@@ -587,7 +608,7 @@ async def connect_and_refresh(dev_conf: dict, retries: int = CONNECT_RETRIES,
             print(t("conn_attempt_failed", name, attempt, retries,
                     type(exc).__name__, exc))
             if attempt < retries:
-                await asyncio.sleep(RETRY_DELAY)
+                await asyncio.sleep(_retry_delay())
     raise RuntimeError(t("conn_gave_up", name, retries)) from last_exc
 
 
@@ -763,7 +784,7 @@ async def ensure_ieco(dev_conf: dict, only_if_on: bool) -> bool:
                     # warten. So liegt die Pause zwischen den Sitzungen und
                     # nicht innerhalb einer noch offenen.
                     close_connection(device)
-                    await asyncio.sleep(RETRY_DELAY)
+                    await asyncio.sleep(_retry_delay())
                     # Fuer den naechsten Versuch eine FRISCHE Verbindung
                     # aufbauen (ein fehlgeschlagener Versuch kann das AC-Objekt
                     # mit defektem Socket-Zustand hinterlassen). Scheitert schon

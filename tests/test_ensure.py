@@ -1299,6 +1299,13 @@ class ConnectPacingOrderTests(unittest.TestCase):
                 raise RuntimeError("nope")
 
         async def _sleep(seconds):
+            # RETRY_DELAY ist jetzt jitterbehaftet; fuer den REIHENFOLGE-
+            # Vergleich auf den Nennwert normalisieren, solange der Wert im
+            # erwarteten Band liegt. Ein Wert AUSSERHALB des Bandes bleibt roh
+            # und laesst die Zusicherung scheitern (faengt einen kaputten
+            # _retry_delay ab).
+            if mie.RETRY_DELAY <= seconds <= mie.RETRY_DELAY + mie.RETRY_JITTER:
+                seconds = mie.RETRY_DELAY
             events.append(f"pause {seconds}")
 
         with ExitStack() as es:
@@ -1796,6 +1803,19 @@ class PacingBoundsTests(unittest.TestCase):
     def test_retry_delay_is_long_enough_to_decompress(self):
         self.assertGreaterEqual(mie.RETRY_DELAY, 2.0)
 
+    def test_retry_delay_jitter_stays_in_band_and_never_below_the_floor(self):
+        # _retry_delay() = RETRY_DELAY + rand[0, RETRY_JITTER]. Der Jitter ist
+        # BEWUSST nur additiv: nie unter RETRY_DELAY (die Untergrenze ist die
+        # Ruhe, die die Ein-Verbindungs-Anlage zwischen Sitzungen braucht), nie
+        # ueber RETRY_DELAY + RETRY_JITTER. Oft genug ziehen, damit ein falsches
+        # Vorzeichen oder ein zu breites Band auffiele.
+        self.assertGreater(mie.RETRY_JITTER, 0.0)
+        lo, hi = mie.RETRY_DELAY, mie.RETRY_DELAY + mie.RETRY_JITTER
+        values = [mie._retry_delay() for _ in range(2000)]
+        self.assertTrue(all(lo <= v <= hi for v in values))
+        # Es MUSS tatsaechlich gejittert werden (nicht konstant RETRY_DELAY).
+        self.assertGreater(max(values), lo)
+
     def test_settle_and_device_delays_are_long_enough_to_matter(self):
         # Untergrenzen wie bei RETRY_DELAY: unterhalb eines Sekundenbruchteils
         # entzerrt nichts mehr, und der Wert waere nur noch Dekoration. Die
@@ -1860,6 +1880,11 @@ class PacingOrderTests(unittest.TestCase):
             return item
 
         async def _sleep(seconds):
+            # RETRY_DELAY ist jetzt jitterbehaftet; fuer den Reihenfolge-
+            # Vergleich auf den Nennwert normalisieren, solange im Band.
+            # SETTLE_DELAY/DEVICE_DELAY sind ungejittert und bleiben exakt.
+            if mie.RETRY_DELAY <= seconds <= mie.RETRY_DELAY + mie.RETRY_JITTER:
+                seconds = mie.RETRY_DELAY
             events.append(f"sleep {seconds}")
 
         with ExitStack() as es:
