@@ -36,15 +36,30 @@ import midea_ieco_ensure as mie  # noqa: E402
 # Ausfuehrenden: auf einem deutschen Entwicklerrechner waeren sie gruen, im
 # (locale-losen) CI rot. Die deutsche Fassung prueft GermanOutputTests gezielt.
 _LANG_PATCHER = None
+_APPLY_IECO_ONLY_PATCHER = None
 
 
 def setUpModule():
-    global _LANG_PATCHER
+    global _LANG_PATCHER, _APPLY_IECO_ONLY_PATCHER
     _LANG_PATCHER = mock.patch.dict(os.environ, {"MIDEA_IECO_LANG": "en"})
     _LANG_PATCHER.start()
+    # Modul-Default: der property-only-Pfad gilt als 'nicht verfuegbar', sodass
+    # der READY-Zweig von ensure_ieco den apply()-Pfad nimmt. Sonst liefe der
+    # ECHTE apply_ieco_only in jedem needs_power_on=False-Test gegen die (bewusst
+    # aermeren) Fakes OHNE die private msmart-Kette und schriebe bei jedem
+    # gruenen Lauf eine Produktionswarnung nach stderr - genau das Anti-Muster,
+    # das dieses Projekt an anderer Stelle ausdruecklich verbietet. Die ECHTE
+    # Aktionswahl (property-only vs apply) pruefen PropertyOnlyWiringTests (die
+    # diesen Patch in ihrem eigenen Kontext ueberschreiben); apply_ieco_only
+    # selbst deckt tests/test_apply.py ab (Unit + Vertrag gegen echtes msmart).
+    _APPLY_IECO_ONLY_PATCHER = mock.patch.object(
+        mie, "apply_ieco_only", _prop_only_unavailable)
+    _APPLY_IECO_ONLY_PATCHER.start()
 
 
 def tearDownModule():
+    if _APPLY_IECO_ONLY_PATCHER is not None:
+        _APPLY_IECO_ONLY_PATCHER.stop()
     if _LANG_PATCHER is not None:
         _LANG_PATCHER.stop()
 
@@ -216,6 +231,16 @@ def _scripted_connect(items):
 
 async def _anoop(*args, **kwargs):
     return None
+
+
+async def _prop_only_unavailable(device):
+    """apply_ieco_only-Attrappe fuer Tests, die NICHT die Aktionswahl pruefen:
+    meldet den property-only-Pfad als nicht verfuegbar, sodass der READY-Zweig den
+    apply()-Pfad nimmt (um den es dort geht). Bewusst OHNE die stderr-Warnung des
+    echten Moduls - der liefe hier gegen ein bewusst aermeres FakeDevice ohne die
+    private msmart-Kette und schriebe bei jedem gruenen Lauf eine Produktions-
+    meldung heraus. Die Aktionswahl selbst deckt PropertyOnlyWiringTests ab."""
+    return False
 
 
 class RetryHardeningTests(unittest.TestCase):

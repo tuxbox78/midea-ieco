@@ -47,9 +47,13 @@ WARUM EIN RUECKGABEWERT
             dann auf ``device.apply()`` zurueck (der durch den Reconcile in
             ensure_ieco gegen den Clobber abgesichert ist - der Rueckfall kann
             den Fehler also nicht wieder oeffnen).
-Netz-/Protokollfehler aus dem Write selbst werden NICHT geschluckt, sondern
-durchgereicht: der Aufrufer behandelt sie wie einen fehlgeschlagenen ``apply()``
-(schliessen, neu verbinden, neu validieren, wiederholen).
+Aus dem Write selbst schluckt ``apply_ieco_only`` NICHTS zusaetzlich - Ausnahmen
+verhalten sich exakt wie bei ``apply()``: msmart faengt die HAEUFIGEN Netzfehler
+(``ProtocolError``/``TimeoutError``) bereits in ``Device._send_command`` ab, sie
+kommen also nicht nach oben (das Objekt liest dann ``_online=False``, wie nach
+einem stummen ``apply()``); nur die SELTENEN ungefangenen Ausnahmen propagieren
+in die Retry-Schleife. Den Fall "gesendet, aber nicht uebernommen" faengt - wie
+bei ``apply()`` - die Verifikationsrunde in ensure_ieco ab.
 
 TODO: entfaellt, sobald msmart-ng einen oeffentlichen Weg bietet, eine einzelne
 Property ohne vorangehenden Zustandsbefehl zu setzen. Der Vertragstest fordert
@@ -118,9 +122,11 @@ async def apply_ieco_only(device: "AC") -> bool:
                 der Aufrufer faellt dann auf apply() zurueck.
 
     Wirft NICHT aus dem Aufloesen der Kette (das wuerde in der Retry-Schleife als
-    Verbindungsfehler fehlgedeutet). Ein Netz-/Protokollfehler aus dem Write
-    selbst wird dagegen bewusst DURCHGEREICHT - der Aufrufer behandelt ihn wie
-    einen fehlgeschlagenen apply()."""
+    Verbindungsfehler fehlgedeutet). Aus dem Write selbst schluckt diese Funktion
+    NICHTS zusaetzlich - Ausnahmen verhalten sich wie bei apply(): msmart faengt
+    ProtocolError/TimeoutError schon in _send_command ab (kommen also nicht nach
+    oben), nur die seltenen ungefangenen Ausnahmen propagieren in die
+    Retry-Schleife."""
     apply_props = getattr(device, "_apply_properties", None)
     prop_map = getattr(device, "_PROPERTY_MAP", None)
     updated = getattr(device, "_updated_properties", None)
