@@ -141,6 +141,12 @@ class FakeDevice:
         #: Aufrufform pinnen koennen (merge=True ist tragend).
         self.override_args = None
         self.apply_calls = 0
+        #: power_state, den JEDER apply()-Aufruf uebertragen wuerde (das echte
+        #: apply() serialisiert self._power_state in den SetStateCommand und
+        #: sendet ihn, BEVOR es aus der Antwortverarbeitung werfen koennte).
+        #: Damit laesst sich zusichern, dass nie ein power_state=False an eine
+        #: als eingeschaltet bekannte Anlage geht - der Kern des Reconnect-Bugs.
+        self.applied_power_states = []
         self.caps_calls = 0
         self.refresh_calls = 0
         self.close_calls = 0
@@ -174,6 +180,10 @@ class FakeDevice:
 
     async def apply(self):
         self.apply_calls += 1
+        # VOR der moeglichen Ausnahme aufzeichnen: das echte apply() sendet den
+        # SetStateCommand und wirft erst danach (aus der Antwortverarbeitung) -
+        # der Schreibvorgang ist dann bereits auf der Leitung.
+        self.applied_power_states.append(self.power_state)
         if self._apply_raises is not None:
             raise self._apply_raises
 
@@ -256,6 +266,54 @@ class RetryHardeningTests(unittest.TestCase):
         d = FakeDevice(online=True, power_state=False, ieco=False)
         self.assertTrue(self._run([d], only_if_on=True))
         self.assertEqual((d.caps_calls, d.apply_calls), (0, 0))
+
+    def test_only_if_on_reconnect_never_powers_off(self):
+        """Reconnect im apply-Retry darf eine LAUFENDE Anlage nicht ausschalten.
+
+        Aufbau: d_init laeuft (power_state=True), iECO fehlt; der erste apply()
+        wirft. Das Reconnect-Objekt d1 modelliert 'authenticate ok, aber
+        refresh() hat den Zustand NICHT gefuellt': power_state steht auf dem
+        __init__-Default False, online ist aber True (msmart setzt _online aus
+        ROHEN Frames, device.py:573 - ein unparsebares Frame gilt als online,
+        waehrend jedes Zustandsfeld auf dem Default bleibt).
+
+        Unter --only-if-on darf daraufhin KEIN apply() auf d1 laufen: sonst
+        ginge der Default power_on=False an die eingeschaltete Anlage und
+        schaltete sie aus - genau der Schaden, gegen den --only-if-on antritt.
+        Erwartung: der Lauf stuft d1 (is_on aus dem frischen Read = False) als
+        'aus' ein und bricht ohne Aktion ab (True), OHNE d1.apply() zu rufen."""
+        d_init = FakeDevice(power_state=True, ieco=False,
+                            apply_raises=RuntimeError("f1"))
+        d1 = FakeDevice(online=True, power_state=False, ieco=False)
+        d_verify = FakeDevice(online=True, power_state=True, ieco=True)
+        self._run([d_init, d1, d_verify], only_if_on=True)
+        # Kernzusicherung: das Reconnect-Objekt wird NICHT angewandt ...
+        self.assertEqual(d1.apply_calls, 0)
+        # ... und damit geht auch nie ein power_state=False an die Anlage.
+        self.assertNotIn(False, d1.applied_power_states)
+
+    def test_reconnect_already_desired_no_reapply(self):
+        """Ist der erste apply() doch angekommen (oder aenderte sich der
+        Zustand) und liest der Reconnect bereits 'an + iECO aktiv', erkennt die
+        Neuvalidierung den Sollzustand und meldet Erfolg OHNE weiteres apply() -
+        loest die 'ist der Write angekommen?'-Mehrdeutigkeit durch erneutes Lesen
+        (RPC at-most-once), statt blind erneut zu schreiben."""
+        d_init = FakeDevice(power_state=True, ieco=False,
+                            apply_raises=RuntimeError("f1"))
+        d1 = FakeDevice(online=True, power_state=True, ieco=True)
+        self.assertTrue(self._run([d_init, d1], only_if_on=True))
+        self.assertEqual(d1.apply_calls, 0)
+
+    def test_reconnect_no_ieco_capability_fails_closed(self):
+        """Liefert der Reconnect ein Objekt, das (z.B. nach verlorenem
+        caps-Read) keine iECO-Faehigkeit meldet, wird fail-closed abgebrochen
+        statt ein apply() mit Default-Zustand zu senden."""
+        d_init = FakeDevice(power_state=True, ieco=False,
+                            apply_raises=RuntimeError("f1"))
+        d1 = FakeDevice(online=True, power_state=True, ieco=False,
+                        supports_ieco=False)
+        self.assertFalse(self._run([d_init, d1], only_if_on=True))
+        self.assertEqual(d1.apply_calls, 0)
 
 
 class EmptyAllTests(unittest.TestCase):

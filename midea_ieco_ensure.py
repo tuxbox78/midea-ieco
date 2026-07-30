@@ -23,11 +23,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import enum
 import json
 import sys
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 # Sprachwahl: gemeinsame Mechanik fuer beide Werkzeuge (Reihenfolge und
 # englischer Default sind dort dokumentiert). resolve_lang wird mitimportiert,
@@ -590,6 +591,141 @@ async def connect_and_refresh(dev_conf: dict, retries: int = CONNECT_RETRIES,
     raise RuntimeError(t("conn_gave_up", name, retries)) from last_exc
 
 
+class _Prep(enum.Enum):
+    """Ausgang von _validate_and_arm."""
+    READY = "ready"          # Geraet validiert + scharfgeschaltet -> apply()
+    DONE_OK = "done_ok"      # terminaler Erfolg, Meldung gedruckt -> True
+    DONE_FAIL = "done_fail"  # terminaler Fehlschlag, Meldung gedruckt -> False
+
+
+class _ArmResult(NamedTuple):
+    prep: _Prep
+    #: Nur bei READY aussagekraeftig: True, wenn zum Erreichen des Sollzustands
+    #: EINGESCHALTET werden muss (Geraet war aus). Steuert spaeter die Wahl
+    #: zwischen vollem apply() (muss power setzen) und einem reinen iECO-
+    #: Property-Write (power/temp/mode bleiben unangetastet).
+    needs_power_on: bool = False
+
+
+async def _validate_and_arm(device: "AC", only_if_on: bool,
+                            name: str) -> _ArmResult:
+    """Prueft ein frisch verbundenes Geraet und schaltet es fuer apply() scharf.
+
+    DIESELBE Sequenz laeuft beim Erstversuch UND bei jedem Reconnect im
+    apply-Retry. Damit kann der Wiederholpfad nie einen ungeprueften (womoeglich
+    auf __init__-Defaults stehenden) Zustand anwenden - der Kern der Reparatur:
+    'auf jedem Versuch frisch lesen und neu validieren' statt eines abgespeckten
+    Re-Arms (Muster reconcile / RetryOnConflict: refetch-on-retry).
+
+    Alle Geraetemeldungen werden HIER gedruckt; der Aufrufer wertet nur den
+    _Prep-Wert aus (kein Doppeldruck). Bei READY werden device.power_state und
+    device.ieco mutiert. Wirft nicht ausser bei einem Dekodierfehler in
+    get_capabilities()/refresh(), der - wie zuvor an der Aufrufstelle - als
+    DONE_FAIL abgefangen wird."""
+    if not device.online:
+        print(t("dev_not_online", name))
+        return _ArmResult(_Prep.DONE_FAIL)
+
+    is_on = device.power_state
+
+    # Fruehzeitiger Ausstieg VOR jeder teuren Capability-Abfrage:
+    # Ist das Geraet aus und duerfen wir es per --only-if-on nicht
+    # einschalten, ist alles gesagt. power_state kommt aus refresh() und ist
+    # ohne get_capabilities() korrekt; der ieco-Zustand spielt hier keine
+    # Rolle - also kein get_capabilities(), kein apply(), keine Netzwerklast.
+    if only_if_on and not is_on:
+        print(t("dev_off_only_if_on", name))
+        return _ArmResult(_Prep.DONE_OK)
+
+    # Ab hier brauchen wir den ECHTEN ieco-Zustand (fuer die Statusanzeige,
+    # den 'schon aktiv'-Kurzschluss und spaeter die Verifikation). refresh()
+    # pollt die IECO-Property aber nur nach get_capabilities() (das
+    # _supported_properties befuellt) - sonst liest device.ieco immer den
+    # Default False. Also Capabilities abfragen und danach erneut refreshen.
+    try:
+        await device.get_capabilities()
+        # Der Erfolg der Capability-Abfrage MUSS hier festgehalten werden,
+        # vor dem refresh(): msmart-ng setzt _online pro Kommando-Batch neu
+        # (device.py:573), das folgende refresh() ueberschreibt also ein
+        # False der Capability-Runde wieder mit True. Danach ist nicht mehr
+        # feststellbar, ob die Abfrage jemals beantwortet wurde.
+        #
+        # Der except-Block darunter faengt diesen Fall NICHT: bei
+        # Paketverlust wirft get_capabilities() nicht, es loggt "Failed to
+        # query capabilities" und kehrt zurueck (device.py:602-611). Er
+        # bleibt trotzdem noetig - er deckt Dekodierfehler ab, die msmart
+        # nicht abfaengt (nachgemessen: ein pruefsummen- und CRC-gueltiges,
+        # aber zu kurzes Capabilities-Frame ergibt einen IndexError).
+        caps_answered = device.online
+        await device.refresh()
+    except Exception as exc:
+        print(t("dev_caps_failed", name, type(exc).__name__, exc))
+        return _ArmResult(_Prep.DONE_FAIL)
+
+    # Dieser eine Fall MUSS vor der Statuszeile abbiegen: ohne verwertbare
+    # Capability-Antwort ist device.ieco der Default eines frischen Objekts
+    # (Capability.DEFAULT enthaelt IECO nicht, device.py:149-154), und die
+    # Statuszeile meldete einen Wert, den die Anlage nie genannt hat -
+    # ausgerechnet in der Zeile direkt ueber der Fehlermeldung.
+    #
+    # Alle ANDEREN Faelle bekommen die Statuszeile: meldet die Anlage
+    # schlicht kein iECO, sind power/mode/eco gemessene Werte und als
+    # Diagnose wertvoll - und ihr ieco=False ist dann kein Platzhalter,
+    # sondern die zutreffende Aussage ueber ein Geraet ohne diese Faehigkeit.
+    if not device.supports_ieco and not caps_answered:
+        print(t("dev_caps_no_answer", name))
+        return _ArmResult(_Prep.DONE_FAIL)
+
+    print(t("dev_status_before", name, is_on,
+            _mode_label(device.operational_mode), device.ieco, device.eco))
+
+    if not device.supports_ieco:
+        # Die Anlage HAT geantwortet und iECO nicht gemeldet - erst jetzt
+        # ist die Aussage ueber ihre Faehigkeiten gedeckt.
+        print(t("dev_no_ieco_capability", name))
+        return _ArmResult(_Prep.DONE_FAIL)
+
+    # Kurzschluss BEWUSST vor dem Modus-Guard: laeuft iECO bereits, ist alles
+    # gut - unabhaengig davon, was wir ueber den Modus annehmen. So kann eine
+    # zu enge Modus-Liste niemals einen tatsaechlich funktionierenden Zustand
+    # als Problem melden.
+    if is_on and device.ieco:
+        print(t("dev_already_desired", name))
+        return _ArmResult(_Prep.DONE_OK)
+
+    # Modus-Guard: iECO ist an den Betriebsmodus gebunden (siehe
+    # IECO_CAPABLE_MODE_VALUES). In einem nicht tragenden Modus nimmt das
+    # Geraet den Befehl zwar an, verwirft ihn aber still - ein apply() samt
+    # Verifikations-Roundtrip waere garantiert vergeblich. Frueher lief das
+    # in die generische Meldung "iECO ist laut Geraet weiterhin deaktiviert",
+    # die den Grund nicht nannte (gemeldet als Issue #3).
+    mode_value = _mode_value(device.operational_mode)
+    if mode_value is not None and mode_value not in IECO_CAPABLE_MODE_VALUES:
+        mode_text = _mode_label(device.operational_mode)
+        print(t("dev_mode_unsupported", name, mode_text,
+                t("mode_names_capable")))
+        if only_if_on:
+            # Ein bewusst gewaehlter Modus ist kein Fehlerzustand. Im
+            # 20-Minuten-Cron wuerde ein Fehlschlag hier taeglich 72 Meldungen
+            # und Exit 2 erzeugen - konsistent zum ausgeschalteten Geraet wird
+            # das deshalb als "nichts zu tun" gewertet.
+            print(t("dev_mode_only_if_on", name))
+            return _ArmResult(_Prep.DONE_OK)
+        # Beim ausdruecklichen Aufruf wollte der Nutzer iECO. Nichts schalten
+        # (auch nicht einschalten - eine halbe Aktion ohne iECO waere nicht das
+        # Gewuenschte), aber klar sagen, was zu tun ist, und den Lauf als
+        # nicht erfolgreich werten.
+        print(t("dev_mode_nothing_switched", name, t("mode_names_capable")))
+        return _ArmResult(_Prep.DONE_FAIL)
+
+    was_off = not is_on
+    if was_off:
+        device.power_state = True
+    if not device.ieco:
+        device.ieco = True
+    return _ArmResult(_Prep.READY, needs_power_on=was_off)
+
+
 async def ensure_ieco(dev_conf: dict, only_if_on: bool) -> bool:
     name = dev_conf["name"]
 
@@ -600,111 +736,20 @@ async def ensure_ieco(dev_conf: dict, only_if_on: bool) -> bool:
         return False
 
     try:
-        if not device.online:
-            print(t("dev_not_online", name))
-            return False
-
-        is_on = device.power_state
-
-        # Fruehzeitiger Ausstieg VOR jeder teuren Capability-Abfrage:
-        # Ist das Geraet aus und duerfen wir es per --only-if-on nicht
-        # einschalten, ist alles gesagt. power_state kommt aus refresh() und ist
-        # ohne get_capabilities() korrekt; der ieco-Zustand spielt hier keine
-        # Rolle - also kein get_capabilities(), kein apply(), keine Netzwerklast.
-        if only_if_on and not is_on:
-            print(t("dev_off_only_if_on", name))
-            return True
-
-        # Ab hier brauchen wir den ECHTEN ieco-Zustand (fuer die Statusanzeige,
-        # den 'schon aktiv'-Kurzschluss und spaeter die Verifikation). refresh()
-        # pollt die IECO-Property aber nur nach get_capabilities() (das
-        # _supported_properties befuellt) - sonst liest device.ieco immer den
-        # Default False. Also Capabilities abfragen und danach erneut refreshen.
-        try:
-            await device.get_capabilities()
-            # Der Erfolg der Capability-Abfrage MUSS hier festgehalten werden,
-            # vor dem refresh(): msmart-ng setzt _online pro Kommando-Batch neu
-            # (device.py:573), das folgende refresh() ueberschreibt also ein
-            # False der Capability-Runde wieder mit True. Danach ist nicht mehr
-            # feststellbar, ob die Abfrage jemals beantwortet wurde.
-            #
-            # Der except-Block darunter faengt diesen Fall NICHT: bei
-            # Paketverlust wirft get_capabilities() nicht, es loggt "Failed to
-            # query capabilities" und kehrt zurueck (device.py:602-611). Er
-            # bleibt trotzdem noetig - er deckt Dekodierfehler ab, die msmart
-            # nicht abfaengt (nachgemessen: ein pruefsummen- und CRC-gueltiges,
-            # aber zu kurzes Capabilities-Frame ergibt einen IndexError).
-            caps_answered = device.online
-            await device.refresh()
-        except Exception as exc:
-            print(t("dev_caps_failed", name, type(exc).__name__, exc))
-            return False
-
-        # Dieser eine Fall MUSS vor der Statuszeile abbiegen: ohne verwertbare
-        # Capability-Antwort ist device.ieco der Default eines frischen Objekts
-        # (Capability.DEFAULT enthaelt IECO nicht, device.py:149-154), und die
-        # Statuszeile meldete einen Wert, den die Anlage nie genannt hat -
-        # ausgerechnet in der Zeile direkt ueber der Fehlermeldung.
-        #
-        # Alle ANDEREN Faelle bekommen die Statuszeile: meldet die Anlage
-        # schlicht kein iECO, sind power/mode/eco gemessene Werte und als
-        # Diagnose wertvoll - und ihr ieco=False ist dann kein Platzhalter,
-        # sondern die zutreffende Aussage ueber ein Geraet ohne diese Faehigkeit.
-        if not device.supports_ieco and not caps_answered:
-            print(t("dev_caps_no_answer", name))
-            return False
-
-        print(t("dev_status_before", name, is_on,
-                _mode_label(device.operational_mode), device.ieco, device.eco))
-
-        if not device.supports_ieco:
-            # Die Anlage HAT geantwortet und iECO nicht gemeldet - erst jetzt
-            # ist die Aussage ueber ihre Faehigkeiten gedeckt.
-            print(t("dev_no_ieco_capability", name))
-            return False
-
-        # Kurzschluss BEWUSST vor dem Modus-Guard: laeuft iECO bereits, ist alles
-        # gut - unabhaengig davon, was wir ueber den Modus annehmen. So kann eine
-        # zu enge Modus-Liste niemals einen tatsaechlich funktionierenden Zustand
-        # als Problem melden.
-        if is_on and device.ieco:
-            print(t("dev_already_desired", name))
-            return True
-
-        # Modus-Guard: iECO ist an den Betriebsmodus gebunden (siehe
-        # IECO_CAPABLE_MODE_VALUES). In einem nicht tragenden Modus nimmt das
-        # Geraet den Befehl zwar an, verwirft ihn aber still - ein apply() samt
-        # Verifikations-Roundtrip waere garantiert vergeblich. Frueher lief das
-        # in die generische Meldung "iECO ist laut Geraet weiterhin deaktiviert",
-        # die den Grund nicht nannte (gemeldet als Issue #3).
-        mode_value = _mode_value(device.operational_mode)
-        if mode_value is not None and mode_value not in IECO_CAPABLE_MODE_VALUES:
-            mode_text = _mode_label(device.operational_mode)
-            print(t("dev_mode_unsupported", name, mode_text,
-                    t("mode_names_capable")))
-            if only_if_on:
-                # Ein bewusst gewaehlter Modus ist kein Fehlerzustand. Im
-                # 20-Minuten-Cron wuerde ein Fehlschlag hier taeglich 72 Meldungen
-                # und Exit 2 erzeugen - konsistent zum ausgeschalteten Geraet wird
-                # das deshalb als "nichts zu tun" gewertet.
-                print(t("dev_mode_only_if_on", name))
-                return True
-            # Beim ausdruecklichen Aufruf wollte der Nutzer iECO. Nichts schalten
-            # (auch nicht einschalten - eine halbe Aktion ohne iECO waere nicht das
-            # Gewuenschte), aber klar sagen, was zu tun ist, und den Lauf als
-            # nicht erfolgreich werten.
-            print(t("dev_mode_nothing_switched", name, t("mode_names_capable")))
-            return False
-
-        was_off = not is_on
-        if was_off:
-            device.power_state = True
-        if not device.ieco:
-            device.ieco = True
-
+        result = await _validate_and_arm(device, only_if_on, name)
         applied = False
         last_exc = None
         for attempt in range(1, ACTION_RETRIES + 1):
+            # Terminale Ergebnisse der Validierung - egal ob Erstlauf oder
+            # Reconnect-Neuvalidierung; die Meldung ist in _validate_and_arm
+            # bereits gedruckt. DONE_OK heisst 'nichts (mehr) zu tun' (bereits
+            # im Sollzustand, oder unter --only-if-on aus).
+            if result.prep is _Prep.DONE_OK:
+                return True
+            if result.prep is _Prep.DONE_FAIL:
+                return False
+
+            # result.prep is READY: frisch gelesen, validiert, scharfgeschaltet.
             try:
                 await device.apply()
                 applied = True
@@ -722,25 +767,29 @@ async def ensure_ieco(dev_conf: dict, only_if_on: bool) -> bool:
                     # Fuer den naechsten Versuch eine FRISCHE Verbindung
                     # aufbauen (ein fehlgeschlagener Versuch kann das AC-Objekt
                     # mit defektem Socket-Zustand hinterlassen). Scheitert schon
-                    # der Reconnect, ist ein weiterer apply()-Versuch auf dem
-                    # toten Objekt zwecklos - das Retry-Budget steckt bereits in
-                    # connect_and_refresh (drei interne Versuche). Darum hier
-                    # sauber abbrechen, statt in die naechste Iteration auf einem
-                    # geschlossenen Objekt zu laufen. Es wird jede Exception
-                    # abgefangen (nicht nur RuntimeError), damit z.B. ein Timeout
-                    # in get_capabilities() nicht den gesamten 'all'-Lauf mit
-                    # einem Traceback beendet, sondern nur dieses eine Geraet.
+                    # der Reconnect selbst, ist ein weiterer Versuch zwecklos -
+                    # das Retry-Budget steckt bereits in connect_and_refresh
+                    # (drei interne Versuche); hier sauber abbrechen.
                     try:
                         device = await connect_and_refresh(dev_conf)
-                        await device.get_capabilities()
-                        if was_off:
-                            device.power_state = True
-                        device.ieco = True
                     except Exception as exc2:
                         last_exc = exc2
                         print(t("dev_reconnect_failed", name,
                                 type(exc2).__name__, exc2))
                         break
+                    # RECONCILE - der Kern der Reparatur: das FRISCHE Objekt
+                    # vollstaendig neu lesen, validieren und scharfschalten,
+                    # statt eines abgespeckten Re-Arms auf womoeglich
+                    # __init__-Defaults. So greift u.a. die --only-if-on-Aus-
+                    # Weiche auch nach einem Reconnect, dessen refresh() den
+                    # Zustand nicht gefuellt hat (dann is_on=False -> DONE_OK,
+                    # kein apply, kein power_on=False an eine laufende Anlage);
+                    # ein bereits gesetzter Zustand wird als 'schon erreicht'
+                    # erkannt statt blind erneut geschrieben. Ein Dekodierfehler
+                    # in get_capabilities()/refresh() kommt als DONE_FAIL zurueck
+                    # (kein Traceback), sodass ein Geraet den 'all'-Lauf nicht
+                    # abbricht.
+                    result = await _validate_and_arm(device, only_if_on, name)
 
         if not applied:
             print(t("dev_apply_failed", name, last_exc))
