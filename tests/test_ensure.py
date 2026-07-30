@@ -1165,6 +1165,20 @@ class DeviceConfigProblemTests(unittest.TestCase):
             self.assertIn("port", mie._device_config_problem(
                 {"name": "W", "ip": "1.2.3.4", "id": 1, "port": bad}))
 
+    def test_infinity_and_nan_id_and_port_flagged(self):
+        # Pythons json liest die blanken Literale Infinity/-Infinity/NaN klaglos
+        # ein. int(float('inf')) wirft OverflowError (KEIN Subtyp von ValueError),
+        # int(float('nan')) wirft ValueError. Der ungefangene OverflowError riss
+        # die Vorab-Pruefung - und damit den ganzen ensure-Lauf - ab, statt das
+        # Geraet sauber als fehlerhaft zu melden. Hier ist auch die id betroffen,
+        # weil sie den Rohwert per int(d["id"]) prueft (nicht stringifiziert wie im
+        # Schwestermodul midea_refresh_tokens.py).
+        for bad in (float("inf"), float("-inf"), float("nan")):
+            self.assertIn("numeric", mie._device_config_problem(
+                {"name": "W", "ip": "1.2.3.4", "id": bad}))
+            self.assertIn("port", mie._device_config_problem(
+                {"name": "W", "ip": "1.2.3.4", "id": 1, "port": bad}))
+
 
 class _RecordingAC:
     """Aufzeichnendes Ersatz-Geraet fuer connect_and_refresh (siehe dortigen

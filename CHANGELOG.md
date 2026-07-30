@@ -90,6 +90,38 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   assertion noticing.
 
 ### Fixed
+- **A single hand-typed `id`/`port` no longer aborts the whole
+  `midea_refresh_tokens.py --all` run and discards the other devices' freshly
+  refreshed tokens.** `update_device` read the device id and port with a bare
+  `int()` (`int(device_id_str)` and `int(dev_conf.get("port", 6444))`), outside any
+  guard. A non-numeric value — a 15-digit id mistyped `o`-for-`0`, or a `null`/typo'd
+  port — therefore raised an **uncaught** `ValueError`/`TypeError`. Because
+  `save_config` runs only *after* the whole device loop, that exception at device *N*
+  threw away everything already refreshed in memory for devices *1…N-1* **and** never
+  reached the devices after *N*; the weekly cron logged a raw traceback and repeated
+  it every week until the typo was fixed by hand. (`"port": null` is especially
+  sneaky: `dict.get("port", 6444)` returns the default only when the key is *absent*,
+  not when it is present and `null`, so `int(None)` fired; and because Python's `json`
+  parses the bare literals `Infinity`/`-Infinity`, a hand-edited `"port": Infinity`
+  reaches `int(float('inf'))`, which raises `OverflowError`, not `ValueError`.) Both
+  conversions are now guarded — the port against `TypeError`, `ValueError` and
+  `OverflowError` — and a mistyped entry is reported per device and counts as a failed
+  device
+  (exit 2) — the run keeps going, refreshes and **saves** every other device, and
+  leaves the offending entry untouched. This mirrors the sister module
+  `midea_ieco_ensure.py`, whose `_device_config_problem` validates the same fields
+  before its own device loop — and which is hardened here too: its two `int()` checks
+  caught only `TypeError`/`ValueError`, so a hand-edited `"id"`/`"port": Infinity`
+  (which Python's `json` reads as `float('inf')`) raised the same uncaught
+  `OverflowError` and aborted the *ensure* run. Both tools now reject a non-numeric
+  id/port identically. (The refresh tool's variant deliberately still allows an
+  *empty* id, so discovery can fill it.) The candidate success line no longer claims
+  **"and saved"**
+  at a point where nothing has been written yet — the file is written once at the end,
+  and the closing "updated" line is the real confirmation. New tests cover a
+  non-numeric id, a `null` id, a `null` port, a typo'd port and an `Infinity` port each
+  returning a clean failure, plus an `--all` fleet where a malformed middle entry still
+  persists the good devices before *and* after it and exits 2.
 - **`install.sh --reconfigure` no longer discards working `token`/`key` values —
   and a second run can no longer destroy the only remaining backup.** Section 8
   rewrote `devices.json` with empty `token`/`key` for every device *before* the

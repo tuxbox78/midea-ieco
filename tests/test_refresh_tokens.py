@@ -2693,14 +2693,18 @@ class HostOverrideTests(_LangMixin):
 
 
 class UpdateDeviceFailureReturnsTests(_LangMixin):
-    """Die drei Fehlerpfade von update_device muessen False liefern.
+    """Die fuenf Fehlerpfade von update_device muessen False liefern.
 
     ExitCodeTests und SaveConfigIsCalledTests ersetzen update_device
     vollstaendig durch eine Attrappe: sie sichern die Abbildung des ERGEBNISSES
     auf den Exit-Code, nie dessen Zustandekommen. 'return False' -> 'return
-    True' ueberlebte hier deshalb an drei Stellen - der Cron-Lauf haette Erfolg
-    gemeldet, obwohl nichts erreicht wurde, und keine Ueberwachung der Welt
-    haette es bemerkt.
+    True' ueberlebte an den ersten drei Stellen (keine IP, Abruf gescheitert,
+    keine ID) deshalb unbemerkt - der Cron-Lauf haette Erfolg gemeldet, obwohl
+    nichts erreicht wurde, und keine Ueberwachung der Welt haette es bemerkt.
+    Die beiden weiteren (id/port nicht numerisch) fangen einen von Hand
+    vertippten Eintrag ab, der zuvor als ungefangener ValueError/TypeError den
+    GANZEN --all-Lauf abriss und die schon aufgefrischten Token der anderen
+    Geraete verwarf.
 
     Die benachbarten Fehlerpfade (alle Kandidaten gescheitert) sind laengst
     abgedeckt - das ist derselbe Zwillingsfall: was gerade bearbeitet wurde, ist
@@ -2758,6 +2762,61 @@ class UpdateDeviceFailureReturnsTests(_LangMixin):
         self.assertEqual(dev["id"], 789)  # id trotzdem aus discovery gefuellt
         self.assertNotIn("token", dev)    # aber Token/Key NICHT geschrieben
 
+    def test_non_numeric_id_is_a_failure(self):
+        # Von Hand vertippte 15-stellige id (Buchstabe o statt Null). Ohne Guard
+        # riss das als ungefangener ValueError den ganzen --all-Lauf ab; jetzt:
+        # sauberer Fehlschlag genau dieses Geraets, Wert sichtbar in der Meldung,
+        # nichts geschrieben. appliance_id=None -> die 'leere id fuellen'-
+        # Verzweigung wird uebersprungen, die vertippte id ueberlebt bis zum int().
+        dev = {"name": "S", "ip": "1.2.3.4", "id": "88888888o88881", "port": 6444}
+        result, out = self._update(
+            dev, fetch_candidate_credentials=lambda host: ([("k", "t")], None))
+        self.assertFalse(result)
+        self.assertIn("device id", out)
+        self.assertIn("88888888o88881", out)
+        self.assertNotIn("token", dev)
+
+    def test_null_id_is_a_failure(self):
+        # "id": null -> dev_conf.get("id") ist None; str(None)="None" ist nicht
+        # leer und umgeht damit den Leer-Guard, int("None") warf frueher ValueError.
+        dev = {"name": "S", "ip": "1.2.3.4", "id": None, "port": 6444}
+        result, out = self._update(
+            dev, fetch_candidate_credentials=lambda host: ([("k", "t")], None))
+        self.assertFalse(result)
+        self.assertIn("device id", out)
+        self.assertNotIn("token", dev)
+
+    def test_null_port_is_a_failure(self):
+        # "port": null -> .get("port", 6444) liefert None, NICHT den Default
+        # (der greift nur bei FEHLENDEM Schluessel); int(None) warf TypeError.
+        dev = {"name": "S", "ip": "1.2.3.4", "id": "123456789012345", "port": None}
+        result, out = self._update(
+            dev, fetch_candidate_credentials=lambda host: ([("k", "t")], None))
+        self.assertFalse(result)
+        self.assertIn("port", out.lower())
+        self.assertNotIn("token", dev)
+
+    def test_non_numeric_port_is_a_failure(self):
+        # Vertippter Port. int("64o4") -> ValueError, frueher ungefangen.
+        dev = {"name": "S", "ip": "1.2.3.4", "id": "123456789012345", "port": "64o4"}
+        result, out = self._update(
+            dev, fetch_candidate_credentials=lambda host: ([("k", "t")], None))
+        self.assertFalse(result)
+        self.assertIn("port", out.lower())
+        self.assertIn("64o4", out)
+
+    def test_infinity_port_is_a_failure(self):
+        # Pythons json liest das blanke Literal Infinity klaglos als float('inf')
+        # ein; int(float('inf')) wirft OverflowError - KEIN Subtyp von ValueError.
+        # Genau der entkam frueher dem Guard und riss den ganzen --all-Lauf ab.
+        dev = {"name": "S", "ip": "1.2.3.4", "id": "123456789012345",
+               "port": float("inf")}
+        result, out = self._update(
+            dev, fetch_candidate_credentials=lambda host: ([("k", "t")], None))
+        self.assertFalse(result)
+        self.assertIn("port", out.lower())
+        self.assertNotIn("token", dev)
+
 
 class ExitCodeFromTheRealUpdateTests(_ConfigPathMixin):
     """Exit-Code 2 EINMAL mit der echten update_device statt einer Attrappe.
@@ -2784,6 +2843,56 @@ class ExitCodeFromTheRealUpdateTests(_ConfigPathMixin):
             with self.assertRaises(SystemExit) as cm:
                 mrt.main()
         self.assertEqual(cm.exception.code, 2)
+
+
+class MalformedEntryDoesNotAbortTheFleetTests(_ConfigPathMixin):
+    """Ein von Hand vertippter id/port-Eintrag darf den --all-Lauf nicht
+    abreissen und nicht die schon aufgefrischten Token der ANDEREN Geraete
+    verwerfen.
+
+    Der Regressionskern: save_config laeuft erst NACH der Geraeteschleife. Riss
+    ein ungefangener ValueError/TypeError (int(id)/int(port)) die Schleife ab,
+    wurde save_config nie erreicht - die guten Geraete DAVOR verloren ihre schon
+    im Speicher stehenden frischen Token, die DANACH wurden nie versucht. Mit dem
+    Guard faellt nur das kaputte Geraet aus (Exit 2), die guten davor UND danach
+    werden gespeichert. Gegen den ungefixten Code endet dieser Test mit einem
+    rohen ValueError aus main() statt mit Exit 2 - genau die Asymmetrie, die er
+    absichert."""
+
+    def test_malformed_middle_entry_still_saves_the_others_and_exits_2(self):
+        self.path.write_text(json.dumps({"devices": [
+            {"name": "W", "ip": "1.1.1.1", "id": 1},
+            {"name": "S", "ip": "2.2.2.2", "id": "88o8"},   # vertippte id
+            {"name": "V", "ip": "3.3.3.3", "id": 3},
+        ]}), encoding="utf-8")
+        saved = {}
+
+        def _capture(cfg):
+            # Tiefe Kopie des Schreibstands zum Zeitpunkt des Aufrufs, damit eine
+            # spaetere Mutation die Zusicherung nicht verfaelschen kann.
+            saved["cfg"] = json.loads(json.dumps(cfg))
+
+        # verify wird nur fuer die beiden GUTEN Geraete aufgerufen (W, V) - das
+        # kaputte S bricht schon am id-Guard ab, bevor die Kandidatenschleife
+        # laeuft. Daher genau zwei Erfolgs-Tupel.
+        with mock.patch.dict(os.environ, {"MIDEA_IECO_LANG": "en"}), \
+                mock.patch.dict(sys.modules, {"msmart": mock.MagicMock()}), \
+                mock.patch.object(mrt, "fetch_candidate_credentials",
+                                  lambda host: ([("k", "t")], None)), \
+                mock.patch.object(mrt, "verify_credentials",
+                                  _fake_verify([(True, "", ""), (True, "", "")])), \
+                mock.patch.object(mrt, "save_config", _capture), \
+                mock.patch.object(mrt.time, "sleep", lambda s: None), \
+                mock.patch.object(mrt.sys, "argv", ["x", "--all"]), \
+                redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as cm:
+                mrt.main()
+        self.assertEqual(cm.exception.code, 2)           # kaputtes Geraet -> Exit 2
+        self.assertIn("cfg", saved)                      # save WURDE erreicht
+        devs = {d["name"]: d for d in saved["cfg"]["devices"]}
+        self.assertEqual(devs["W"].get("token"), "t")    # gutes Geraet VOR dem kaputten
+        self.assertEqual(devs["V"].get("token"), "t")    # gutes Geraet NACH dem kaputten
+        self.assertNotIn("token", devs["S"])             # kaputtes Geraet unberuehrt
 
 
 class ExitCodeTests(_ConfigPathMixin):

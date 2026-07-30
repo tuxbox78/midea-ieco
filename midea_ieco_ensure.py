@@ -907,24 +907,31 @@ def _device_config_problem(d: dict) -> str | None:
     AC(ip=..., device_id=int(dev_conf["id"]))) und das optionale port
     (int(dev_conf.get("port", 6444))). Ein fehlendes Pflichtfeld oder eine
     nicht-numerische id/port wuerde dort mit einem ungefangenen KeyError/
-    ValueError/TypeError den ganzen Lauf abbrechen. token/key werden hier bewusst
-    NICHT geprueft: fehlen sie, meldet der Verbindungsaufbau das ohnehin als
-    sauberen Fehlschlag (im try -> RuntimeError -> Exit 2)."""
+    ValueError/TypeError/OverflowError den ganzen Lauf abbrechen. token/key
+    werden hier bewusst NICHT geprueft: fehlen sie, meldet der Verbindungsaufbau
+    das ohnehin als sauberen Fehlschlag (im try -> RuntimeError -> Exit 2)."""
     for key in ("name", "ip", "id"):
         if key not in d:
             return t("cfgchk_missing_field", key)
+    # int() auf dem ROHwert: Liste/dict/None -> TypeError, "abc" -> ValueError,
+    # und weil Pythons json das blanke Literal Infinity/-Infinity klaglos als
+    # float('inf') einliest, Infinity -> OverflowError (KEIN Subtyp von
+    # ValueError). Alle drei muessen gefangen werden - sonst reisst genau der
+    # OverflowError diese Vorab-Pruefung (und damit den ganzen Lauf) ab, statt das
+    # Geraet sauber zu melden.
     try:
         int(d["id"])
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return t("cfgchk_id_not_numeric", repr(d["id"]))
     # port ist optional (Default 6444), wird aber - wenn vorhanden - ebenfalls
     # ausserhalb des try mit int() konvertiert; ein nicht-numerischer/leerer/
-    # None-Wert wuerde dort ungefangen abbrechen. Fehlt der Schluessel, greift
+    # None-Wert (TypeError/ValueError) oder ein Infinity (-> OverflowError, siehe
+    # id oben) wuerde dort ungefangen abbrechen. Fehlt der Schluessel, greift
     # der Default 6444 - dann gibt es nichts zu pruefen.
     if "port" in d:
         try:
             int(d["port"])
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return t("cfgchk_port_not_numeric", repr(d["port"]))
     return None
 

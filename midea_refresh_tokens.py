@@ -169,12 +169,34 @@ _MESSAGES: dict[str, tuple[str, str]] = {
         "by the device). Entry will NOT be saved.",
         "[%s] FEHLER: Keine Geraete-ID verfuegbar (weder in devices.json noch vom "
         "Geraet gemeldet). Eintrag wird NICHT gespeichert."),
+    # Ein von Hand in devices.json vertippter (o statt 0), als null oder (beim
+    # port) als Infinity eingetragener id/port-Wert. Ohne diese beiden Meldungen
+    # faellt er als ungefangener ValueError/TypeError/OverflowError durch und
+    # reisst den ganzen --all-Lauf ab (siehe die Guards in update_device). Der
+    # Rohwert steht per repr() sichtbar drin, damit die Fehlersuche den Schuldigen
+    # findet - symmetrisch zu cfgchk_id_not_numeric/cfgchk_port_not_numeric im
+    # Schwestermodul.
+    "dev_id_not_numeric": (
+        "[%s] ERROR: The configured device id (%s) is not a number - this device "
+        "cannot be refreshed and is left unchanged.",
+        "[%s] FEHLER: Die konfigurierte Geraete-id (%s) ist keine Zahl - dieses "
+        "Geraet kann nicht aufgefrischt werden und bleibt unveraendert."),
+    "dev_port_not_numeric": (
+        "[%s] ERROR: The configured port (%s) is not a number - this device "
+        "cannot be refreshed and is left unchanged.",
+        "[%s] FEHLER: Der konfigurierte Port (%s) ist keine Zahl - dieses Geraet "
+        "kann nicht aufgefrischt werden und bleibt unveraendert."),
     "dev_candidates_found": (
         "[%s] %s candidate(s) found, verifying one by one ...",
         "[%s] %s Kandidat(en) gefunden, verifiziere der Reihe nach ..."),
+    # Bewusst NICHT "and saved": an dieser Stelle ist der Token erst IM SPEICHER
+    # gesetzt; geschrieben wird devices.json EINMAL nach der Geraeteschleife
+    # (save_config -> main_updated). "and saved" behauptete einen Schreibvorgang,
+    # der beim Abbruch eines spaeteren Geraets nie stattfaende. Die echte
+    # Schreibbestaetigung ist main_updated ganz am Ende.
     "dev_candidate_ok": (
-        "[%s] Candidate %s/%s verified successfully and saved.",
-        "[%s] Kandidat %s/%s erfolgreich verifiziert und gespeichert."),
+        "[%s] Candidate %s/%s verified successfully.",
+        "[%s] Kandidat %s/%s erfolgreich verifiziert."),
     # Bewusst neutral formuliert ("failed", nicht "rejected"): nur EINE der
     # moeglichen Ursachen ist tatsaechlich eine Ablehnung durch das Geraet. Bei
     # einer nicht zustande gekommenen Verbindung hat nichts und niemand etwas
@@ -1173,8 +1195,38 @@ def update_device(dev_conf: dict, host_override: str | None = None) -> bool:
     if not device_id_str:
         print(t("dev_no_id", name))
         return False
-    device_id = int(device_id_str)
-    port = int(dev_conf.get("port", 6444))
+    # devices.json wird laut beiden READMEs von Hand gepflegt; eine ~15-stellige
+    # dezimale id (o statt 0, l statt 1) ist dabei der realistischste Vertipper.
+    # device_id_str ist per Konstruktion (Zeile oben: str(...).strip()) bereits
+    # ein String -> int(str) wirft ausschliesslich ValueError, nie TypeError.
+    # Ohne diesen Guard reisst eine einzige nicht-numerische id als ungefangener
+    # ValueError den GANZEN --all-Lauf ab und verwirft die schon im Speicher
+    # aufgefrischten Token aller anderen Geraete (save_config laeuft erst nach der
+    # Schleife). Bewusst return False, nicht raise: ein vertippter Eintrag ist ein
+    # Geraetefehler wie 'keine IP' weiter oben - er faellt sauber durch (-> Exit 2)
+    # und laesst die uebrigen Geraete weiterlaufen und speichern. Das Schwester-
+    # modul schuetzt exakt diese Felder vorab (_device_config_problem); hier sitzt
+    # derselbe Schutz an der Konversionsstelle. repr() auf dem ROHwert (nicht auf
+    # device_id_str) haelt 'null' (-> None) von der Zeichenkette "None"
+    # unterscheidbar und zeigt den schuldigen Wert in der Meldung.
+    try:
+        device_id = int(device_id_str)
+    except ValueError:
+        print(t("dev_id_not_numeric", name, repr(dev_conf.get("id"))))
+        return False
+    # port: der Default 6444 greift NUR bei FEHLENDEM Schluessel - "port": null
+    # liefert None (nicht 6444) und damit int(None) -> TypeError; ein vertippter
+    # "64o4" -> ValueError. Und weil Pythons json die blanken Literale Infinity/
+    # -Infinity klaglos als float('inf') einliest, wirft int() darauf einen
+    # OverflowError - der ist KEIN Subtyp von ValueError. Alle drei muessen
+    # daher gefangen werden; damit deckt der Guard jeden aus JSON moeglichen Wert
+    # ab. Anders als bei der id oben, deren Rohwert hier schon zum String
+    # normalisiert wurde und die daher nur ValueError liefern kann.
+    try:
+        port = int(dev_conf.get("port", 6444))
+    except (TypeError, ValueError, OverflowError):
+        print(t("dev_port_not_numeric", name, repr(dev_conf.get("port"))))
+        return False
 
     total = len(candidates)
     print(t("dev_candidates_found", name, total))
@@ -1214,7 +1266,8 @@ def main() -> None:
     """CLI-Einstieg: wertet --all bzw. --name/--host aus, prueft die msmart-
     Verfuegbarkeit VOR jedem Cloud-Kontakt, frischt die betroffenen Geraete auf
     (update_device) und schreibt devices.json atomar zurueck. Exit-Code: 0 =
-    Erfolg, 2 = mindestens ein Geraet fehlgeschlagen, 1 = Nutzungs-/Konfig-Fehler
+    Erfolg, 2 = mindestens ein Geraet fehlgeschlagen (auch ein Eintrag mit
+    nicht-numerischer id/port zaehlt als Fehlschlag), 1 = Nutzungs-/Konfig-Fehler
     (msmart fehlt, leere Geraeteliste bei --all, neues Geraet ohne --host,
     --only-if-due ohne --all, Schreibfehler).
 
