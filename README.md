@@ -166,6 +166,8 @@ You can also add a new device directly by name and IP address:
 python3 midea_refresh_tokens.py --name Kitchen --host 192.168.0.190
 ```
 
+The same command also **updates the stored IP** of a device that already exists under that name: the new address is used for this refresh and kept only if it succeeds, so a mistyped, unreachable IP never replaces a working one. (With `--all`, or when two devices share a name, `--host` cannot be assigned unambiguously and is not applied.)
+
 ## Updating
 
 To update an existing installation to the latest version:
@@ -478,7 +480,7 @@ If you see `No response from host` for every request, the most likely causes are
 
 - **Client isolation / AP isolation** active in your router for the WLAN the air conditioner is connected to — disable this for the relevant network segment
 - **VLAN separation** between IoT devices and computers — ensure your server and both air conditioners are on the same VLAN, or create a firewall rule permitting TCP port 6444
-- **IP address changed** — always assign fixed IP addresses (DHCP reservation by MAC address) in your router, or update `devices.json` manually if it changed
+- **IP address changed** — always assign fixed IP addresses (DHCP reservation by MAC address) in your router; if it did change, point the tool at the new address with `midea_refresh_tokens.py --name <device> --host <newIP>` (the stored IP is updated on a successful refresh), or edit `devices.json` manually
 - **Device is in WLAN power-saving mode / sleep** — verify the device is reachable with `ping 192.168.x.x` and `nc -zv 192.168.x.x 6444`
 - **Firewall on the server** blocking outgoing connections to port 6444 — check with `iptables -L` or `ufw status`
 

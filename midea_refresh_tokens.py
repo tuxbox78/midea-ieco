@@ -334,12 +334,19 @@ _MESSAGES: dict[str, tuple[str, str]] = {
     "main_new_needs_host": (
         "Device '%s' is new. Please also pass --host.",
         "Geraet '%s' ist neu. Bitte zusaetzlich --host angeben."),
-    "main_host_ignored": (
-        "Note: --host is ignored here; it only takes effect when adding a NEW "
-        "device with --name. Existing devices use the IP from devices.json.",
-        "Hinweis: --host wird hier ignoriert; es wirkt nur beim Hinzufuegen eines "
-        "NEUEN Geraets mit --name. Bestehende Geraete nutzen die IP aus "
-        "devices.json."),
+    "main_host_not_applied": (
+        "Note: --host was not applied. It sets the IP of a SINGLE existing device "
+        "selected by name (or creates a new one); with --all or a duplicated name "
+        "every device keeps its stored IP.",
+        "Hinweis: --host wurde nicht angewendet. Es setzt die IP eines EINZELNEN "
+        "per Name gewaehlten bestehenden Geraets (oder legt ein neues an); bei "
+        "--all oder einem doppelten Namen behaelt jedes Geraet seine gespeicherte "
+        "IP."),
+    "main_host_override": (
+        "Updating the stored IP of '%s' from %s to %s "
+        "(kept only if the refresh below succeeds).",
+        "Aktualisiere die gespeicherte IP von '%s' von %s auf %s "
+        "(wird nur behalten, wenn der Refresh unten gelingt)."),
     "main_new_not_saved": (
         "New device '%s' was NOT saved because the lookup failed.",
         "Neues Geraet '%s' wurde NICHT gespeichert, da der Abruf fehlgeschlagen ist."),
@@ -432,8 +439,10 @@ _MESSAGES: dict[str, tuple[str, str]] = {
         "Name of the device (new or existing)",
         "Name des Geraets (neu oder bestehend)"),
     "cli_help_host": (
-        "IP address (only together with --name, for NEW devices)",
-        "IP-Adresse (nur zusammen mit --name fuer NEUE Geraete)"),
+        "IP address for --name: sets it for a new device, or updates a single "
+        "existing one (on a successful refresh)",
+        "IP-Adresse zu --name: setzt sie fuer ein neues Geraet oder aktualisiert "
+        "ein einzelnes bestehendes (bei erfolgreichem Refresh)"),
     "cli_help_only_if_due": (
         "Only refresh if the last full refresh is overdue (for the @reboot "
         "catch-up job; requires --all)",
@@ -1119,15 +1128,26 @@ async def verify_credentials(ip: str, port: int, device_id: int, key: str,
         close_connection(device)
 
 
-def update_device(dev_conf: dict) -> bool:
+def update_device(dev_conf: dict, host_override: str | None = None) -> bool:
     """Frischt Token/Key EINES Geraets auf: holt Kandidaten per credential-freiem
     discover, verifiziert sie der Reihe nach gegen das echte Geraet und speichert
     das erste funktionierende (key, token)-Paar in-place in dev_conf. Rueckgabe
-    True bei Erfolg, sonst False. Bestehende Werte werden NUR bei erfolgreicher
-    Verifikation ueberschrieben - schlaegt alles fehl, bleibt dev_conf
-    unveraendert (kein kaputter Eintrag nach einem Fehlversuch)."""
+    True bei Erfolg, sonst False. Token, Key und (bei host_override) die IP werden
+    NUR bei erfolgreicher Verifikation geschrieben - schlaegt alles fehl, bleiben
+    sie unveraendert (kein kaputter Wert nach einem Fehlversuch). EINZIGE Ausnahme:
+    ein noch leeres 'id'-Feld wird mit der von discover gemeldeten Geraete-ID
+    gefuellt, AUCH wenn die Verifikation danach scheitert - diese ID stammt von
+    einem Geraet, das geantwortet hat, ist also kein kaputter Platzhalter, sondern
+    beim naechsten Lauf direkt nutzbar.
+
+    host_override (optional): eine per '--host' explizit vorgegebene IP fuer ein
+    BESTEHENDES Geraet. Sie wird fuer discover+verify verwendet und - konsistent
+    mit Token/Key - NUR bei erfolgreicher Verifikation nach dev_conf['ip']
+    uebernommen. Schlaegt der Refresh an der neuen IP fehl, bleibt die bisher
+    gespeicherte IP unveraendert (keine vertippte, unerreichbare IP in
+    devices.json)."""
     name = dev_conf.get("name", t("dev_unknown_name"))
-    host = dev_conf.get("ip")
+    host = host_override or dev_conf.get("ip")
     if not host:
         print(t("dev_no_ip", name))
         return False
@@ -1172,6 +1192,11 @@ def update_device(dev_conf: dict) -> bool:
             dev_conf["token"] = token
             dev_conf["key"] = key
             dev_conf.setdefault("port", 6444)
+            # Eine per --host vorgegebene neue IP erst JETZT uebernehmen - genau
+            # wie Token/Key nur bei bewiesener Erreichbarkeit, nie nach einem
+            # Fehlversuch (sonst landete eine vertippte IP dauerhaft in der Datei).
+            if host_override is not None:
+                dev_conf["ip"] = host_override
             print(t("dev_candidate_ok", name, idx, total))
             return True
         failure_codes.append(code)
@@ -1282,15 +1307,23 @@ def main() -> None:
             new_entry = {"name": args.name, "ip": args.host, "port": 6444, "id": "", "token": "", "key": ""}
             targets = [new_entry]
 
-    # --host legt die IP NUR beim Anlegen eines neuen Geraets fest (new_entry).
-    # Bei --all oder einem bereits bestehenden Geraet zaehlt allein die in
-    # devices.json gespeicherte IP; ein hier mitgegebenes --host bleibt
-    # wirkungslos. Das darf nicht still passieren - wer '--name <bestehend>
-    # --host <neueIP>' tippt, erwartet meist eine IP-Aenderung und soll den
-    # Hinweis sehen, dass sie NICHT stattfindet (die CLI-Hilfe sagt bereits
-    # "nur fuer NEUE Geraete", aber ohne Hinweis zur Laufzeit uebersieht man das).
+    # --host beim Anlegen eines NEUEN Geraets ist bereits in new_entry["ip"]
+    # eingeflossen. Fuer ein BESTEHENDES, eindeutig per Name gewaehltes Geraet
+    # aendert --host die gespeicherte IP (host_override; uebernommen aber nur bei
+    # erfolgreichem Refresh, siehe update_device). Bei --all oder einem
+    # mehrdeutigen (doppelten) Namen laesst sich EINE IP nicht sinnvoll zuordnen -
+    # dann wird --host sichtbar NICHT angewendet.
+    host_override = None
     if args.host and new_entry is None:
-        print(t("main_host_ignored"))
+        if not args.all and len(targets) == 1:
+            existing = targets[0]
+            if str(args.host) != str(existing.get("ip", "")):
+                host_override = args.host
+                print(t("main_host_override", existing.get("name", args.name),
+                        existing.get("ip", ""), args.host))
+            # gleiche IP wie gespeichert: nichts zu tun, still
+        else:
+            print(t("main_host_not_applied"))
 
     # Ab hier wird tatsaechlich gegen die Geraete gearbeitet - den Versuch JETZT
     # vermerken, nicht erst am Ende (Begruendung in record_refresh_attempt).
@@ -1310,7 +1343,13 @@ def main() -> None:
         # den Geraeten ein.
         if idx > 0:
             time.sleep(DEVICE_DELAY)
-        success = update_device(dev)
+        # host_override ist per Konstruktion nur bei GENAU einem Zielgeraet
+        # gesetzt (Einzel-Bestand mit abweichender --host-IP); der bedingte
+        # Aufruf haelt den Normalpfad bei der bisherigen 1-Argument-Signatur.
+        if host_override is not None:
+            success = update_device(dev, host_override=host_override)
+        else:
+            success = update_device(dev)
         ok = ok and success
         if dev is new_entry and success:
             successful_new_entry = True

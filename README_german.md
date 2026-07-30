@@ -167,6 +167,8 @@ Ein neues Gerät lässt sich auch direkt über Name und IP-Adresse hinzufügen:
 python3 midea_refresh_tokens.py --name Kueche --host 192.168.0.190
 ```
 
+Derselbe Aufruf **aktualisiert** auch die gespeicherte IP eines bereits unter diesem Namen vorhandenen Geräts: Die neue Adresse wird für diesen Refresh verwendet und nur bei Erfolg übernommen — eine vertippte, nicht erreichbare IP ersetzt so nie eine funktionierende. (Bei `--all` oder wenn zwei Geräte denselben Namen tragen, lässt sich `--host` nicht eindeutig zuordnen und wird nicht angewendet.)
+
 ## Aktualisieren
 
 Um eine bestehende Installation auf den neuesten Stand zu bringen:
@@ -477,7 +479,7 @@ Erscheinen bei jeder Anfrage Meldungen wie `No response from host`, liegen die h
 
 - **Client-Isolation / AP-Isolation** im Router für das WLAN, mit dem die Klimaanlage verbunden ist, ist aktiviert — für das betreffende Netzwerksegment deaktivieren
 - **VLAN-Trennung** zwischen IoT-Geräten und Computern — sicherstellen, dass Server und Klimaanlagen im selben VLAN sind, oder eine Firewall-Regel für TCP-Port 6444 anlegen
-- **IP-Adresse hat sich geändert** — immer feste IP-Adressen (DHCP-Reservierung nach MAC-Adresse) im Router vergeben, oder `devices.json` manuell aktualisieren, falls sie sich geändert hat
+- **IP-Adresse hat sich geändert** — immer feste IP-Adressen (DHCP-Reservierung nach MAC-Adresse) im Router vergeben; falls sie sich doch geändert hat, das Werkzeug mit `midea_refresh_tokens.py --name <Gerät> --host <neueIP>` auf die neue Adresse zeigen (die gespeicherte IP wird bei erfolgreichem Refresh übernommen), oder `devices.json` manuell bearbeiten
 - **Gerät befindet sich im WLAN-Energiesparmodus / Schlafmodus** — Erreichbarkeit prüfen mit `ping 192.168.x.x` und `nc -zv 192.168.x.x 6444`
 - **Firewall auf dem Server** blockiert ausgehende Verbindungen zu Port 6444 — prüfen mit `iptables -L` oder `ufw status`
 

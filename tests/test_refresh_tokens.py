@@ -2031,6 +2031,27 @@ class DiscoverRobustnessTests(_LangMixin):
         self.assertEqual(matches, [("aa", "bb")])
         self.assertIsNone(device_id)
 
+    def test_a_leading_zero_is_skipped_for_the_first_real_device_id(self):
+        # Guard A greift ueber MEHRERE Treffer: steht eine 0 (Protokoll-1-Pfad)
+        # VOR der echten ID, muss der erste NICHT-NULL-Treffer gewinnen - 0 darf
+        # die Extraktion nicht auf None kippen, solange danach eine echte ID kommt.
+        _, device_id = mrt._parse_discover_output(self._ns(
+            err="Found a supported device: {'device_id': 0, 'protocol': 1}\n"
+                "Found a supported device: {'device_id': 111, 'protocol': 3}\n"
+                '{"tokenlist": [{"key": "aa", "token": "bb"}]}'))
+        self.assertEqual(device_id, "111")
+
+    def test_the_first_of_several_device_ids_is_used(self):
+        # Bei mehreren Treffern gewinnt der ERSTE. Ein '[-1]'/letzter-Treffer-
+        # Fehler landete die ID eines anderen Geraets im Eintrag - genau diese
+        # Regression (die der geloeschte applianceCodes-Test frueher abdeckte)
+        # haelt dieser Test wieder fest.
+        _, device_id = mrt._parse_discover_output(self._ns(
+            err="Found a supported device: {'device_id': 111, 'protocol': 3}\n"
+                "Found a supported device: {'device_id': 222, 'protocol': 3}\n"
+                '{"tokenlist": [{"key": "aa", "token": "bb"}]}'))
+        self.assertEqual(device_id, "111")
+
     def test_faithful_discover_transcript_yields_both_pairs_and_device_id(self):
         # Der Integrationstest, der den Bug GEFANGEN haette: eine originalgetreue,
         # aus den echten _LOGGER-Statements von midea-local 6.6.1 rekonstruierte
@@ -2520,23 +2541,31 @@ class SaveConfigIsCalledTests(_ConfigPathMixin):
         saver.assert_not_called()
 
 
-class HostIgnoredWarningTests(_ConfigPathMixin):
-    """--host wirkt nur beim Anlegen eines NEUEN Geraets. Bei --all oder einem
-    bestehenden Geraet ist es wirkungslos - dann MUSS ein sichtbarer Hinweis
-    erscheinen (statt es still zu verschlucken), aber NICHT, wenn --host
-    tatsaechlich ein neues Geraet anlegt. Eigener Capture-Helfer: der
-    _run_main aus SaveConfigIsCalledTests verwirft stdout."""
+class HostArgumentBehaviourTests(_ConfigPathMixin):
+    """Verhalten von --host in main(): fuer ein EINZELNES, per Name gewaehltes
+    bestehendes Geraet aendert es die gespeicherte IP (host_override); bei --all
+    oder mehrdeutigem Namen wird es sichtbar NICHT angewendet; beim Anlegen eines
+    neuen Geraets ist es Teil des Eintrags und loest keine Meldung aus. Eigener
+    Capture-Helfer (der _run_main aus SaveConfigIsCalledTests verwirft stdout)
+    plus Mitschrift des an update_device durchgereichten host_override."""
 
-    HINT = "--host is ignored"  # stabiles Fragment der englischen Meldung
+    NOT_APPLIED = "was not applied"      # Fragment von main_host_not_applied (EN)
+    OVERRIDE = "Updating the stored IP"  # Fragment von main_host_override (EN)
 
     def _run_capture(self, argv, update_result=True, devices=None):
         devices = devices if devices is not None else [
             {"name": "W", "ip": "1.2.3.4", "id": 1}]
         self.path.write_text(json.dumps({"devices": devices}), encoding="utf-8")
+        self.overrides = []
+
+        def fake_update(dev, host_override=None):
+            self.overrides.append(host_override)
+            return update_result
+
         buf = io.StringIO()
         with mock.patch.dict(os.environ, {"MIDEA_IECO_LANG": "en"}), \
                 mock.patch.dict(sys.modules, {"msmart": mock.MagicMock()}), \
-                mock.patch.object(mrt, "update_device", lambda dev: update_result), \
+                mock.patch.object(mrt, "update_device", fake_update), \
                 mock.patch.object(mrt, "save_config", mock.MagicMock()), \
                 mock.patch.object(mrt.time, "sleep", lambda s: None), \
                 mock.patch.object(mrt.sys, "argv", ["x"] + argv), \
@@ -2545,28 +2574,122 @@ class HostIgnoredWarningTests(_ConfigPathMixin):
                 mrt.main()
         return buf.getvalue()
 
-    def test_host_with_existing_device_warns(self):
-        # '--name <bestehend> --host <ip>': die gespeicherte IP zaehlt, --host
-        # ist wirkungslos - der Nutzer muss das erfahren.
+    def test_existing_device_with_new_host_triggers_override(self):
+        # '--name <bestehend, 1 Treffer> --host <andere IP>': host_override wird
+        # an update_device durchgereicht; die Ankuendigung nennt alte vor neuer IP.
         out = self._run_capture(["--name", "W", "--host", "9.9.9.9"])
-        self.assertIn(self.HINT, out)
+        self.assertIn(self.OVERRIDE, out)
+        self.assertEqual(self.overrides, ["9.9.9.9"])
+        self.assertLess(out.index("1.2.3.4"), out.index("9.9.9.9"))
 
-    def test_host_with_all_warns(self):
-        # '--all --host <ip>': ebenso wirkungslos fuer jedes bestehende Geraet.
+    def test_existing_device_same_host_is_silent(self):
+        # Gleiche IP wie gespeichert: kein Override, keine Meldung.
+        out = self._run_capture(["--name", "W", "--host", "1.2.3.4"])
+        self.assertNotIn(self.OVERRIDE, out)
+        self.assertNotIn(self.NOT_APPLIED, out)
+        self.assertEqual(self.overrides, [None])
+
+    def test_all_with_host_is_not_applied(self):
+        # '--all --host': eine IP laesst sich nicht allen Geraeten zuordnen.
         out = self._run_capture(["--all", "--host", "9.9.9.9"])
-        self.assertIn(self.HINT, out)
+        self.assertIn(self.NOT_APPLIED, out)
+        self.assertEqual(self.overrides, [None])
 
-    def test_existing_device_without_host_does_not_warn(self):
-        # Ohne --host gibt es nichts zu warnen (Negativfall zur args.host-Haelfte
-        # der Bedingung).
+    def test_duplicate_name_with_host_is_not_applied(self):
+        # Zwei gleichnamige Geraete: --host ist nicht eindeutig zuordenbar.
+        out = self._run_capture(
+            ["--name", "W", "--host", "9.9.9.9"],
+            devices=[{"name": "W", "ip": "1.2.3.4", "id": 1},
+                     {"name": "W", "ip": "5.6.7.8", "id": 2}])
+        self.assertIn(self.NOT_APPLIED, out)
+        self.assertEqual(self.overrides, [None, None])
+
+    def test_existing_device_without_host_is_silent(self):
+        # Ohne --host gibt es nichts zu entscheiden.
         out = self._run_capture(["--name", "W"])
-        self.assertNotIn(self.HINT, out)
+        self.assertNotIn(self.OVERRIDE, out)
+        self.assertNotIn(self.NOT_APPLIED, out)
+        self.assertEqual(self.overrides, [None])
 
-    def test_host_with_new_device_does_not_warn(self):
-        # Hier WIRKT --host (legt das neue Geraet an) - kein Hinweis (Negativfall
-        # zur new_entry-Haelfte der Bedingung).
+    def test_new_device_with_host_is_silent(self):
+        # Neues Geraet: --host ist Teil des Eintrags, keine Meldung, kein Override.
         out = self._run_capture(["--name", "Neu", "--host", "9.9.9.9"], devices=[])
-        self.assertNotIn(self.HINT, out)
+        self.assertNotIn(self.OVERRIDE, out)
+        self.assertNotIn(self.NOT_APPLIED, out)
+        self.assertEqual(self.overrides, [None])
+
+    def test_end_to_end_override_ip_reaches_devices_json_on_disk(self):
+        # Schliesst die Schleife main() -> ECHTE update_device -> ECHTE
+        # save_config -> Platte: die neue IP (und der frische Token) muessen
+        # tatsaechlich in devices.json stehen. Die uebrigen Tests mocken entweder
+        # update_device (nur Entscheidung) oder rufen es direkt (nur Mutation) -
+        # nur hier ist die gesamte Kette echt; gemockt ist allein das Netzwerk.
+        self.path.write_text(json.dumps({"devices": [
+            {"name": "W", "ip": "1.2.3.4", "id": 1, "port": 6444}]}),
+            encoding="utf-8")
+        with mock.patch.dict(os.environ, {"MIDEA_IECO_LANG": "en"}), \
+                mock.patch.dict(sys.modules, {"msmart": mock.MagicMock()}), \
+                mock.patch.object(mrt, "fetch_candidate_credentials",
+                                  lambda host: ([("k", "t")], None)), \
+                mock.patch.object(mrt, "verify_credentials",
+                                  _fake_verify([(True, "", "")])), \
+                mock.patch.object(mrt.time, "sleep", lambda s: None), \
+                mock.patch.object(mrt.sys, "argv",
+                                  ["x", "--name", "W", "--host", "9.9.9.9"]), \
+                redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as cm:
+                mrt.main()
+        self.assertEqual(cm.exception.code, 0)
+        saved = json.loads(self.path.read_text(encoding="utf-8"))["devices"][0]
+        self.assertEqual(saved["ip"], "9.9.9.9")   # neue IP persistiert
+        self.assertEqual(saved["token"], "t")      # frischer Token persistiert
+
+
+class HostOverrideTests(_LangMixin):
+    """update_device(host_override=...): die vorgegebene IP wird fuer den Abruf
+    benutzt und - wie Token/Key - NUR bei erfolgreicher Verifikation nach
+    dev_conf['ip'] uebernommen; schlaegt der Refresh fehl, bleibt die alte IP."""
+
+    DEV = {"name": "W", "ip": "1.2.3.4", "id": 1, "port": 6444}
+
+    def test_override_is_used_for_the_fetch(self):
+        seen = {}
+
+        def fake_fetch(host):
+            seen["host"] = host
+            return ([("k", "t")], None)
+
+        with mock.patch.object(mrt, "fetch_candidate_credentials", fake_fetch), \
+                mock.patch.object(mrt, "verify_credentials",
+                                  _fake_verify([(True, "", "")])), \
+                mock.patch.object(mrt.time, "sleep", lambda s: None), \
+                redirect_stdout(io.StringIO()):
+            mrt.update_device(dict(self.DEV), host_override="5.5.5.5")
+        self.assertEqual(seen["host"], "5.5.5.5")
+
+    def test_override_persisted_on_success(self):
+        dev = dict(self.DEV)
+        with mock.patch.object(mrt, "fetch_candidate_credentials",
+                               lambda host: ([("k", "t")], None)), \
+                mock.patch.object(mrt, "verify_credentials",
+                                  _fake_verify([(True, "", "")])), \
+                mock.patch.object(mrt.time, "sleep", lambda s: None), \
+                redirect_stdout(io.StringIO()):
+            ok = mrt.update_device(dev, host_override="5.5.5.5")
+        self.assertTrue(ok)
+        self.assertEqual(dev["ip"], "5.5.5.5")
+
+    def test_override_not_persisted_on_failure(self):
+        dev = dict(self.DEV)
+        with mock.patch.object(mrt, "fetch_candidate_credentials",
+                               lambda host: ([("k", "t")], None)), \
+                mock.patch.object(mrt, "verify_credentials",
+                                  _fake_verify([(False, mrt.VERIFY_SILENT, "x")])), \
+                mock.patch.object(mrt.time, "sleep", lambda s: None), \
+                redirect_stdout(io.StringIO()):
+            ok = mrt.update_device(dev, host_override="5.5.5.5")
+        self.assertFalse(ok)
+        self.assertEqual(dev["ip"], "1.2.3.4")
 
 
 class UpdateDeviceFailureReturnsTests(_LangMixin):
@@ -2619,6 +2742,21 @@ class UpdateDeviceFailureReturnsTests(_LangMixin):
         self.assertIn("No device ID", out)
         self.assertNotIn("cloud", out.lower())
         self.assertNotIn("token", dev)
+
+    def test_blank_id_is_filled_from_discovery_even_when_verification_fails(self):
+        # Verriegelt die in update_device dokumentierte EINZIGE Ausnahme: ein noch
+        # leeres 'id'-Feld wird aus der discover-Meldung gefuellt, AUCH wenn die
+        # Verifikation danach scheitert (die ID ist echt - ein Geraet hat
+        # geantwortet - und beim naechsten Lauf direkt nutzbar). Token/Key bleiben
+        # bei Fehlschlag ungeschrieben.
+        dev = {"name": "W", "ip": "1.2.3.4", "id": "", "port": 6444}
+        result, _ = self._update(
+            dev,
+            fetch_candidate_credentials=lambda host: ([("k", "t")], "789"),
+            verify_credentials=_fake_verify([(False, mrt.VERIFY_SILENT, "x")]))
+        self.assertFalse(result)          # Refresh gescheitert
+        self.assertEqual(dev["id"], 789)  # id trotzdem aus discovery gefuellt
+        self.assertNotIn("token", dev)    # aber Token/Key NICHT geschrieben
 
 
 class ExitCodeFromTheRealUpdateTests(_ConfigPathMixin):
