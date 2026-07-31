@@ -216,6 +216,23 @@ python3 midea_ieco_ensure.py all --only-if-on
 
 With `--only-if-on`, the script never turns on a unit. A unit that is off is left untouched; iECO is enabled when a unit is on and needs it. This makes frequent cron runs safe without starting an air conditioner that was intentionally switched off.
 
+### Also keep iSense (Follow Me) enabled
+
+Add the experimental `--ensure-isense` option:
+
+```bash
+python3 midea_ieco_ensure.py all --only-if-on --ensure-isense
+```
+
+iSense is the remote-sensor mode that `msmart-ng` calls **Follow Me**. The pinned library reads it through [`AirConditioner.follow_me`](https://github.com/mill1000/midea-msmart/blob/2026.7.0/msmart/device/AC/device.py) and writes it as bit `0x80` in the [full AC state command](https://github.com/mill1000/midea-msmart/blob/2026.7.0/msmart/device/AC/command.py). There is no separate capability or property-only command for it.
+
+That has two practical consequences:
+
+- Enabling iSense sends the unit's complete, freshly read state back with the Follow Me bit added. The tool does not change target temperature, mode or fan settings, but a simultaneous change from another controller can still race with this full-state write.
+- iSense is **best effort**. Some units report the same `false` value when it is off and when they do not expose the state. The tool therefore attempts to enable it but never turns an otherwise successful iECO run into an error just because iSense is not reported as active.
+
+The option is deliberately opt-in until it has been tested on more hardware. When iSense already reports active, no extra full-state write is sent. In modes that cannot carry iECO, a running unit still receives the iSense command; the existing iECO exit behavior remains unchanged.
+
 ### Refresh token/key values
 
 If a device reports `Connection reset`, a timeout, or a token/key problem:
@@ -234,8 +251,8 @@ In practice, device tokens often remain valid for a long time. Refresh them when
 If you didn't use `install.sh`'s automatic cron setup, edit your crontab with `crontab -e`:
 
 ```cron
-# Every 20 minutes: re-enable iECO without turning units on
-*/20 * * * * cd /opt/local/midea-ieco && venv/bin/python3 midea_ieco_ensure.py all --only-if-on >> ieco.log 2>&1
+# Every 20 minutes: re-enable iECO and iSense without turning units on
+*/20 * * * * cd /opt/local/midea-ieco && venv/bin/python3 midea_ieco_ensure.py all --only-if-on --ensure-isense >> ieco.log 2>&1
 
 # Every Sunday at 03:00: refresh device tokens as a precaution
 0 3 * * 0 cd /opt/local/midea-ieco && venv/bin/python3 midea_refresh_tokens.py --all >> refresh.log 2>&1

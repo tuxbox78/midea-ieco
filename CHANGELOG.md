@@ -6,6 +6,16 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Experimental iSense / Follow Me keep-alive (`--ensure-isense`)** (#5) —
+  optionally sends `msmart-ng`'s Follow Me state bit whenever a running unit
+  does not report it active. Because the protocol has no separate capability or
+  property write for iSense, this uses a full state command built from a fresh
+  read. Missing or negative iSense readback and iSense-only send failures are
+  deliberately non-fatal; strict verification and exit behavior remain tied to
+  iECO. Units that already report iSense active receive no extra write.
+
 ## [0.3.0] - 2026-07-30
 
 This release resolves three field-reported issues (#2, #3, #4) and adds the

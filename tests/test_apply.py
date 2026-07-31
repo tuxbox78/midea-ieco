@@ -164,10 +164,10 @@ class ApplyIecoOnlyTests(unittest.TestCase):
 # --------------------------------------------------------------------------
 
 _CONTRACT_PROBE = r"""
-import inspect, json, sys
+import asyncio, inspect, json, sys
 try:
     from msmart.device.AC.device import AirConditioner
-    from msmart.device.AC.command import PropertyId
+    from msmart.device.AC.command import PropertyId, SetStateCommand
     from importlib.metadata import version
 except Exception as exc:
     print(json.dumps({"available": False, "reason": str(exc)}))
@@ -197,6 +197,30 @@ try:
 except Exception:
     pass
 
+# iSense heisst im Protokoll und in msmart-ng "Follow Me". Es ist KEINE
+# Property, sondern ein Feld im vollen SetStateCommand. Die Sonde prueft die
+# oeffentliche Setter->apply()->Command-Kette, auf die --ensure-isense baut,
+# ohne ein Netzwerk oder ein echtes Geraet zu benoetigen.
+follow_me_property_exists = isinstance(
+    getattr(AirConditioner, "follow_me", None), property)
+follow_me_set_error = None
+follow_me_command_value = None
+sent_commands = []
+
+async def capture_commands(commands):
+    sent_commands.extend(commands if isinstance(commands, list) else [commands])
+    return []
+
+try:
+    device.follow_me = True
+    device._send_commands_get_responses = capture_commands
+    asyncio.run(device.apply())
+    state_commands = [c for c in sent_commands if isinstance(c, SetStateCommand)]
+    if state_commands:
+        follow_me_command_value = state_commands[0].follow_me
+except Exception as exc:
+    follow_me_set_error = "%s: %s" % (type(exc).__name__, exc)
+
 print(json.dumps({
     "available": True,
     "version": version("msmart-ng"),
@@ -211,6 +235,9 @@ print(json.dumps({
     "arm_error": arm_error,
     "ieco_armed_by_setter": armed,
     "ieco_value_is_2_tuple": ieco_value_is_2_tuple,
+    "follow_me_property_exists": follow_me_property_exists,
+    "follow_me_set_error": follow_me_set_error,
+    "follow_me_command_value": follow_me_command_value,
 }))
 """
 
@@ -292,6 +319,19 @@ class MsmartPropertyContractTests(unittest.TestCase):
             self.probe["ieco_value_is_2_tuple"],
             "_PROPERTY_MAP[IECO](device) liefert kein 2-Tupel "
             "(ieco_number, bool) mehr")
+
+    def test_follow_me_reaches_the_full_state_command(self):
+        self.assertTrue(
+            self.probe["follow_me_property_exists"],
+            "AirConditioner.follow_me ist keine oeffentliche Property mehr")
+        self.assertIsNone(
+            self.probe["follow_me_set_error"],
+            "follow_me=True/apply() ist nicht mehr nutzbar: "
+            f"{self.probe['follow_me_set_error']}")
+        self.assertIs(
+            self.probe["follow_me_command_value"], True,
+            "device.follow_me=True landet nicht mehr als True im "
+            "SetStateCommand - --ensure-isense haette keine Wirkung")
 
     def test_the_pinned_version_matches_what_is_installed(self):
         self.assertEqual(self.probe["version"],

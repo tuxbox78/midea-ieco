@@ -6,6 +6,11 @@ midea_ieco_ensure.py
 
 Stellt sicher, dass iECO auf einer oder mehreren Midea-Klimaanlagen aktiv ist.
 
+Mit --ensure-isense wird zusaetzlich versucht, iSense (in msmart-ng als
+"Follow Me" bezeichnet) aktiv zu halten. Dieser Teil ist bewusst Best Effort:
+Nicht jedes Geraet meldet den Zustand verlaesslich zurueck, und es gibt keine
+separate Capability dafuer.
+
 Standardverhalten: Schaltet das Geraet bei Bedarf ein UND aktiviert iECO.
 Mit --only-if-on: Schaltet NICHTS ein. Nur wenn das Geraet bereits laeuft,
 wird iECO bei Bedarf nachgezogen. Ist es aus, wird sofort abgebrochen,
@@ -17,6 +22,7 @@ Locale oder MIDEA_IECO_LANG=de) - siehe midea_i18n.py.
 Nutzung:
     python3 midea_ieco_ensure.py <device_name|all>
     python3 midea_ieco_ensure.py <device_name|all> --only-if-on
+    python3 midea_ieco_ensure.py <device_name|all> --ensure-isense
 """
 
 from __future__ import annotations
@@ -205,6 +211,9 @@ _MESSAGES: dict[str, tuple[str, str]] = {
     "ov_example_only_if_on": (
         "  %s %s --only-if-on       only running devices, powers nothing on",
         "  %s %s --only-if-on       nur laufende Geraete, schaltet nichts ein"),
+    "ov_example_isense": (
+        "  %s %s --only-if-on --ensure-isense  also keep iSense enabled",
+        "  %s %s --only-if-on --ensure-isense  auch iSense aktiv halten"),
     "ov_example_list": (
         "  %s %s                   show this overview",
         "  %s %s                   diese Uebersicht anzeigen"),
@@ -256,6 +265,11 @@ _MESSAGES: dict[str, tuple[str, str]] = {
     "dev_status_before": (
         "[%s] Status before action: power=%s, mode=%s, ieco=%s, eco=%s",
         "[%s] Status vor Aktion: power=%s, mode=%s, ieco=%s, eco=%s"),
+    "dev_status_before_isense": (
+        "[%s] Status before action: power=%s, mode=%s, ieco=%s, isense=%s, "
+        "eco=%s",
+        "[%s] Status vor Aktion: power=%s, mode=%s, ieco=%s, isense=%s, "
+        "eco=%s"),
     # Bewusst "no usable answer" statt "did not answer": die Abfrage kann aus
     # zwei Bloecken bestehen, und geht nur der zweite verloren, HAT die Anlage
     # geantwortet - verwertbar ist das Ergebnis trotzdem nicht. Der Text darf
@@ -274,6 +288,11 @@ _MESSAGES: dict[str, tuple[str, str]] = {
         "queries necessary.",
         "[%s] Bereits im gewuenschten Zustand (an, iECO aktiv). Keine weiteren "
         "Abfragen notwendig."),
+    "dev_already_desired_isense": (
+        "[%s] Already in the desired state (on, iECO and iSense active). No "
+        "further queries necessary.",
+        "[%s] Bereits im gewuenschten Zustand (an, iECO und iSense aktiv). "
+        "Keine weiteren Abfragen notwendig."),
     "dev_mode_unsupported": (
         "[%s] Operating mode %s does not support iECO (only %s).",
         "[%s] Betriebsmodus %s unterstuetzt kein iECO (nur %s)."),
@@ -284,6 +303,23 @@ _MESSAGES: dict[str, tuple[str, str]] = {
         "[%s] Nothing was switched. Please set the unit to %s and call again.",
         "[%s] Es wurde nichts geschaltet. Bitte die Anlage auf %s stellen und "
         "erneut aufrufen."),
+    "dev_mode_isense_only_ok": (
+        "[%s] --only-if-on is active: iECO was not changed, not an error.",
+        "[%s] --only-if-on aktiv: iECO wurde nicht geaendert, kein Fehler."),
+    "dev_mode_isense_only_fail": (
+        "[%s] iECO was not switched. Please set the unit to %s and call again.",
+        "[%s] iECO wurde nicht geschaltet. Bitte die Anlage auf %s stellen und "
+        "erneut aufrufen."),
+    "dev_isense_attempted": (
+        "[%s] iSense (Follow Me) enable command sent (best effort; readback is "
+        "not required).",
+        "[%s] iSense-(Follow-Me-)Einschaltbefehl gesendet (Best Effort; eine "
+        "Rueckmeldung ist nicht erforderlich)."),
+    "dev_isense_attempt_failed": (
+        "[%s] WARNING: iSense could not be enabled after retries (%s); "
+        "continuing because iSense is best effort.",
+        "[%s] WARNUNG: iSense konnte nach den Wiederholungen nicht aktiviert "
+        "werden (%s); der Lauf wird fortgesetzt, weil iSense Best Effort ist."),
     "dev_apply_attempt_failed": (
         "  [%s] apply() attempt %s/%s failed (%s): %s",
         "  [%s] apply()-Versuch %s/%s fehlgeschlagen (%s): %s"),
@@ -312,6 +348,19 @@ _MESSAGES: dict[str, tuple[str, str]] = {
     "dev_status_after": (
         "[%s] Status after action: power=%s, mode=%s, ieco=%s, eco=%s",
         "[%s] Status nach Aktion: power=%s, mode=%s, ieco=%s, eco=%s"),
+    "dev_status_after_isense": (
+        "[%s] Status after action: power=%s, mode=%s, ieco=%s, isense=%s, "
+        "eco=%s",
+        "[%s] Status nach Aktion: power=%s, mode=%s, ieco=%s, isense=%s, "
+        "eco=%s"),
+    "dev_isense_ok": (
+        "[%s] iSense is active (reported by the device).",
+        "[%s] iSense ist aktiv (vom Geraet gemeldet)."),
+    "dev_isense_unconfirmed": (
+        "[%s] iSense was requested, but the device does not report it as "
+        "active; continuing because iSense is best effort.",
+        "[%s] iSense wurde angefordert, das Geraet meldet es jedoch nicht als "
+        "aktiv; der Lauf wird fortgesetzt, weil iSense Best Effort ist."),
     "dev_still_disabled": (
         "[%s] ERROR: According to the device, iECO is still disabled!",
         "[%s] FEHLER: iECO ist laut Geraet weiterhin deaktiviert!"),
@@ -342,6 +391,12 @@ _MESSAGES: dict[str, tuple[str, str]] = {
         "already running.",
         "Geraet NICHT einschalten. Nur pruefen und iECO nachziehen, falls es "
         "bereits laeuft."),
+    "cli_help_ensure_isense": (
+        "Also try to keep iSense (Follow Me) enabled. Experimental best effort: "
+        "requires a full-state write and does not require positive readback.",
+        "Zusaetzlich versuchen, iSense (Follow Me) aktiv zu halten. "
+        "Experimentelles Best Effort: erfordert einen Vollzustands-Write und "
+        "keine positive Rueckmeldung."),
     "main_skipped_entries": (
         "WARNING: %s unexpected entry/entries in %s skipped (not an object).",
         "WARNUNG: %s unerwartete(r) Eintrag/Eintraege in %s uebersprungen "
@@ -483,6 +538,7 @@ def print_overview() -> None:
     print(t("ov_example_device", CMD_MAIN))
     print(t("ov_example_all", CMD_MAIN, TARGET_ALL))
     print(t("ov_example_only_if_on", CMD_MAIN, TARGET_ALL))
+    print(t("ov_example_isense", CMD_MAIN, TARGET_ALL))
     print(t("ov_example_list", CMD_MAIN, TARGET_LIST))
     print(t("ov_example_refresh", CMD_REFRESH))
     print(t("ov_example_update", CMD_UPDATE))
@@ -621,22 +677,24 @@ async def connect_and_refresh(dev_conf: dict, retries: int = CONNECT_RETRIES,
 
 class _Prep(enum.Enum):
     """Ausgang von _validate_and_arm."""
-    READY = "ready"          # Geraet validiert + scharfgeschaltet -> apply()
+    READY = "ready"          # iECO (+ optional iSense) -> apply + verify
+    ISENSE_ONLY_OK = "isense_only_ok"      # nur iSense schreiben -> True
+    ISENSE_ONLY_FAIL = "isense_only_fail"  # nur iSense schreiben -> False
     DONE_OK = "done_ok"      # terminaler Erfolg, Meldung gedruckt -> True
     DONE_FAIL = "done_fail"  # terminaler Fehlschlag, Meldung gedruckt -> False
 
 
 class _ArmResult(NamedTuple):
     prep: _Prep
-    #: Nur bei READY aussagekraeftig: True, wenn zum Erreichen des Sollzustands
-    #: EINGESCHALTET werden muss (Geraet war aus). Steuert spaeter die Wahl
-    #: zwischen vollem apply() (muss power setzen) und einem reinen iECO-
-    #: Property-Write (power/temp/mode bleiben unangetastet).
-    needs_power_on: bool = False
+    #: Nur bei READY aussagekraeftig: True, wenn ein voller Zustandsrahmen
+    #: noetig ist. Das gilt beim Einschalten UND fuer iSense, weil Follow Me im
+    #: klassischen SetStateCommand steckt und keine eigene Property besitzt.
+    #: Nur ein reines iECO-Nachziehen darf den property-only-Pfad nehmen.
+    needs_full_state: bool = False
 
 
-async def _validate_and_arm(device: "AC", only_if_on: bool,
-                            name: str) -> _ArmResult:
+async def _validate_and_arm(device: "AC", only_if_on: bool, name: str,
+                            ensure_isense: bool) -> _ArmResult:
     """Prueft ein frisch verbundenes Geraet und schaltet es fuer apply() scharf.
 
     DIESELBE Sequenz laeuft beim Erstversuch UND bei jedem Reconnect im
@@ -646,10 +704,15 @@ async def _validate_and_arm(device: "AC", only_if_on: bool,
     Re-Arms (Muster reconcile / RetryOnConflict: refetch-on-retry).
 
     Alle Geraetemeldungen werden HIER gedruckt; der Aufrufer wertet nur den
-    _Prep-Wert aus (kein Doppeldruck). Bei READY werden device.power_state und
-    device.ieco mutiert. Wirft nicht ausser bei einem Dekodierfehler in
-    get_capabilities()/refresh(), der - wie zuvor an der Aufrufstelle - als
-    DONE_FAIL abgefangen wird."""
+    _Prep-Wert aus (kein Doppeldruck). Bei READY werden device.power_state,
+    device.ieco und optional device.follow_me mutiert. iSense ist bewusst NICHT
+    capability-gated: genau diese Capability gibt es in msmart-ng nicht, und
+    ein False ist laut Issue #5 nicht von "nicht gemeldet" zu unterscheiden.
+    Wir versuchen den vorhandenen Follow-Me-Schreiber deshalb auf Wunsch
+    einfach und werten nur iECO streng.
+
+    Wirft nicht ausser bei einem Dekodierfehler in get_capabilities()/refresh(),
+    der - wie zuvor an der Aufrufstelle - als DONE_FAIL abgefangen wird."""
     if not device.online:
         print(t("dev_not_online", name))
         return _ArmResult(_Prep.DONE_FAIL)
@@ -704,8 +767,15 @@ async def _validate_and_arm(device: "AC", only_if_on: bool,
         print(t("dev_caps_no_answer", name))
         return _ArmResult(_Prep.DONE_FAIL)
 
-    print(t("dev_status_before", name, is_on,
-            _mode_label(device.operational_mode), device.ieco, device.eco))
+    isense_active = bool(getattr(device, "follow_me", False))
+    needs_isense = ensure_isense and not isense_active
+    if ensure_isense:
+        print(t("dev_status_before_isense", name, is_on,
+                _mode_label(device.operational_mode), device.ieco,
+                isense_active, device.eco))
+    else:
+        print(t("dev_status_before", name, is_on,
+                _mode_label(device.operational_mode), device.ieco, device.eco))
 
     if not device.supports_ieco:
         # Die Anlage HAT geantwortet und iECO nicht gemeldet - erst jetzt
@@ -718,8 +788,20 @@ async def _validate_and_arm(device: "AC", only_if_on: bool,
     # zu enge Modus-Liste niemals einen tatsaechlich funktionierenden Zustand
     # als Problem melden.
     if is_on and device.ieco:
-        print(t("dev_already_desired", name))
-        return _ArmResult(_Prep.DONE_OK)
+        if not needs_isense:
+            if ensure_isense:
+                print(t("dev_already_desired_isense", name))
+            else:
+                print(t("dev_already_desired", name))
+            return _ArmResult(_Prep.DONE_OK)
+
+        # iECO ist bereits sicher im Soll; der einzige ausstehende Write ist
+        # iSense. Er bekommt deshalb denselben Best-Effort-Ausgang wie der
+        # iSense-Nachzug im nicht-iECO-faehigen Modus: weder fehlender Readback
+        # noch ein Sendefehler darf aus dem bereits erfolgreichen iECO-Zustand
+        # einen Gesamtfehler machen.
+        device.follow_me = True
+        return _ArmResult(_Prep.ISENSE_ONLY_OK, needs_full_state=True)
 
     # Modus-Guard: iECO ist an den Betriebsmodus gebunden (siehe
     # IECO_CAPABLE_MODE_VALUES). In einem nicht tragenden Modus nimmt das
@@ -732,6 +814,18 @@ async def _validate_and_arm(device: "AC", only_if_on: bool,
         mode_text = _mode_label(device.operational_mode)
         print(t("dev_mode_unsupported", name, mode_text,
                 t("mode_names_capable")))
+
+        # iSense ist nicht an den iECO-Modus gekoppelt. Bei einer bereits
+        # laufenden Anlage senden wir das Follow-Me-Bit deshalb auch dann, wenn
+        # iECO in diesem Modus unmoeglich ist. Das Gesamtergebnis bleibt aber
+        # identisch zur bisherigen iECO-Semantik (Cron: OK, expliziter Aufruf:
+        # Fehler), und iSense wird nicht verifiziert.
+        if needs_isense and is_on:
+            device.follow_me = True
+            prep = (_Prep.ISENSE_ONLY_OK if only_if_on
+                    else _Prep.ISENSE_ONLY_FAIL)
+            return _ArmResult(prep, needs_full_state=True)
+
         if only_if_on:
             # Ein bewusst gewaehlter Modus ist kein Fehlerzustand. Im
             # 20-Minuten-Cron wuerde ein Fehlschlag hier taeglich 72 Meldungen
@@ -751,10 +845,14 @@ async def _validate_and_arm(device: "AC", only_if_on: bool,
         device.power_state = True
     if not device.ieco:
         device.ieco = True
-    return _ArmResult(_Prep.READY, needs_power_on=was_off)
+    if needs_isense:
+        device.follow_me = True
+    return _ArmResult(_Prep.READY,
+                      needs_full_state=was_off or needs_isense)
 
 
-async def ensure_ieco(dev_conf: dict, only_if_on: bool) -> bool:
+async def ensure_ieco(dev_conf: dict, only_if_on: bool,
+                      ensure_isense: bool = False) -> bool:
     name = dev_conf["name"]
 
     try:
@@ -764,7 +862,8 @@ async def ensure_ieco(dev_conf: dict, only_if_on: bool) -> bool:
         return False
 
     try:
-        result = await _validate_and_arm(device, only_if_on, name)
+        result = await _validate_and_arm(device, only_if_on, name,
+                                         ensure_isense)
         applied = False
         last_exc = None
         for attempt in range(1, ACTION_RETRIES + 1):
@@ -777,7 +876,10 @@ async def ensure_ieco(dev_conf: dict, only_if_on: bool) -> bool:
             if result.prep is _Prep.DONE_FAIL:
                 return False
 
-            # result.prep is READY: frisch gelesen, validiert, scharfgeschaltet.
+            # READY schreibt iECO (+ optional iSense) und verifiziert danach
+            # iECO. ISENSE_ONLY_* entsteht, wenn der aktuelle Modus iECO nicht
+            # tragen kann: iSense wird trotzdem best-effort geschrieben, ohne
+            # das bestehende Ergebnis fuer diesen iECO-Fall zu veraendern.
             try:
                 # Muss NICHT eingeschaltet werden (Anlage laeuft, es ist nur iECO
                 # nachzuziehen)? Dann iECO als REINEN Property-Write senden -
@@ -785,10 +887,13 @@ async def ensure_ieco(dev_conf: dict, only_if_on: bool) -> bool:
                 # geclobbert werden (an beiden Anlagen on-device belegt). Liefert
                 # apply_ieco_only False (Pfad nicht verfuegbar), nehmen wir das
                 # volle apply() - durch den Reconcile ohnehin gegen den Clobber
-                # abgesichert. needs_power_on=True (Anlage war aus) braucht den
-                # Zustandsbefehl sowieso, um power zu setzen (kurzschluss: dann
-                # wird apply_ieco_only gar nicht erst gerufen).
-                if result.needs_power_on or not await apply_ieco_only(device):
+                # abgesichert. needs_full_state=True (Anlage war aus ODER
+                # iSense muss gesetzt werden) braucht den Zustandsbefehl sowieso
+                # (kurzschluss: apply_ieco_only wird dann gar nicht aufgerufen).
+                isense_only = result.prep in {
+                    _Prep.ISENSE_ONLY_OK, _Prep.ISENSE_ONLY_FAIL}
+                if (isense_only or result.needs_full_state
+                        or not await apply_ieco_only(device)):
                     await device.apply()
                 applied = True
                 break
@@ -827,10 +932,28 @@ async def ensure_ieco(dev_conf: dict, only_if_on: bool) -> bool:
                     # in get_capabilities()/refresh() kommt als DONE_FAIL zurueck
                     # (kein Traceback), sodass ein Geraet den 'all'-Lauf nicht
                     # abbricht.
-                    result = await _validate_and_arm(device, only_if_on, name)
+                    result = await _validate_and_arm(
+                        device, only_if_on, name, ensure_isense)
 
         if not applied:
+            if result.prep is _Prep.ISENSE_ONLY_OK:
+                print(t("dev_isense_attempt_failed", name, last_exc))
+                return True
             print(t("dev_apply_failed", name, last_exc))
+            return False
+
+        if result.prep in {_Prep.ISENSE_ONLY_OK, _Prep.ISENSE_ONLY_FAIL}:
+            # Kein Settle-/Verify-Roundtrip: Issue #5 verlangt ausdruecklich
+            # Best Effort, weil False sowohl "aus" als auch "nicht gemeldet"
+            # bedeuten kann. Der erfolgreich abgesetzte Vollzustandsbefehl ist
+            # hier das Ende der iSense-Arbeit; die Rueckgabe bildet weiterhin
+            # ausschliesslich die bisherige iECO-Modus-Semantik ab.
+            print(t("dev_isense_attempted", name))
+            if result.prep is _Prep.ISENSE_ONLY_OK:
+                print(t("dev_mode_isense_only_ok", name))
+                return True
+            print(t("dev_mode_isense_only_fail", name,
+                    t("mode_names_capable")))
             return False
 
         # Reihenfolge ist hier tragend: ERST schliessen, DANN warten, dann neu
@@ -884,8 +1007,19 @@ async def ensure_ieco(dev_conf: dict, only_if_on: bool) -> bool:
             print(t("dev_verify_inconclusive", name))
             return False
 
-        print(t("dev_status_after", name, device.power_state,
-                _mode_label(device.operational_mode), device.ieco, device.eco))
+        if ensure_isense:
+            isense_active = bool(getattr(device, "follow_me", False))
+            print(t("dev_status_after_isense", name, device.power_state,
+                    _mode_label(device.operational_mode), device.ieco,
+                    isense_active, device.eco))
+            if isense_active:
+                print(t("dev_isense_ok", name))
+            else:
+                print(t("dev_isense_unconfirmed", name))
+        else:
+            print(t("dev_status_after", name, device.power_state,
+                    _mode_label(device.operational_mode), device.ieco,
+                    device.eco))
 
         if not device.ieco:
             print(t("dev_still_disabled", name))
@@ -967,6 +1101,11 @@ async def main() -> None:
         action="store_true",
         help=t("cli_help_only_if_on"),
     )
+    parser.add_argument(
+        "--ensure-isense",
+        action="store_true",
+        help=t("cli_help_ensure_isense"),
+    )
     args = parser.parse_args()
 
     # Discoverability zuerst und OHNE Netzwerk: kein Argument oder das
@@ -1017,7 +1156,16 @@ async def main() -> None:
 
     results = []
     for d in devices:
-        results.append(await ensure_ieco(d, only_if_on=args.only_if_on))
+        # Den neuen Parameter nur bei gesetzter Option weiterreichen. Damit
+        # bleibt der bisherige Aufrufvertrag fuer Einbettungen erhalten, die
+        # ensure_ieco mit einer zweiparametrigen Test-/Adapterfunktion ersetzen;
+        # der Produktions-Default ist ohnehin False.
+        if args.ensure_isense:
+            result = await ensure_ieco(
+                d, only_if_on=args.only_if_on, ensure_isense=True)
+        else:
+            result = await ensure_ieco(d, only_if_on=args.only_if_on)
+        results.append(result)
         # Entzerrung nach JEDEM Geraet (siehe DEVICE_DELAY) - auch nach dem
         # letzten, bewusst.
         await asyncio.sleep(DEVICE_DELAY)

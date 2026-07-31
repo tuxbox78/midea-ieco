@@ -217,6 +217,23 @@ python3 midea_ieco_ensure.py all --only-if-on
 
 Mit `--only-if-on` schaltet das Skript keine Anlage ein. Eine ausgeschaltete Anlage wird nicht angerührt; iECO wird nur gesetzt, wenn eine Anlage gerade läuft und iECO deaktiviert ist. So sind häufige Cron-Ausführungen sicher, ohne eine absichtlich ausgeschaltete Anlage zu starten.
 
+### Zusätzlich iSense (Follow Me) aktiv halten
+
+Dafür gibt es die experimentelle Option `--ensure-isense`:
+
+```bash
+python3 midea_ieco_ensure.py all --only-if-on --ensure-isense
+```
+
+iSense ist der Fernbedienungs-Sensormodus, den `msmart-ng` **Follow Me** nennt. Die gepinnte Bibliothek liest ihn über [`AirConditioner.follow_me`](https://github.com/mill1000/midea-msmart/blob/2026.7.0/msmart/device/AC/device.py) und schreibt ihn als Bit `0x80` im [vollständigen AC-Zustandsbefehl](https://github.com/mill1000/midea-msmart/blob/2026.7.0/msmart/device/AC/command.py). Dafür gibt es weder eine eigene Capability noch einen reinen Property-Befehl.
+
+Das hat zwei praktische Folgen:
+
+- Beim Aktivieren von iSense wird der komplette, unmittelbar zuvor gelesene Gerätezustand mit gesetztem Follow-Me-Bit zurückgesendet. Das Werkzeug ändert weder Zieltemperatur noch Modus oder Lüftereinstellung; eine exakt gleichzeitige Änderung durch eine andere Steuerung kann sich mit diesem Vollzustands-Write dennoch überschneiden.
+- iSense ist **Best Effort**. Manche Geräte melden denselben Wert `false`, wenn iSense ausgeschaltet ist und wenn sie den Zustand gar nicht bereitstellen. Das Werkzeug versucht daher, iSense einzuschalten, macht einen ansonsten erfolgreichen iECO-Lauf aber niemals allein wegen einer fehlenden positiven iSense-Rückmeldung zum Fehler.
+
+Die Option bleibt bewusst freiwillig, bis sie auf mehr Hardware erprobt ist. Meldet iSense bereits aktiv, wird kein zusätzlicher Vollzustands-Write gesendet. In Modi, die iECO nicht tragen können, erhält eine laufende Anlage den iSense-Befehl trotzdem; das bisherige iECO-Exit-Verhalten bleibt unverändert.
+
 ### Token-/Key-Werte auffrischen
 
 Falls ein Gerät `Connection reset`, einen Timeout oder ein Token-/Key-Problem meldet:
@@ -235,8 +252,8 @@ In der Praxis bleiben Geräte-Tokens oft lange gültig. Auffrischen ist sinnvoll
 Falls du nicht die automatische Cron-Einrichtung von `install.sh` genutzt hast, Crontab bearbeiten mit `crontab -e`:
 
 ```cron
-# Alle 20 Minuten: iECO reaktivieren, ohne Geräte einzuschalten
-*/20 * * * * cd /opt/local/midea-ieco && venv/bin/python3 midea_ieco_ensure.py all --only-if-on >> ieco.log 2>&1
+# Alle 20 Minuten: iECO und iSense reaktivieren, ohne Geräte einzuschalten
+*/20 * * * * cd /opt/local/midea-ieco && venv/bin/python3 midea_ieco_ensure.py all --only-if-on --ensure-isense >> ieco.log 2>&1
 
 # Jeden Sonntag um 03:00 Uhr: Geräte-Tokens vorsorglich auffrischen
 0 3 * * 0 cd /opt/local/midea-ieco && venv/bin/python3 midea_refresh_tokens.py --all >> refresh.log 2>&1

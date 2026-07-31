@@ -120,6 +120,7 @@ class FakeDevice:
     """Konfigurierbares Fake-AC-Objekt fuer die Retry-Matrix (#13/#14)."""
 
     def __init__(self, *, online=True, power_state=False, ieco=False,
+                 follow_me=False,
                  supports_ieco=True, apply_raises=None, caps_raises=None,
                  caps_lost=False):
         self.online = online
@@ -134,6 +135,7 @@ class FakeDevice:
         self._answers = online
         self.power_state = power_state
         self.ieco = ieco
+        self.follow_me = follow_me
         self.eco = False
         # COOL als Standard: der Modus, in dem iECO tatsaechlich haelt (am Geraet
         # gemessen). Mit dem frueheren AUTO-Default wuerden diese Tests am
@@ -162,6 +164,9 @@ class FakeDevice:
         #: Damit laesst sich zusichern, dass nie ein power_state=False an eine
         #: als eingeschaltet bekannte Anlage geht - der Kern des Reconnect-Bugs.
         self.applied_power_states = []
+        #: Follow-Me/iSense-Wert jedes Vollzustands-Writes. iSense hat keine
+        #: Property und muss deshalb genau auf diesem Pfad landen.
+        self.applied_follow_me_states = []
         self.caps_calls = 0
         self.refresh_calls = 0
         self.close_calls = 0
@@ -199,6 +204,7 @@ class FakeDevice:
         # SetStateCommand und wirft erst danach (aus der Antwortverarbeitung) -
         # der Schreibvorgang ist dann bereits auf der Leitung.
         self.applied_power_states.append(self.power_state)
+        self.applied_follow_me_states.append(self.follow_me)
         if self._apply_raises is not None:
             raise self._apply_raises
 
@@ -414,6 +420,116 @@ class PropertyOnlyWiringTests(unittest.TestCase):
         self.assertEqual([d1.apply_calls, d2.apply_calls], [0, 0])
 
 
+class IsenseWiringTests(unittest.TestCase):
+    """Issue #5: iSense ist msmart-ngs Follow-Me-Zustandsbit.
+
+    Es besitzt keine Property und erzwingt deshalb einen Vollzustands-Write.
+    Sein Readback bleibt absichtlich Best Effort: False kann ebenso "nicht
+    gemeldet" wie "aus" bedeuten und darf einen erfolgreichen iECO-Lauf nie
+    rot machen.
+    """
+
+    def _run(self, items, *, only_if_on=True, ensure_isense=True,
+             prop_only_result=True):
+        prop_calls = []
+
+        async def _prop_only(device):
+            prop_calls.append(device)
+            return prop_only_result
+
+        connect = _scripted_connect(items)
+        with ExitStack() as es:
+            es.enter_context(mock.patch.object(mie, "connect_and_refresh", connect))
+            es.enter_context(mock.patch.object(mie, "apply_ieco_only", _prop_only))
+            es.enter_context(mock.patch.object(mie.asyncio, "sleep", _anoop))
+            out = es.enter_context(redirect_stdout(io.StringIO()))
+            ok = asyncio.run(mie.ensure_ieco(
+                {"name": "X", "ip": "1", "id": "1"},
+                only_if_on=only_if_on, ensure_isense=ensure_isense))
+        return ok, out.getvalue(), prop_calls
+
+    def test_inactive_isense_uses_full_state_and_sets_follow_me(self):
+        d_action = FakeDevice(power_state=True, ieco=True, follow_me=False)
+
+        ok, out, prop_calls = self._run([d_action])
+
+        self.assertTrue(ok)
+        self.assertEqual(d_action.apply_calls, 1)
+        self.assertEqual(d_action.applied_follow_me_states, [True])
+        self.assertEqual(prop_calls, [])
+        self.assertIn("enable command sent", out)
+
+    def test_false_isense_readback_does_not_fail_the_ieco_run(self):
+        d_action = FakeDevice(power_state=True, ieco=False, follow_me=False)
+        # Bildet sowohl "Befehl nicht angenommen" als auch "nicht gemeldet" ab.
+        d_verify = FakeDevice(power_state=True, ieco=True, follow_me=False)
+
+        ok, out, _ = self._run([d_action, d_verify])
+
+        self.assertTrue(ok)
+        self.assertIn("best effort", out.lower())
+        self.assertNotIn("ERROR", out)
+
+    def test_isense_only_send_failure_does_not_fail_active_ieco(self):
+        # Jeder Retry liest iECO weiterhin aktiv und iSense weiterhin aus. Auch
+        # drei ungefangene Sendefehler duerfen den bereits erreichten iECO-
+        # Sollzustand nicht in einen Gesamtfehler verwandeln.
+        devices = [
+            FakeDevice(power_state=True, ieco=True, follow_me=False,
+                       apply_raises=OSError(f"boom-{n}"))
+            for n in range(3)
+        ]
+
+        ok, out, _ = self._run(devices)
+
+        self.assertTrue(ok)
+        self.assertEqual([d.apply_calls for d in devices], [1, 1, 1])
+        self.assertIn("continuing because iSense is best effort", out)
+
+    def test_active_isense_and_ieco_short_circuit_without_write(self):
+        device = FakeDevice(power_state=True, ieco=True, follow_me=True)
+
+        ok, out, prop_calls = self._run([device])
+
+        self.assertTrue(ok)
+        self.assertEqual(device.apply_calls, 0)
+        self.assertEqual(prop_calls, [])
+        self.assertIn("iECO and iSense active", out)
+
+    def test_active_isense_keeps_the_ieco_property_only_path(self):
+        d_action = FakeDevice(power_state=True, ieco=False, follow_me=True)
+        d_verify = FakeDevice(power_state=True, ieco=True, follow_me=True)
+
+        ok, _, prop_calls = self._run([d_action, d_verify])
+
+        self.assertTrue(ok)
+        self.assertEqual(len(prop_calls), 1)
+        self.assertEqual(d_action.apply_calls, 0)
+
+    def test_isense_is_attempted_even_when_current_mode_cannot_carry_ieco(self):
+        d_action = FakeDevice(power_state=True, ieco=False, follow_me=False)
+        d_action.operational_mode = _OpMode.AUTO
+
+        ok, out, prop_calls = self._run([d_action], only_if_on=True)
+
+        self.assertTrue(ok)
+        self.assertEqual(d_action.apply_calls, 1)
+        self.assertEqual(d_action.applied_follow_me_states, [True])
+        self.assertEqual(prop_calls, [])
+        self.assertIn("enable command sent", out)
+        self.assertIn("not an error", out)
+
+    def test_explicit_unsupported_mode_still_fails_after_isense_attempt(self):
+        d_action = FakeDevice(power_state=True, ieco=False, follow_me=False)
+        d_action.operational_mode = _OpMode.AUTO
+
+        ok, out, _ = self._run([d_action], only_if_on=False)
+
+        self.assertFalse(ok)
+        self.assertEqual(d_action.applied_follow_me_states, [True])
+        self.assertIn("iECO was not switched", out)
+
+
 class EmptyAllTests(unittest.TestCase):
     """C3: 'all' auf leerer devices.json meldet klar Exit 1 statt still 'OK'."""
 
@@ -441,7 +557,7 @@ class EmptyAllTests(unittest.TestCase):
         self.path.write_text('{"devices": [{"name": "X", "ip": "1", "id": "1"}]}',
                              encoding="utf-8")
 
-        async def _ok(dev_conf, only_if_on):
+        async def _ok(dev_conf, only_if_on, ensure_isense=False):
             return True
 
         with mock.patch.object(mie.sys, "argv", ["midea_ieco_ensure.py", "all"]), \
@@ -1028,9 +1144,11 @@ class MalformedEntryDeviceSelectionTests(unittest.TestCase):
 
     def _run(self, argv):
         self.processed = []
+        self.ensure_isense_values = []
 
-        async def _ok(dev_conf, only_if_on):
+        async def _ok(dev_conf, only_if_on, ensure_isense=False):
             self.processed.append(dev_conf)
+            self.ensure_isense_values.append(ensure_isense)
             return True
 
         async def _boom(*a, **k):
@@ -1062,6 +1180,17 @@ class MalformedEntryDeviceSelectionTests(unittest.TestCase):
         code, _ = self._run(["W"])
         self.assertEqual(code, 0)
         self.assertEqual(len(self.processed), 1)
+
+    def test_ensure_isense_flag_is_forwarded_to_every_device(self):
+        self._write({"devices": [
+            {"name": "W", "ip": "1.2.3.4", "id": 1,
+             "token": "t", "key": "k"},
+            {"name": "B", "ip": "1.2.3.5", "id": 2,
+             "token": "t", "key": "k"},
+        ]})
+        code, _ = self._run(["all", "--ensure-isense"])
+        self.assertEqual(code, 0)
+        self.assertEqual(self.ensure_isense_values, [True, True])
 
     def test_all_with_only_nondict_entries_exits_1(self):
         self._write({"devices": ["oops", 123]})
