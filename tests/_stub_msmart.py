@@ -1,9 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Frank Seidel <frank@f-seidel.de>
 # SPDX-License-Identifier: MIT
-"""Test-Hilfsmodul: registriert ein minimales Fake-``msmart``-Paket in
-``sys.modules``, damit die Zielmodule ohne die echte Abhaengigkeit importierbar
-sind. VOR dem Import von ``midea_ieco_ensure`` (Top-Level-Import von msmart)
-bzw. vor einem Aufruf von ``verify_credentials`` importieren.
+"""Test-Hilfsmodul: registriert minimale Fake-``msmart``- und
+``midealocal``-Pakete in ``sys.modules``, damit die Zielmodule ohne die echten
+Abhaengigkeiten importierbar sind und die Verfuegbarkeitspruefungen in
+``midea_refresh_tokens.main()`` passieren. VOR dem Import von
+``midea_ieco_ensure`` (Top-Level-Import von msmart) bzw. vor einem Aufruf von
+``verify_credentials`` importieren.
 
 Die Fake-``AirConditioner``-Klasse ist bewusst minimal: Tests, die konkretes
 Geraeteverhalten brauchen, ersetzen stattdessen ``connect_and_refresh`` bzw.
@@ -48,6 +50,17 @@ class RecordingLAN:
 
 
 def install() -> None:
+    # Minimales Fake-midealocal: midea_refresh_tokens.main() prueft die
+    # Verfuegbarkeit vorab per 'import midealocal' (symmetrisch zur msmart-Pruefung).
+    # Der echte discover laeuft in einem SEPARATEN Unterprozess (_run_discover) und
+    # ist von diesem in-process-Stub unberuehrt; in-process genuegt das leere
+    # Top-Paket, damit die Vorabpruefung passiert. Aermer als die Wirklichkeit (nur
+    # der Import-Name), nie reicher. Eigener Idempotenz-Guard und BEWUSST vor dem
+    # msmart-Guard: so greift die Registrierung unabhaengig davon, ob (echtes)
+    # msmart bereits in sys.modules steht.
+    if "midealocal" not in sys.modules:
+        sys.modules["midealocal"] = types.ModuleType("midealocal")
+
     if "msmart.device.AC.device" in sys.modules:
         return
 

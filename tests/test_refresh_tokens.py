@@ -185,15 +185,24 @@ class MsmartMissingProbeTests(unittest.TestCase):
             self.assertNotIn(marker, combined)
 
 
-def _run_script_without_msmart(testcase, script, argv):
-    """Faehrt eines der Werkzeuge in einem Unterprozess OHNE msmart.
+def _run_script_without_module(testcase, script, argv, *, block, provide=()):
+    """Faehrt eines der Werkzeuge in einem Unterprozess, in dem das Modul 'block'
+    zuverlaessig fehlt, und optional Module aus 'provide' als leeres ModuleType
+    vorgetaeuscht werden.
+
+    Warum vortaeuschen: main() prueft die Kern-Abhaengigkeiten der Reihe nach
+    vorab (msmart, dann midealocal). Um die MIDEALOCAL-Pruefung ueberhaupt zu
+    erreichen, muss die zuvor laufende msmart-Pruefung passieren - dafuer wird
+    msmart als leeres Modul bereitgestellt. Es wird nur fuer die reine
+    Verfuegbarkeitspruefung (import msmart) gebraucht; der Lauf bricht an der
+    midealocal-Pruefung ab, bevor msmart tiefer benutzt wuerde.
 
     Warum nicht einfach die Umgebung nutzen: MsmartMissingProbeTests (hier) und
     OverviewWithoutMsmartTests (test_ensure.py) ueberspringen sich selbst,
-    sobald msmart importierbar ist - auf jedem Entwicklerrechner mit
+    sobald das Modul importierbar ist - auf jedem Entwicklerrechner mit
     installierter Bibliothek sind diese Pfade damit unbewacht, und im CI haengt
-    ihre Ausfuehrung an einer Zufaelligkeit der Umgebung. 'sys.modules[...] =
-    None' laesst 'import msmart' zuverlaessig mit ImportError scheitern, also
+    ihre Ausfuehrung an einer Zufaelligkeit der Umgebung. 'sys.modules[name] =
+    None' laesst 'import name' zuverlaessig mit ImportError scheitern, also
     laeuft der Pfad ueberall.
 
     Die Skripte werden in ein leeres Verzeichnis kopiert: CONFIG_PATH haengt am
@@ -208,16 +217,24 @@ def _run_script_without_msmart(testcase, script, argv):
     for path in sorted(REPO_DIR.glob("*.py")):
         shutil.copy(path, work)
     target = os.path.join(work, script)
+    provide_lines = "".join(
+        f"sys.modules[{m!r}] = types.ModuleType({m!r})\n" for m in provide)
     code = (
-        "import runpy, sys\n"
+        "import runpy, sys, types\n"
         f"sys.path.insert(0, {work!r})\n"
-        "sys.modules['msmart'] = None\n"
+        + provide_lines +
+        f"sys.modules[{block!r}] = None\n"
         f"sys.argv = {argv!r}\n"
         f"runpy.run_path({target!r}, run_name='__main__')\n"
     )
     return subprocess.run([sys.executable, "-c", code], capture_output=True,
                           text=True, cwd=work,
                           env={**os.environ, "MIDEA_IECO_LANG": "en"})
+
+
+def _run_script_without_msmart(testcase, script, argv):
+    """Duenner Wrapper: laesst msmart fehlen (bestehende Aufrufer unveraendert)."""
+    return _run_script_without_module(testcase, script, argv, block="msmart")
 
 
 class RefreshWithoutMsmartTests(unittest.TestCase):
@@ -229,6 +246,28 @@ class RefreshWithoutMsmartTests(unittest.TestCase):
             self, "midea_refresh_tokens.py", ["midea_refresh_tokens.py", "--all"])
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("msmart-ng", result.stderr)
+        combined = result.stdout + result.stderr
+        for template in mrt._MESSAGES["dev_fetching"]:
+            marker = _longest_literal(template)
+            self.assertGreater(len(marker), 10, template)
+            self.assertNotIn(marker, combined)
+
+
+class RefreshWithoutMidealocalTests(unittest.TestCase):
+    """Fehlt midealocal (msmart aber vorhanden), bricht main() klar und frueh ab -
+    mit einer midealocal-spezifischen Meldung, BEVOR ein Discover/Cloud-Kontakt
+    entsteht. Symmetrisch zur msmart-Vorabpruefung. msmart wird als leeres Modul
+    vorgetaeuscht, damit die zuerst laufende msmart-Pruefung passiert und die
+    midealocal-Pruefung ueberhaupt erreicht wird."""
+
+    def test_refresh_exits_1_before_any_cloud_contact(self):
+        result = _run_script_without_module(
+            self, "midea_refresh_tokens.py", ["midea_refresh_tokens.py", "--all"],
+            block="midealocal", provide=("msmart",))
+        self.assertEqual(result.returncode, 1, result.stderr)
+        # "midea-local" ist der pip-Paketname im Installationshinweis der Meldung
+        # (analog zu "msmart-ng" oben); der Import-Name waere "midealocal".
+        self.assertIn("midea-local", result.stderr)
         combined = result.stdout + result.stderr
         for template in mrt._MESSAGES["dev_fetching"]:
             marker = _longest_literal(template)
@@ -459,19 +498,27 @@ class DiscoverInvocationTests(unittest.TestCase):
         self.assertNotIn("192.0.2.77s", message)
         self.assertIn("192.0.2.77", message)
 
-    def test_midealocal_missing_becomes_runtimeerror(self):
+    def test_filenotfound_start_becomes_runtimeerror(self):
+        # subprocess.run wirft FileNotFoundError, wenn der Interpreter-Pfad
+        # (sys.executable) selbst nicht auffindbar ist - NICHT bei fehlendem
+        # midealocal-MODUL (das ergibt returncode != 0 und wird ausserdem in main()
+        # vorab gemeldet). Als OSError-Unterklasse faellt es in den Startfehler-
+        # Zweig und wird als RuntimeError(err_discover_start) gewrappt, nicht als
+        # roher Traceback (update_device faengt nur RuntimeError).
         with mock.patch("midea_refresh_tokens.subprocess.run",
-                        side_effect=FileNotFoundError()):
+                        side_effect=FileNotFoundError("no such interpreter")):
             with self.assertRaises(RuntimeError) as cm:
                 mrt.fetch_candidate_credentials("1.2.3.4")
-        self._assert_message(cm, "err_midealocal_missing")
+        self._assert_message(cm, "err_discover_start")
+        self._assert_rendered(cm, "err_discover_start", "FileNotFoundError",
+                              "no such interpreter")
 
     def test_generic_oserror_becomes_runtimeerror(self):
-        # Ein sonstiger Subprozess-Startfehler (OSError-Unterklasse, aber KEIN
-        # FileNotFoundError) darf nicht als roher Traceback durchschlagen: er wird
-        # als RuntimeError gewrappt (update_device faengt nur RuntimeError).
-        # PermissionError ist eine OSError-Unterklasse - und belegt zugleich, dass
-        # die reihenfolge-sensible FileNotFoundError-Klausel NICHT faelschlich greift.
+        # Ein sonstiger Subprozess-Startfehler (OSError-Unterklasse) darf nicht als
+        # roher Traceback durchschlagen: er wird als RuntimeError gewrappt
+        # (update_device faengt nur RuntimeError). PermissionError ist eine
+        # OSError-Unterklasse und deckt zusammen mit dem FileNotFoundError-Fall oben
+        # denselben Startfehler-Zweig ab.
         with mock.patch("midea_refresh_tokens.subprocess.run",
                         side_effect=PermissionError("exec denied")):
             with self.assertRaises(RuntimeError) as cm:

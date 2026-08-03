@@ -17,6 +17,16 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Because the cloud getToken endpoints are shut down, that loss was permanent. The
   backup is now a **non-losing merge** instead of a blind copy, and the token is also
   restored into the freshly written `devices.json` (see below).
+- **`midea_refresh_tokens.py`: a missing `midealocal` is now reported clearly and
+  early, symmetrically to `msmart`.** `main()` aborted with a clear message when
+  `msmart` was missing but did not check `midealocal`. A `FileNotFoundError` branch in
+  the discover path *claimed* to catch "midealocal not installed" — but that exception
+  only fires when the Python interpreter path itself is unresolvable; a genuinely
+  absent `midealocal` module produces a non-zero exit and landed in the generic
+  `err_discover_exit`. `main()` now verifies `midealocal` up front (like `msmart`); the
+  mislabeled `FileNotFoundError` branch is gone (an interpreter start error is now
+  correctly `err_discover_start`), and the test that had cemented the mislabeling was
+  corrected to test what it actually exercises.
 
 ### Changed
 - **`devices.json.bak` is now a non-destructive union, not a snapshot.** On

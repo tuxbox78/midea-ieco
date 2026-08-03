@@ -345,6 +345,11 @@ _MESSAGES: dict[str, tuple[str, str]] = {
         "Is the venv active? Install it e.g. with: venv/bin/pip install msmart-ng",
         "FEHLER: msmart-ng ist im aktiven Python-Interpreter nicht installiert. "
         "Ist die venv aktiv? Installation z.B. mit: venv/bin/pip install msmart-ng"),
+    "main_midealocal_missing": (
+        "ERROR: midealocal is not installed in the active Python interpreter. "
+        "Is the venv active? Install it e.g. with: venv/bin/pip install midea-local",
+        "FEHLER: midealocal ist im aktiven Python-Interpreter nicht installiert. "
+        "Ist die venv aktiv? Installation z.B. mit: venv/bin/pip install midea-local"),
     "main_skipped_entries": (
         "WARNING: %s unexpected entry/entries in %s skipped (not an object).",
         "WARNUNG: %s unerwartete(r) Eintrag/Eintraege in %s uebersprungen "
@@ -429,11 +434,6 @@ _MESSAGES: dict[str, tuple[str, str]] = {
         "The discover command did not respond within %ss (is the device at %s "
         "reachable?)",
         "discover-Befehl hat nach %ss nicht reagiert (Geraet unter %s erreichbar?)"),
-    "err_midealocal_missing": (
-        "midealocal is not installed in the current Python interpreter (wrong "
-        "venv active?)",
-        "midealocal ist im aktuellen Python-Interpreter nicht installiert "
-        "(falsches venv aktiv?)"),
     "err_discover_start": (
         "The discover command could not be started (%s: %s).",
         "discover-Befehl konnte nicht gestartet werden (%s: %s)."),
@@ -816,8 +816,9 @@ def _run_discover(host: str) -> subprocess.CompletedProcess:
     Fall wieder entfernt.
 
     Wirft RuntimeError bei jedem Ausfuehrungsfehler (Temp-Verzeichnis oder
-    Isolations-Konfig nicht anlegbar, Timeout, midealocal nicht installiert,
-    sonstiger Subprozess-Startfehler)."""
+    Isolations-Konfig nicht anlegbar, Timeout, sonstiger Subprozess-Startfehler
+    wie ein nicht auffindbarer Interpreter). Ein fehlendes midealocal wird bereits
+    in main() vorab gemeldet und erreicht diese Funktion nicht mehr."""
     cmd = [sys.executable, "-m", "midealocal.cli", "discover", "--host", host, "--debug"]
     try:
         tmpdir = tempfile.mkdtemp(prefix="midea-local-discover-")
@@ -833,16 +834,15 @@ def _run_discover(host: str) -> subprocess.CompletedProcess:
                                   timeout=SUBPROCESS_TIMEOUT, cwd=tmpdir)
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(t("err_discover_timeout", SUBPROCESS_TIMEOUT, host)) from exc
-        except FileNotFoundError as exc:
-            # FileNotFoundError ist eine OSError-Unterklasse und MUSS vor dem
-            # generischen 'except OSError' stehen, damit hier die spezifische
-            # Meldung ("midealocal nicht installiert") greift.
-            raise RuntimeError(t("err_midealocal_missing")) from exc
         except OSError as exc:
-            # Jeder sonstige Startfehler des Unterprozesses (z.B. PermissionError)
-            # wird ebenfalls als RuntimeError gewrappt - update_device faengt nur
-            # RuntimeError; ohne dieses Wrapping schluege ein solcher Fehler als
-            # roher Traceback durch und beendete einen ganzen 'all'-Lauf.
+            # Jeder Startfehler des Unterprozesses wird als RuntimeError gewrappt -
+            # update_device faengt nur RuntimeError; ohne dieses Wrapping schluege
+            # ein solcher Fehler als roher Traceback durch und beendete einen ganzen
+            # 'all'-Lauf. Dazu zaehlt FileNotFoundError (der Python-Interpreter
+            # sys.executable selbst nicht auffindbar) ebenso wie z.B. PermissionError.
+            # Ein FEHLENDES midealocal ist hier NICHT der Fall: das ergibt
+            # returncode != 0 (siehe _parse_discover_output) und wird ausserdem
+            # bereits in main() vorab klar gemeldet.
             raise RuntimeError(t("err_discover_start", type(exc).__name__, exc)) from exc
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -874,7 +874,7 @@ def fetch_candidate_credentials(host: str) -> tuple[list[tuple[str, str]], str |
     Kandidaten zurueck, sowie die per UDP-discovery gemeldete Geraete-ID
     (device_id, falls vorhanden).
     Wirft RuntimeError bei einem klaren Ausfuehrungsfehler (Timeout, kein
-    tokenlist-Eintrag in der Ausgabe, midealocal nicht installiert).
+    tokenlist-Eintrag in der Ausgabe, Nicht-Null-Exit des discover-Befehls).
 
     Es gibt genau EINEN Weg (siehe _run_discover): der discover-Aufruf ohne
     Zugangsdaten. Ein frueherer Kommandozeilen-Fallback (Passwort via argv)
@@ -1337,6 +1337,20 @@ def main() -> None:
         import msmart  # noqa: F401  (reine Verfuegbarkeitspruefung)
     except ImportError:
         print(t("main_msmart_missing"), file=sys.stderr)
+        sys.exit(1)
+
+    # Ebenso midealocal: der discover-Aufruf laeuft zwar als Unterprozess
+    # (_run_discover), aber ein fehlendes midealocal soll EINMAL frueh und klar
+    # gemeldet werden - nicht pro Geraet als generischer discover-Exit-Code (dessen
+    # stderr-tail zwar "No module named 'midealocal'" enthaelt, aber unter der
+    # unspezifischen err_discover_exit-Meldung). Symmetrisch zur msmart-Pruefung und
+    # bewusst DANACH: fehlen beide, bleibt die msmart-Meldung die erste, fuehrende
+    # Diagnose (bewusste Reihenfolge-Zusage). Reine Verfuegbarkeitspruefung ueber das
+    # Top-Paket; das konkrete cli-Submodul deckt check_core_imports zur Install-Zeit ab.
+    try:
+        import midealocal  # noqa: F401  (reine Verfuegbarkeitspruefung)
+    except ImportError:
+        print(t("main_midealocal_missing"), file=sys.stderr)
         sys.exit(1)
 
     config = load_config()
