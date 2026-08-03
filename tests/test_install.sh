@@ -262,6 +262,8 @@ extract_py_block() {  # $1=start-regex $2=file
 }
 PYSRC="$(extract_py_block 'DEVICE_ARGS.*PYEOF' "$INSTALL")"
 DWORK="$WORK/dev"; mkdir -p "$DWORK"
+# Der extrahierte Block importiert midea_devices - es muss im cwd des Blocks liegen.
+cp "$REPO/midea_devices.py" "$DWORK/"
 ( cd "$DWORK" && python3 -c "$PYSRC" \
     "Wohn Zimmer" "192.168.0.5" "12345" "Küche" "192.168.0.6" "67890" )
 rc=0; [ "$(mode_of "$DWORK/devices.json")" = "600" ] || rc=1
@@ -922,6 +924,9 @@ setup_onboarding_sandbox() {   # $1 = Name, $2 = Discovery-Ausgabe, $3 = Crontab
     printf '%s' "${2:-}" > "$DISC_FILE"
     mkdir -p "$ONB/venv/bin"
     cp "$INSTALL" "$ONB/install.sh"
+    # midea_devices.py ECHT mitgeben (nicht leer stubben): install.sh importiert es
+    # beim Backup und beim devices.json-Rewrite - der Merge muss real laufen.
+    cp "$REPO/midea_devices.py" "$ONB/midea_devices.py"
     : > "$ONB/midea_ieco_ensure.py"
     : > "$ONB/midea_refresh_tokens.py"
     printf 'msmart-ng==1\n' > "$ONB/requirements.txt"
@@ -951,9 +956,19 @@ case "\$*" in
   *"import midealocal.cli"*) exit 0 ;;
 esac
 if [ "\$*" = "-" ]; then
-    [ -s "$DISC_FILE" ] || exit 1
-    cat "$DISC_FILE"
-    exit 0
+    # 'python3 -' (nur stdin) hat jetzt ZWEI Nutzer: den Discovery-Aufruf UND die
+    # devices.json-Backup-/Merge-Aufrufe des Installers (import midea_devices).
+    # Am stdin-INHALT unterscheiden: nur Discovery wird gestubbt; der Merge muss
+    # ECHT gegen die Sandbox-devices.json laufen (sonst pruefte der Test den Stub).
+    _src="\$(cat)"
+    case "\$_src" in
+      *midealocal.discover*)
+        [ -s "$DISC_FILE" ] || exit 1
+        cat "$DISC_FILE"
+        exit 0 ;;
+    esac
+    printf '%s\n' "\$_src" | "$CRON_REAL_PY" -
+    exit \$?
 fi
 exec "$CRON_REAL_PY" "\$@"
 EOF
@@ -1117,10 +1132,13 @@ assert "$rc" "Crontab nach dem Re-Run byte-identisch"
 
 # --- --reconfigure sichert die alte devices.json -----------------------------
 # Die .bak-Datei ist die einzige Undo-Moeglichkeit, wenn jemand versehentlich neu
-# einrichtet: das Onboarding schreibt Token und Key leer und der Refresh-Lauf
-# scheitert womoeglich. Ohne diese Zusicherung liess sich das 'cp -p' ersatzlos
-# entfernen. Sie enthaelt echte Token, also gehoert sie auf 0600 - 'cp -p' haelt
-# die Rechte der Quelle, die der atomare Write auf 0600 gesetzt hat.
+# einrichtet: das Onboarding koennte Token/Key leer schreiben und der Refresh-Lauf
+# womoeglich scheitern. Da vor diesem ERSTEN --reconfigure noch keine .bak
+# existiert, ist der nicht-verlierende Merge (current VEREINIGT leere .bak) genau
+# die aktuelle devices.json - und weil Backup wie Rewrite dieselbe Serialisierung
+# nutzen (midea_devices.atomic_write_devices), ist die .bak byte-identisch zum Stand
+# vor dem Lauf. Sie enthaelt echte Token, also gehoert sie auf 0600, das der atomare
+# Write setzt.
 rc=0; [ -f "$ONB/devices.json.bak" ] || rc=1
 assert "$rc" "--reconfigure legt devices.json.bak an"
 rc=0; [ "$(cksum < "$ONB/devices.json.bak")" = "$DJ_BEFORE_RECONF" ] || rc=1
@@ -1188,18 +1206,21 @@ run_onboarding --reconfigure   # ONB_INPUT liefert id 12345 -> KEIN Treffer
 rc=0; [ -z "$(_dj_field "$ONB/devices.json" token)" ] || rc=1
 assert "$rc" "abweichende id: kein Falsch-Uebertrag (token bleibt leer)"
 
-# (3) Guard: credential-lose devices.json ueberschreibt keine token-haltige .bak -
+# (3) Merge: eine credential-lose devices.json verarmt die token-haltige .bak
+# NICHT. Frueher ein Skip (Guard-Meldung), jetzt ein nicht-verlierender Merge -
+# der Token bleibt semantisch erhalten. Die .bak wird dabei als Vereinigung NEU
+# geschrieben (json.dump normalisiert die Bytes), daher ein semantischer statt
+# eines byte-Vergleichs; sie traegt danach weiterhin 0600 (atomarer Write).
 setup_onboarding_sandbox onbtok3 ""
 printf '%s\n' '{"devices":[{"name":"Wohnzimmer","ip":"192.168.0.5","port":6444,"id":12345,"token":"SAVEDTOK","key":"SAVEDKEY"}]}' > "$ONB/devices.json.bak"
 chmod 600 "$ONB/devices.json.bak"
-BAK_SUM_GOOD="$(cksum < "$ONB/devices.json.bak")"
 printf '%s\n' '{"devices":[{"name":"Wohnzimmer","ip":"192.168.0.5","port":6444,"id":12345,"token":"","key":""}]}' > "$ONB/devices.json"
 chmod 600 "$ONB/devices.json"
 run_onboarding --reconfigure
-rc=0; [ "$(cksum < "$ONB/devices.json.bak")" = "$BAK_SUM_GOOD" ] || rc=1
-assert "$rc" "leere devices.json ueberschreibt die token-haltige .bak NICHT"
-rc=0; grep -q "Datenverlust-Schutz" "$ONB_OUT" || rc=1
-assert "$rc" "uebersprungene Sicherung wird sichtbar gemeldet"
+rc=0; [ "$(_dj_field "$ONB/devices.json.bak" token)" = "SAVEDTOK" ] || rc=1
+assert "$rc" "leere devices.json verarmt die token-haltige .bak NICHT (Token bleibt)"
+rc=0; [ "$(mode_of "$ONB/devices.json.bak")" = "600" ] || rc=1
+assert "$rc" ".bak traegt nach dem Merge weiterhin 0600"
 
 # (4) End-to-End-Reproduktion der gemeldeten Zwei-Lauf-Sequenz -------------------
 setup_onboarding_sandbox onbtok4 ""
@@ -1279,6 +1300,43 @@ chmod 600 "$ONB/devices.json"
 run_onboarding --reconfigure
 rc=0; [ "$(_dj_field "$ONB/devices.json" port)" = "6444" ] || rc=1
 assert "$rc" "bool-Port (true) faellt auf 6444 zurueck (nicht Port 1)"
+
+# (8) Multi-Device-Teilverlust: ein token-LOSES Geraet neben einem token-haltigen -
+# Regression fuer den gemeldeten Guard-Bug. devices_json_has_secrets war ein
+# any()-Test ueber ALLE Geraete; hat auch nur EINES noch Zugangsdaten (hier A),
+# griff der alte Guard NICHT und ueberschrieb die reichere .bak mit dem aktuellen
+# Teilverlust-Stand (B leer). Der nur in der .bak gehaltene Token von B war damit
+# aus BEIDEN Kopien weg - und da die Cloud-getToken-Endpunkte abgeschaltet sind,
+# unwiederbringlich. Zwei Zusicherungen: (a) die .bak verarmt nie (nicht-
+# destruktiver Merge current + alte .bak); (b) Bs Token wird beim Rewrite aus der
+# .bak in die neue devices.json zurueckgeholt (Preservation aus current UNION .bak).
+_dj_field_by_name() {   # $1=Datei $2=Geraetename $3=Feld -> stdout (leer bei Fehler)
+    python3 -c 'import json,sys
+try:
+    for d in json.load(open(sys.argv[1]))["devices"]:
+        if d.get("name")==sys.argv[2]:
+            print(d.get(sys.argv[3],"")); break
+except Exception:
+    pass' "$1" "$2" "$3" 2>/dev/null
+}
+setup_onboarding_sandbox onbtok10 ""
+# reiche .bak (A und B mit Token) ...
+printf '%s\n' '{"devices":[{"name":"A","ip":"192.168.0.5","port":6444,"id":11111,"token":"ATOK","key":"AKEY"},{"name":"B","ip":"192.168.0.6","port":6444,"id":22222,"token":"BTOK","key":"BKEY"}]}' > "$ONB/devices.json.bak"
+chmod 600 "$ONB/devices.json.bak"
+# ... und eine aktuelle devices.json mit Teilverlust: A hat Token, B ist leer.
+printf '%s\n' '{"devices":[{"name":"A","ip":"192.168.0.5","port":6444,"id":11111,"token":"ATOK","key":"AKEY"},{"name":"B","ip":"192.168.0.6","port":6444,"id":22222,"token":"","key":""}]}' > "$ONB/devices.json"
+chmod 600 "$ONB/devices.json"
+ONB_INPUT=("" "2" "A" "192.168.0.5" "11111" "B" "192.168.0.6" "22222" "n" "j")
+run_onboarding --reconfigure
+rc=0; [ "$ONB_RC" -eq 0 ] || rc=1
+assert "$rc" "Teilverlust: --reconfigure laeuft durch (Exit $ONB_RC)"
+rc=0; [ "$(_dj_field_by_name "$ONB/devices.json.bak" B token)" = "BTOK" ] || rc=1
+assert "$rc" "Teilverlust: Bs Token bleibt in der .bak erhalten (Datenverlust verhindert)"
+rc=0; [ "$(_dj_field_by_name "$ONB/devices.json.bak" A token)" = "ATOK" ] || rc=1
+assert "$rc" "Teilverlust: As Token bleibt in der .bak erhalten"
+rc=0; [ "$(_dj_field_by_name "$ONB/devices.json" B token)" = "BTOK" ] || rc=1
+assert "$rc" "Teilverlust: Bs Token wird aus der .bak in devices.json zurueckgeholt (Auto-Restore)"
+ONB_INPUT=("" "1" "Wohnzimmer" "192.168.0.5" "12345" "n" "j")   # zuruecksetzen fuer Folgetests
 
 # ---------------------------------------------------------------------------
 echo "== Onboarding End-to-End: fremde Cron-Jobs bleiben unangetastet =="

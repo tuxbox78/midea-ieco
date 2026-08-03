@@ -6,6 +6,38 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **`install.sh --reconfigure` no longer loses a device token on *partial* loss.**
+  The overwrite guard only skipped the backup when the *current* `devices.json` held
+  **no** credentials at all (`any(token & key …)`). In a multi-device setup where one
+  unit still had a token (A) and another had lost it (B) — e.g. B was offline during
+  an earlier re-onboarding and dropped out of the discovered list — the guard did not
+  fire, and a later `--reconfigure` overwrote the richer `devices.json.bak` with the
+  B-less state. B's token, held only in the `.bak`, was then gone from both copies.
+  Because the cloud getToken endpoints are shut down, that loss was permanent. The
+  backup is now a **non-losing merge** instead of a blind copy, and the token is also
+  restored into the freshly written `devices.json` (see below).
+
+### Changed
+- **`devices.json.bak` is now a non-destructive union, not a snapshot.** On
+  `--reconfigure` the new `.bak` is the per-device-id merge of the current
+  `devices.json` and the previous `.bak` — for every id the most complete
+  token/key/port wins (synthetic-full principle). The backup can no longer be
+  impoverished by any full or partial loss, and it is written atomically at 0600
+  (previously a non-atomic `cp -p`). The `any()`-based `devices_json_has_secrets`
+  heuristic and its skip message are gone.
+- **Token/key/port preservation on rewrite now reads `current ∪ .bak`.** A device
+  that has become token-less in `devices.json` gets its last-good values back from
+  the `.bak` (auto-restore), instead of being written empty. A carried-over stale
+  value is harmless — every tool verifies token/key before use.
+
+### Added
+- **`midea_devices.py`** — a small, dependency-free (stdlib-only, side-effect-free)
+  helper holding the non-losing merge logic used by both installer call sites, with
+  isolated unit tests in `tests/test_devices.py`. It also hardens port parsing against
+  `OverflowError` (a bare `Infinity` in `devices.json`), which the previous inline
+  installer code did not catch.
+
 ## [0.3.0] - 2026-07-30
 
 This release resolves three field-reported issues (#2, #3, #4) and adds the
