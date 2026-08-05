@@ -6,6 +6,8 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-08-05
+
 ### Fixed
 - **`install.sh --reconfigure` no longer loses a device token on *partial* loss.**
   The overwrite guard only skipped the backup when the *current* `devices.json` held
@@ -1282,7 +1284,8 @@ First public release.
 - The manual cron log-rotation example truncates `refresh.log` as well as
   `ieco.log`, matching the installer-generated job.
 
-[Unreleased]: https://github.com/tuxbox78/midea-ieco/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/tuxbox78/midea-ieco/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/tuxbox78/midea-ieco/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/tuxbox78/midea-ieco/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/tuxbox78/midea-ieco/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/tuxbox78/midea-ieco/releases/tag/v0.1.0
