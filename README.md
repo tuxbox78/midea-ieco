@@ -216,6 +216,18 @@ python3 midea_ieco_ensure.py all --only-if-on
 
 With `--only-if-on`, the script never turns on a unit. A unit that is off is left untouched; iECO is enabled when a unit is on and needs it. This makes frequent cron runs safe without starting an air conditioner that was intentionally switched off.
 
+### Leave a deliberately chosen silent/mute mode alone
+
+Some units (e.g. the Midea PortaSplit) offer an outdoor **silent / "Mute"** mode. On the unit itself, that mode and iECO are mutually exclusive: enabling one drops the other. So if you switch a running unit to silent mode on purpose, the tool would normally re-enable iECO on the next cron run and thereby cancel your silent mode.
+
+To prevent that, the tool leaves iECO **untouched** whenever a *running* unit reports its silent mode as active — it only restores iECO that was lost *unintentionally* (e.g. after a power cycle), never a setting you chose on purpose. A unit that does not report the capability, or that is switched off, is handled exactly as before.
+
+If you would rather force iECO regardless of silent mode, pass `--ignore-out-silent`:
+
+```bash
+python3 midea_ieco_ensure.py all --ignore-out-silent
+```
+
 ### Refresh token/key values
 
 If a device reports `Connection reset`, a timeout, or a token/key problem:

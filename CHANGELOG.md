@@ -47,6 +47,15 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   isolated unit tests in `tests/test_devices.py`. It also hardens port parsing against
   `OverflowError` (a bare `Infinity` in `devices.json`), which the previous inline
   installer code did not catch.
+- **`--ignore-out-silent` and a silent-mode guard (issue #7).** On units where the
+  outdoor silent/"Mute" mode and iECO are mutually exclusive (e.g. the PortaSplit), the
+  tool no longer re-enables iECO while a *running* unit reports its silent mode as
+  active — doing so would cancel a deliberately chosen silent mode on every cron run.
+  The state is read from the unit's own capability (`supports_out_silent`), so a unit
+  that cannot report it is unaffected, and a switched-off unit is still powered on as
+  before. Pass `--ignore-out-silent` to force iECO regardless. The "before" status line
+  now also shows `silent=…`. A contract test pins the msmart `out_silent` attributes and
+  enum members so a future rename fails CI instead of the guard silently going dead.
 
 ## [0.3.0] - 2026-07-30
 

@@ -254,8 +254,10 @@ _MESSAGES: dict[str, tuple[str, str]] = {
         "[%s] ERROR during get_capabilities()/refresh(): %s: %s",
         "[%s] FEHLER bei get_capabilities()/refresh(): %s: %s"),
     "dev_status_before": (
-        "[%s] Status before action: power=%s, mode=%s, ieco=%s, eco=%s",
-        "[%s] Status vor Aktion: power=%s, mode=%s, ieco=%s, eco=%s"),
+        "[%s] Status before action: power=%s, mode=%s, ieco=%s, eco=%s, "
+        "silent=%s",
+        "[%s] Status vor Aktion: power=%s, mode=%s, ieco=%s, eco=%s, "
+        "silent=%s"),
     # Bewusst "no usable answer" statt "did not answer": die Abfrage kann aus
     # zwei Bloecken bestehen, und geht nur der zweite verloren, HAT die Anlage
     # geantwortet - verwertbar ist das Ergebnis trotzdem nicht. Der Text darf
@@ -274,6 +276,11 @@ _MESSAGES: dict[str, tuple[str, str]] = {
         "queries necessary.",
         "[%s] Bereits im gewuenschten Zustand (an, iECO aktiv). Keine weiteren "
         "Abfragen notwendig."),
+    "dev_out_silent_respected": (
+        "[%s] Silent mode is active - leaving iECO untouched "
+        "(use --ignore-out-silent to force it).",
+        "[%s] Silent-Modus ist aktiv - iECO bleibt unangetastet "
+        "(--ignore-out-silent erzwingt es)."),
     "dev_mode_unsupported": (
         "[%s] Operating mode %s does not support iECO (only %s).",
         "[%s] Betriebsmodus %s unterstuetzt kein iECO (nur %s)."),
@@ -342,6 +349,11 @@ _MESSAGES: dict[str, tuple[str, str]] = {
         "already running.",
         "Geraet NICHT einschalten. Nur pruefen und iECO nachziehen, falls es "
         "bereits laeuft."),
+    "cli_help_ignore_out_silent": (
+        "Force iECO even if the unit's silent/mute mode is active "
+        "(otherwise an active silent mode is left untouched).",
+        "iECO auch dann erzwingen, wenn der Silent-/Mute-Modus der Anlage "
+        "aktiv ist (sonst bleibt ein aktiver Silent-Modus unangetastet)."),
     "main_skipped_entries": (
         "WARNING: %s unexpected entry/entries in %s skipped (not an object).",
         "WARNUNG: %s unerwartete(r) Eintrag/Eintraege in %s uebersprungen "
@@ -636,7 +648,8 @@ class _ArmResult(NamedTuple):
 
 
 async def _validate_and_arm(device: "AC", only_if_on: bool,
-                            name: str) -> _ArmResult:
+                            name: str,
+                            ignore_out_silent: bool = False) -> _ArmResult:
     """Prueft ein frisch verbundenes Geraet und schaltet es fuer apply() scharf.
 
     DIESELBE Sequenz laeuft beim Erstversuch UND bei jedem Reconnect im
@@ -705,7 +718,8 @@ async def _validate_and_arm(device: "AC", only_if_on: bool,
         return _ArmResult(_Prep.DONE_FAIL)
 
     print(t("dev_status_before", name, is_on,
-            _mode_label(device.operational_mode), device.ieco, device.eco))
+            _mode_label(device.operational_mode), device.ieco, device.eco,
+            device.out_silent))
 
     if not device.supports_ieco:
         # Die Anlage HAT geantwortet und iECO nicht gemeldet - erst jetzt
@@ -719,6 +733,21 @@ async def _validate_and_arm(device: "AC", only_if_on: bool,
     # als Problem melden.
     if is_on and device.ieco:
         print(t("dev_already_desired", name))
+        return _ArmResult(_Prep.DONE_OK)
+
+    # Silent-Modus (outdoor "Mute") und iECO schliessen sich am Geraet
+    # gegenseitig aus: iECO zu setzen wuerfe einen bewusst gewaehlten
+    # Silent-Modus ab. Laeuft die Anlage und meldet sie Silent aktiv,
+    # respektieren wir das und lassen iECO in Ruhe - das Werkzeug heilt einen
+    # UNBEABSICHTIGTEN iECO-Verlust (z.B. nach einem Power-Cycle), es
+    # ueberschreibt keine bewusste Wahl. supports_out_silent trennt "wirklich
+    # aus" von "meldet es nicht" (kein Fehlalarm auf Anlagen ohne die
+    # Faehigkeit); der is_on-Term laesst eine ausgeschaltete Anlage bei
+    # ausdruecklichem Aufruf normal einschalten. --ignore-out-silent erzwingt
+    # iECO trotzdem.
+    if (is_on and not ignore_out_silent
+            and device.supports_out_silent and device.out_silent):
+        print(t("dev_out_silent_respected", name))
         return _ArmResult(_Prep.DONE_OK)
 
     # Modus-Guard: iECO ist an den Betriebsmodus gebunden (siehe
@@ -754,7 +783,8 @@ async def _validate_and_arm(device: "AC", only_if_on: bool,
     return _ArmResult(_Prep.READY, needs_power_on=was_off)
 
 
-async def ensure_ieco(dev_conf: dict, only_if_on: bool) -> bool:
+async def ensure_ieco(dev_conf: dict, only_if_on: bool,
+                      ignore_out_silent: bool = False) -> bool:
     name = dev_conf["name"]
 
     try:
@@ -764,7 +794,8 @@ async def ensure_ieco(dev_conf: dict, only_if_on: bool) -> bool:
         return False
 
     try:
-        result = await _validate_and_arm(device, only_if_on, name)
+        result = await _validate_and_arm(device, only_if_on, name,
+                                         ignore_out_silent)
         applied = False
         last_exc = None
         for attempt in range(1, ACTION_RETRIES + 1):
@@ -827,7 +858,8 @@ async def ensure_ieco(dev_conf: dict, only_if_on: bool) -> bool:
                     # in get_capabilities()/refresh() kommt als DONE_FAIL zurueck
                     # (kein Traceback), sodass ein Geraet den 'all'-Lauf nicht
                     # abbricht.
-                    result = await _validate_and_arm(device, only_if_on, name)
+                    result = await _validate_and_arm(device, only_if_on, name,
+                                         ignore_out_silent)
 
         if not applied:
             print(t("dev_apply_failed", name, last_exc))
@@ -967,6 +999,11 @@ async def main() -> None:
         action="store_true",
         help=t("cli_help_only_if_on"),
     )
+    parser.add_argument(
+        "--ignore-out-silent",
+        action="store_true",
+        help=t("cli_help_ignore_out_silent"),
+    )
     args = parser.parse_args()
 
     # Discoverability zuerst und OHNE Netzwerk: kein Argument oder das
@@ -1017,7 +1054,9 @@ async def main() -> None:
 
     results = []
     for d in devices:
-        results.append(await ensure_ieco(d, only_if_on=args.only_if_on))
+        results.append(await ensure_ieco(
+            d, only_if_on=args.only_if_on,
+            ignore_out_silent=args.ignore_out_silent))
         # Entzerrung nach JEDEM Geraet (siehe DEVICE_DELAY) - auch nach dem
         # letzten, bewusst.
         await asyncio.sleep(DEVICE_DELAY)

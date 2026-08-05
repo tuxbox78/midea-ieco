@@ -217,6 +217,18 @@ python3 midea_ieco_ensure.py all --only-if-on
 
 Mit `--only-if-on` schaltet das Skript keine Anlage ein. Eine ausgeschaltete Anlage wird nicht angerührt; iECO wird nur gesetzt, wenn eine Anlage gerade läuft und iECO deaktiviert ist. So sind häufige Cron-Ausführungen sicher, ohne eine absichtlich ausgeschaltete Anlage zu starten.
 
+### Einen bewusst gewählten Silent-/Mute-Modus in Ruhe lassen
+
+Manche Anlagen (z. B. die Midea PortaSplit) bieten einen outdoor **Silent-/„Mute"**-Modus. Am Gerät selbst schließen sich dieser Modus und iECO gegenseitig aus: Das Einschalten des einen wirft das andere ab. Schaltest du eine laufende Anlage also bewusst in den Silent-Modus, würde das Werkzeug beim nächsten Cron-Lauf normalerweise iECO wieder aktivieren und damit deinen Silent-Modus beenden.
+
+Um das zu verhindern, lässt das Werkzeug iECO **unangetastet**, sobald eine *laufende* Anlage ihren Silent-Modus als aktiv meldet — es stellt nur *unbeabsichtigt* verlorenes iECO wieder her (z. B. nach einem Aus-/Einschalten), niemals eine bewusst gewählte Einstellung. Eine Anlage, die die Fähigkeit nicht meldet oder ausgeschaltet ist, wird genau wie bisher behandelt.
+
+Wenn du iECO stattdessen unabhängig vom Silent-Modus erzwingen möchtest, nutze `--ignore-out-silent`:
+
+```bash
+python3 midea_ieco_ensure.py all --ignore-out-silent
+```
+
 ### Token-/Key-Werte auffrischen
 
 Falls ein Gerät `Connection reset`, einen Timeout oder ein Token-/Key-Problem meldet:

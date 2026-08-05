@@ -120,7 +120,8 @@ class FakeDevice:
     """Konfigurierbares Fake-AC-Objekt fuer die Retry-Matrix (#13/#14)."""
 
     def __init__(self, *, online=True, power_state=False, ieco=False,
-                 supports_ieco=True, apply_raises=None, caps_raises=None,
+                 supports_ieco=True, out_silent=False, supports_out_silent=True,
+                 apply_raises=None, caps_raises=None,
                  caps_lost=False):
         self.online = online
         # msmart setzt _online PRO Kommando-Batch neu (_send_commands_get_
@@ -135,6 +136,11 @@ class FakeDevice:
         self.power_state = power_state
         self.ieco = ieco
         self.eco = False
+        # Silent-/Mute-Modus (outdoor). Default supports=True + aus, damit der
+        # out_silent-Guard in bestehenden Tests inaktiv bleibt (is_on and ...
+        # and out_silent == False) und ihre Pfade bit-identisch durchlaufen.
+        self.out_silent = out_silent
+        self.supports_out_silent = supports_out_silent
         # COOL als Standard: der Modus, in dem iECO tatsaechlich haelt (am Geraet
         # gemessen). Mit dem frueheren AUTO-Default wuerden diese Tests am
         # Modus-Guard haengenbleiben, statt den Pfad zu pruefen, um den es ihnen
@@ -441,7 +447,7 @@ class EmptyAllTests(unittest.TestCase):
         self.path.write_text('{"devices": [{"name": "X", "ip": "1", "id": "1"}]}',
                              encoding="utf-8")
 
-        async def _ok(dev_conf, only_if_on):
+        async def _ok(dev_conf, only_if_on, ignore_out_silent=False):
             return True
 
         with mock.patch.object(mie.sys, "argv", ["midea_ieco_ensure.py", "all"]), \
@@ -461,11 +467,14 @@ class CapabilityGatedDevice:
     Genau das liess die Verifikation frueher faelschlich fehlschlagen."""
 
     def __init__(self, *, power_state=True, true_ieco=True, supports_ieco=True,
+                 out_silent=False, supports_out_silent=True,
                  prime_fails=False):
         self.online = True
         self.power_state = power_state
         self.operational_mode = _OpMode.COOL
         self.eco = False
+        self.out_silent = out_silent
+        self.supports_out_silent = supports_out_silent
         self.supports_ieco = supports_ieco
         self._true_ieco = true_ieco
         self._caps = False
@@ -1029,7 +1038,7 @@ class MalformedEntryDeviceSelectionTests(unittest.TestCase):
     def _run(self, argv):
         self.processed = []
 
-        async def _ok(dev_conf, only_if_on):
+        async def _ok(dev_conf, only_if_on, ignore_out_silent=False):
             self.processed.append(dev_conf)
             return True
 
@@ -1661,7 +1670,7 @@ class RenderedOverviewAndConfigLineTests(unittest.TestCase):
             "kaputt", 42, {"name": "W", "ip": "1.2.3.4", "id": 1}]}),
             encoding="utf-8")
 
-        async def _ensure(dev_conf, only_if_on):
+        async def _ensure(dev_conf, only_if_on, ignore_out_silent=False):
             return True
 
         out = io.StringIO()
@@ -1854,7 +1863,7 @@ class ExitCodeTests(unittest.TestCase):
     def _run(self, argv, devices, ensure_result=True):
         self.path.write_text(json.dumps({"devices": devices}), encoding="utf-8")
 
-        async def _ensure(dev_conf, only_if_on):
+        async def _ensure(dev_conf, only_if_on, ignore_out_silent=False):
             return ensure_result
 
         with ExitStack() as es:
@@ -1884,7 +1893,7 @@ class ExitCodeTests(unittest.TestCase):
                                "token": "t", "key": "k"}]
         results = iter([True, False])
 
-        async def _ensure(dev_conf, only_if_on):
+        async def _ensure(dev_conf, only_if_on, ignore_out_silent=False):
             return next(results)
 
         self.path.write_text(json.dumps({"devices": devices}), encoding="utf-8")
@@ -2069,7 +2078,7 @@ class DevicePacingOrderTests(unittest.TestCase):
             for i in range(count)]}), encoding="utf-8")
         events = []
 
-        async def _ensure(dev_conf, only_if_on):
+        async def _ensure(dev_conf, only_if_on, ignore_out_silent=False):
             events.append(f"geraet {dev_conf['name']}")
             return True
 
@@ -2119,7 +2128,7 @@ class OnlyIfOnWiringTests(unittest.TestCase):
     def _seen_flag(self, argv):
         seen = []
 
-        async def _capture(dev_conf, only_if_on):
+        async def _capture(dev_conf, only_if_on, ignore_out_silent=False):
             seen.append(only_if_on)
             return True
 
@@ -2304,6 +2313,156 @@ class CatalogTests(unittest.TestCase):
     def test_unknown_key_raises(self):
         with self.assertRaises(KeyError):
             mie.t("does_not_exist")
+
+
+class OutSilentGuardTests(unittest.TestCase):
+    """Der out_silent-Guard: laeuft die Anlage und meldet sie den outdoor
+    Silent-/Mute-Modus aktiv, bleibt iECO unangetastet - ausser mit
+    --ignore-out-silent. Silent und iECO schliessen sich am Geraet gegenseitig
+    aus (Issue #7); das Werkzeug soll einen bewusst gewaehlten Silent-Modus
+    nicht bei jedem Cron-Lauf ueberschreiben."""
+
+    def _run(self, items, only_if_on=False, ignore_out_silent=False):
+        connect = _scripted_connect(items)
+        with ExitStack() as es:
+            es.enter_context(mock.patch.object(mie, "connect_and_refresh", connect))
+            es.enter_context(mock.patch.object(mie.asyncio, "sleep", _anoop))
+            out = es.enter_context(redirect_stdout(io.StringIO()))
+            ok = asyncio.run(mie.ensure_ieco(
+                {"name": "W", "ip": "1", "id": "1"},
+                only_if_on=only_if_on, ignore_out_silent=ignore_out_silent))
+        return ok, out.getvalue()
+
+    def test_active_silent_leaves_ieco_untouched(self):
+        # Kern von #7: laufende Anlage, Silent aktiv -> KEIN apply(), Erfolg,
+        # klare Meldung. Nur d_action noetig: der Guard bricht vor jedem
+        # Schreiben ab, es folgt keine Verifikationsrunde.
+        d = FakeDevice(power_state=True, ieco=False, out_silent=True)
+        ok, out = self._run([d])
+        self.assertTrue(ok)
+        self.assertEqual(d.apply_calls, 0, "Anlage wurde trotz Silent angetastet")
+        self.assertIn("Silent mode is active", out)
+
+    def test_ignore_flag_forces_ieco_despite_silent(self):
+        # --ignore-out-silent umgeht den Guard: iECO wird erzwungen (apply lief).
+        d_action = FakeDevice(power_state=True, ieco=False, out_silent=True)
+        d_verify = FakeDevice(power_state=True, ieco=True)
+        ok, out = self._run([d_action, d_verify], ignore_out_silent=True)
+        self.assertTrue(ok)
+        self.assertEqual(d_action.apply_calls, 1, "iECO wurde nicht erzwungen")
+        self.assertNotIn("Silent mode is active", out)
+
+    def test_silent_without_capability_does_not_skip(self):
+        # supports_out_silent=False: 'meldet Silent' ist bedeutungslos, der Guard
+        # darf NICHT greifen (kein Fehlalarm auf Anlagen ohne die Faehigkeit).
+        d_action = FakeDevice(power_state=True, ieco=False,
+                              out_silent=True, supports_out_silent=False)
+        d_verify = FakeDevice(power_state=True, ieco=True)
+        ok, out = self._run([d_action, d_verify])
+        self.assertTrue(ok)
+        self.assertEqual(d_action.apply_calls, 1)
+        self.assertNotIn("Silent mode is active", out)
+
+    def test_silent_off_is_unchanged_behaviour(self):
+        # out_silent=False: bit-identisch zu frueher - iECO wird gesetzt.
+        d_action = FakeDevice(power_state=True, ieco=False, out_silent=False)
+        d_verify = FakeDevice(power_state=True, ieco=True)
+        ok, _ = self._run([d_action, d_verify])
+        self.assertTrue(ok)
+        self.assertEqual(d_action.apply_calls, 1)
+
+    def test_off_unit_reporting_silent_is_still_powered_on(self):
+        # is_on-Term (D5): eine AUS-Anlage bei ausdruecklichem Aufruf wird normal
+        # eingeschaltet, statt an einem (bedeutungslosen) Alt-Silent zu haengen.
+        d_action = FakeDevice(power_state=False, ieco=False, out_silent=True)
+        d_verify = FakeDevice(power_state=True, ieco=True)
+        ok, out = self._run([d_action, d_verify])
+        self.assertTrue(ok)
+        self.assertEqual(d_action.apply_calls, 1)
+        self.assertNotIn("Silent mode is active", out)
+
+    def test_only_if_on_with_active_silent_is_not_an_error(self):
+        # Ein bewusst gewaehlter Silent-Modus ist kein Fehlerzustand: DONE_OK,
+        # kein Fehler-Exit - konsistent zum Modus-Guard unter --only-if-on.
+        d = FakeDevice(power_state=True, ieco=False, out_silent=True)
+        ok, out = self._run([d], only_if_on=True)
+        self.assertTrue(ok)
+        self.assertEqual(d.apply_calls, 0)
+        self.assertIn("Silent mode is active", out)
+
+    def test_guard_also_fires_on_the_reconcile_path(self):
+        # Die Weiche muss auch nach einem fehlgeschlagenen apply + Reconnect
+        # greifen (zweite _validate_and_arm-Aufrufstelle): d1 wird scharf
+        # geschaltet, sein apply() scheitert; der Reconnect liefert eine Anlage
+        # mit aktivem Silent -> Guard -> DONE_OK, ohne d2 anzutasten.
+        d1 = FakeDevice(power_state=True, ieco=False, out_silent=False,
+                        apply_raises=TimeoutError("apply weg"))
+        d2 = FakeDevice(power_state=True, ieco=False, out_silent=True)
+        ok, out = self._run([d1, d2])
+        self.assertTrue(ok)
+        self.assertEqual(d2.apply_calls, 0)
+        self.assertIn("Silent mode is active", out)
+
+    def test_status_before_line_appends_silent_field(self):
+        # S3: silent=... steht am ENDE der Vor-Statuszeile (nach eco), mit dem
+        # gemessenen Wert. Nur die Vor-Zeile - die Nach-Zeile bleibt ohne silent
+        # (dort ist out_silent nicht gepollt), abgesichert durch die
+        # STATUS_TAIL-Tests in RenderedMessageOrderTests.
+        d = FakeDevice(power_state=True, ieco=False, out_silent=True)
+        _, out = self._run([d])
+        self.assertIn("ieco=False, eco=False, silent=True", out)
+
+
+class IgnoreOutSilentWiringTests(unittest.TestCase):
+    """--ignore-out-silent muss von main() bis ensure_ieco DURCHGEREICHT werden.
+
+    Dieselbe Nagel-fest-Gefahr wie bei --only-if-on (siehe OnlyIfOnWiringTests):
+    man koennte in main() 'ignore_out_silent=args.ignore_out_silent' auf 'False'
+    festverdrahten, ohne dass ein Test der Guard-Logik rot wuerde - und das
+    Opt-out liefe dann ins Leere."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "devices.json"
+        orig = mie.CONFIG_PATH
+        mie.CONFIG_PATH = self.path
+        self.addCleanup(lambda: setattr(mie, "CONFIG_PATH", orig))
+        self.path.write_text(json.dumps({"devices": [
+            {"name": "W", "ip": "1.2.3.4", "id": 1, "token": "t", "key": "k"}]}),
+            encoding="utf-8")
+
+    def _seen_flag(self, argv):
+        seen = []
+
+        async def _capture(dev_conf, only_if_on, ignore_out_silent=False):
+            seen.append(ignore_out_silent)
+            return True
+
+        async def _boom(*a, **k):
+            raise AssertionError("connect_and_refresh darf hier nicht laufen")
+
+        with ExitStack() as es:
+            es.enter_context(mock.patch.object(mie, "ensure_ieco", _capture))
+            es.enter_context(mock.patch.object(mie, "connect_and_refresh", _boom))
+            es.enter_context(mock.patch.object(mie.asyncio, "sleep", _anoop))
+            es.enter_context(mock.patch.object(mie.sys, "argv", ["midea-ieco"] + argv))
+            es.enter_context(redirect_stdout(io.StringIO()))
+            with self.assertRaises(SystemExit):
+                asyncio.run(mie.main())
+        self.assertEqual(len(seen), 1, "ensure_ieco wurde nicht genau einmal gerufen")
+        return seen[0]
+
+    def test_flag_reaches_ensure_ieco_for_a_named_device(self):
+        self.assertIs(self._seen_flag(["W", "--ignore-out-silent"]), True)
+
+    def test_flag_reaches_ensure_ieco_for_all(self):
+        self.assertIs(self._seen_flag(["all", "--ignore-out-silent"]), True)
+
+    def test_absent_flag_arrives_as_false(self):
+        # Gegenprobe: ohne das Flag darf NICHT versehentlich True ankommen -
+        # sonst wuerde der Silent-Schutz nie greifen.
+        self.assertIs(self._seen_flag(["W"]), False)
 
 
 if __name__ == "__main__":

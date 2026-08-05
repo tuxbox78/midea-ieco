@@ -450,6 +450,20 @@ print(json.dumps({
     "prime_sets_supports_ieco": bool(getattr(primed, "supports_ieco", False)),
     "prime_adds_ieco_property": bool(
         PropertyId.IECO in getattr(primed, "_supported_properties", set())),
+    # Issue #7: der out_silent-Guard in _validate_and_arm haengt an DIESEN
+    # Instance-Attributen (device.supports_out_silent / device.out_silent) -
+    # genau wie der iECO-Vertrag oben supports_ieco auf einem frischen Objekt
+    # liest. hasattr/getattr statt Direktreferenz, damit ein kuenftiges
+    # Umbenennen einen sauberen Test-Fehlschlag ergibt statt die Sonde
+    # abstuerzen zu lassen. Die Population (get_capabilities()+refresh() traegt
+    # OUT_SILENT in _supported_properties) ist am Geraet belegt und laesst sich
+    # ohne Verbindung nicht pruefen - deshalb hier nur die NAMEN.
+    "out_silent_attr_readable": hasattr(device, "out_silent"),
+    "supports_out_silent_attr_readable": hasattr(device, "supports_out_silent"),
+    "out_silent_property_id_exists":
+        getattr(PropertyId, "OUT_SILENT", None) is not None,
+    "out_silent_capability_exists":
+        getattr(caps_cls, "OUT_SILENT", None) is not None,
 }))
 """
 # Dass hier die ECHTE Bibliothek geprueft wird und keine Attrappe, belegt der
@@ -595,6 +609,33 @@ class MsmartContractTests(unittest.TestCase):
             "_supported_properties ein - refresh() pollt iECO damit nicht "
             "mehr, und die Verifikation meldet wieder faelschlich 'weiterhin "
             "deaktiviert'.")
+
+    # -- Vertrag der out_silent-Weiche (Issue #7) -----------------------------
+    # Der Guard in midea_ieco_ensure._validate_and_arm liest device.out_silent
+    # und device.supports_out_silent (Instance) und stuetzt sich darauf, dass
+    # get_capabilities()+refresh() PropertyId.OUT_SILENT poll-bar machen. Wird
+    # eines dieser Symbole umbenannt, muss das HIER auffallen, nicht erst an der
+    # echten Anlage - dieselbe Rolle wie der iECO-Vertrag darueber.
+
+    def test_the_out_silent_instance_attributes_still_exist(self):
+        self.assertTrue(
+            self.probe["out_silent_attr_readable"],
+            "device.out_silent ist verschwunden - der out_silent-Guard in "
+            "_validate_and_arm laese damit ins Leere.")
+        self.assertTrue(
+            self.probe["supports_out_silent_attr_readable"],
+            "device.supports_out_silent ist verschwunden - das Capability-Gate "
+            "des out_silent-Guards greift damit nicht mehr.")
+
+    def test_the_out_silent_enum_members_still_exist(self):
+        self.assertTrue(
+            self.probe["out_silent_property_id_exists"],
+            "PropertyId.OUT_SILENT ist verschwunden - out_silent wird dann bei "
+            "get_capabilities()+refresh() nicht mehr gepollt.")
+        self.assertTrue(
+            self.probe["out_silent_capability_exists"],
+            "AirConditioner.Capability.OUT_SILENT ist verschwunden - "
+            "supports_out_silent kann die Faehigkeit nicht mehr melden.")
 
 
 class ToolsBootstrapTests(unittest.TestCase):
